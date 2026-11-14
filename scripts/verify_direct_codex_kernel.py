@@ -21,6 +21,7 @@ IFS= read -r editable
 IFS= read -r caller
 IFS= read -r peer
 printf one > "$TMPDIR/started"
+printf home-write > "$HOME/home-write"
 IFS= read -r original < source.txt || :
 [ "$original" = original ] || exit 10
 [ -d "$CODEX_HOME" ] || exit 11
@@ -38,6 +39,9 @@ try_write() {
 }
 try_write "$caller/source.txt"
 try_write "$peer"
+if [ -e "$HOME/../.direct-codex-invocation-claimed" ]; then
+    try_write "$HOME/../.direct-codex-invocation-claimed"
+fi
 if [ "$editable" != true ]; then
     try_write source.txt
     try_write .git/config
@@ -75,12 +79,17 @@ def main() -> None:
         tempfile.tempdir = str(root)
         try:
             for case, editable in (("success", False), ("success", True), ("failure", True), ("timeout", True)):
+                auth_root = root / f"auth-{case}-{editable}"
+                home = auth_root / "home"
+                (home / ".codex").mkdir(parents=True, mode=0o700)
+                auth_root.chmod(0o700)
+                home.chmod(0o700)
                 request = DirectCodexRequest(caller, "\n".join((case, "true" if editable else "false", str(caller), str(peer), "")), "controlled-fixture", editable, 0.5 if case == "timeout" else 20)
                 if case == "success":
-                    result = run_direct_codex(request, executable=executable, provider_environment={})
+                    result = run_direct_codex(request, executable=executable, provider_environment={}, prepared_home=home)
                     observed = json.loads(result.stdout)
                     assert observed["fixture"] == "completed", observed
-                    assert observed["denied"] == (2 if editable else 4), observed
+                    assert observed["denied"] == (3 if editable else 5), observed
                     assert observed["private_runtime"] == "one", observed
                     assert result.evidence.filesystem_enforcement is EvidenceStatus.ESTABLISHED
                     assert result.evidence.violation_observation is EvidenceStatus.ESTABLISHED
@@ -88,11 +97,13 @@ def main() -> None:
                     assert result.evidence.direct_process_completion is EvidenceStatus.ESTABLISHED
                     assert result.evidence.writer_completion is EvidenceStatus.UNKNOWN
                     assert result.source_head == initial
+                    assert (home / "home-write").read_text() == "home-write"
+                    assert (auth_root / ".direct-codex-invocation-claimed").read_text() == ""
                     assert (Path(result.workspace) / "source.txt").read_text() == ("private edit" if editable else "original")
                     results.append({"case": case, "editable": editable, "denied_writes": observed["denied"], "direct_complete": True, "descendant_termination": "unproven"})
                 else:
                     try:
-                        run_direct_codex(request, executable=executable, provider_environment={})
+                        run_direct_codex(request, executable=executable, provider_environment={}, prepared_home=home)
                     except DirectCodexError as exc:
                         expected = "timed-out" if case == "timeout" else "failed"
                         assert f"supervised invocation failed: {expected};" in str(exc), str(exc)

@@ -50,3 +50,20 @@ creation. It checks source SHA identity, no-edit write denials, editable private
 writes with caller/peer protection, direct failure and finite timeout. It fails
 if prerequisites are unavailable; it does not install or relax security settings.
 This is not real-provider or release acceptance evidence.
+
+## Explicit single-use login HOME
+
+An operator may explicitly select `--prepared-home` after a separately approved
+login into a new private HOME. No ambient HOME is discovered or copied. Its parent,
+HOME and `.codex` must be non-symlink private directories owned by the current UID,
+and HOME must be separate from the caller repository. Environment credential
+forwarding and a prepared HOME cannot be selected together.
+
+The entry places an exclusive single-use claim beside HOME, outside delegated
+runtime write roots. Once claimed, it keeps the claim and authentication HOME after every subsequent
+outcome, including failure before provider start; it never removes the claim or retries.
+Authentication storage and renewal writes are permitted only inside that selected
+private HOME. This does not provide session continuation or authorize credential
+access, authentication changes, deployment or unrestricted execution. Exact model,
+mode and runtime scope still require the operator's applicable approval. This
+private one-shot path does not change production worker selection or its dashboard.

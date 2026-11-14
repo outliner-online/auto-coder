@@ -12,6 +12,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,7 +104,32 @@ def check_runtime() -> None:
         raise DirectCodexError("a Docker control socket must not be exposed")
 
 
-def run_direct_codex(request: DirectCodexRequest, *, executable: Path, provider_environment: Mapping[str, str]) -> DirectCodexResult:
+def claim_prepared_home(home: Path, repository: Path) -> Path:
+    """Explicit, single-use private login HOME; never discover or copy credentials.
+
+    The sibling claim is outside delegated writable runtime roots. Keep it after
+    every outcome: direct-child completion does not prove no descendants remain.
+    Only an operator prepares this HOME and authorizes its authentication use.
+    """
+    home = home.absolute()
+    if home.resolve(strict=True) != home or home.parent.resolve(strict=True) != home.parent:
+        raise DirectCodexError("prepared HOME must not use symlinks")
+    for directory in (home.parent, home, home / ".codex"):
+        metadata = directory.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+            raise DirectCodexError("prepared HOME and its parent/CODEX_HOME must be private owned directories")
+    if home == repository or home in repository.parents or repository in home.parents:
+        raise DirectCodexError("prepared HOME must be separate from the caller repository")
+    claim = home.parent / ".direct-codex-invocation-claimed"
+    try:
+        descriptor = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise DirectCodexError("prepared HOME already claimed; do not reuse or retry") from exc
+    os.close(descriptor)
+    return home
+
+
+def run_direct_codex(request: DirectCodexRequest, *, executable: Path, provider_environment: Mapping[str, str], prepared_home: Path | None = None) -> DirectCodexResult:
     """Run in a fresh private root; preserve it as an unvalidated result artifact.
 
     No continuation, GitHub action, deployment, caller writeback, or automatic
@@ -123,12 +149,17 @@ def run_direct_codex(request: DirectCodexRequest, *, executable: Path, provider_
     # does not alter mounts or add privileges.
     parent = Path(tempfile.mkdtemp(prefix="auto-coder-direct-"))
     home = parent / "home"
-    (home / ".codex").mkdir(parents=True)
+    if prepared_home is None:
+        (home / ".codex").mkdir(parents=True)
     temporary = parent / "tmp"
     temporary.mkdir()
     started = False
     binding = None
     try:
+        if prepared_home is not None:
+            if provider_environment:
+                raise DirectCodexError("select prepared HOME or environment credentials, not both")
+            home = claim_prepared_home(prepared_home, repository)
         environment = private_environment(home, temporary, provider_environment)
         # No writeback: edit permission belongs only to the invocation boundary.
         # The private-worktree context itself is deliberately read-only to caller.
@@ -178,12 +209,13 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--prompt-file", type=Path, required=True)
     parser.add_argument("--credential-env", choices=("OPENAI_API_KEY", "CODEX_API_KEY"), action="append", default=[])
+    parser.add_argument("--prepared-home", type=Path, help="Explicit single-use private HOME prepared by an approved login; never ambient HOME")
     args = parser.parse_args()
     request = DirectCodexRequest(args.repository, args.prompt_file.read_text(), args.model, args.editable, args.timeout)
     # Environment forwarding is explicit and narrowly named. No login state is
     # discovered, read, copied, or modified by this entry.
     provider = selected_credentials(args.credential_env, os.environ)
-    result = run_direct_codex(request, executable=args.executable, provider_environment=provider)
+    result = run_direct_codex(request, executable=args.executable, provider_environment=provider, prepared_home=args.prepared_home)
     print(
         json.dumps(
             {
