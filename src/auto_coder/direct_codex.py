@@ -50,6 +50,27 @@ class DirectCodexResult:
     runtime: str
 
 
+def result_document(result: DirectCodexResult) -> dict[str, str]:
+    """Return the operator receipt without upgrading boundary evidence.
+
+    Direct-process completion and descendant settlement are deliberately
+    separate facts.  In particular, an authorized Codex result must not turn
+    the unknown writer state into a claim that every descendant terminated.
+    """
+    return {
+        "invocation_id": result.invocation_id,
+        "source_head": result.source_head,
+        "source_checkpoint": result.source_checkpoint,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "workspace": result.workspace,
+        "runtime": result.runtime,
+        "direct_child_completion": result.evidence.direct_process_completion.value,
+        "descendant_termination": result.evidence.writer_completion.value,
+        "publication": "not_performed",
+    }
+
+
 def codex_arguments(request: DirectCodexRequest) -> tuple[str, ...]:
     if not request.prompt.strip() or not request.model.strip() or not math.isfinite(request.timeout_seconds) or request.timeout_seconds <= 0:
         raise DirectCodexError("prompt, model and positive timeout are required")
@@ -216,21 +237,7 @@ def main() -> None:
     # discovered, read, copied, or modified by this entry.
     provider = selected_credentials(args.credential_env, os.environ)
     result = run_direct_codex(request, executable=args.executable, provider_environment=provider, prepared_home=args.prepared_home)
-    print(
-        json.dumps(
-            {
-                "invocation_id": result.invocation_id,
-                "source_head": result.source_head,
-                "source_checkpoint": result.source_checkpoint,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "workspace": result.workspace,
-                "runtime": result.runtime,
-                "descendant_termination": "unproven",
-                "publication": "not_performed",
-            }
-        )
-    )
+    print(json.dumps(result_document(result)))
 
 
 if __name__ == "__main__":

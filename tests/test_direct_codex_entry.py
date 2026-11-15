@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
-from src.auto_coder.direct_codex import DirectCodexError, DirectCodexRequest, claim_prepared_home, codex_arguments, private_environment, run_direct_codex, selected_credentials
+from src.auto_coder.direct_codex import DirectCodexError, DirectCodexRequest, DirectCodexResult, claim_prepared_home, codex_arguments, private_environment, result_document, run_direct_codex, selected_credentials
 from src.auto_coder.invocation_process_supervisor import InvocationOutcome, SupervisedInvocationResult, WriterState
-from src.auto_coder.local_execution_boundary import EvidenceStatus
+from src.auto_coder.local_execution_boundary import BackendOutcome, EvidenceStatus, LocalBoundaryEvidence
 
 pytestmark = pytest.mark.usefixtures("_use_real_commands")
 
@@ -30,6 +30,31 @@ def test_invalid_request_refused(tmp_path, bad):
 def test_fixed_arguments_have_no_caller_arbitrary_flags(tmp_path):
     args = codex_arguments(request(tmp_path))
     assert args == ("--sandbox", "danger-full-access", "--ask-for-approval", "never", "-c", 'approvals_reviewer="user"', "exec", "--model", "test-model", "-")
+
+
+def test_operator_receipt_separates_direct_child_from_descendants(tmp_path):
+    evidence = LocalBoundaryEvidence(
+        boundary_id="boundary",
+        turn_id="turn",
+        invocation_id="invocation",
+        backend_type="codex",
+        workspace=tmp_path / "workspace",
+        editable=False,
+        provider_session_id=None,
+        backend_outcome=BackendOutcome.SUCCEEDED,
+        filesystem_enforcement=EvidenceStatus.ESTABLISHED,
+        publication_enforcement=EvidenceStatus.UNKNOWN,
+        writer_completion=EvidenceStatus.UNKNOWN,
+        violation_observation=EvidenceStatus.ESTABLISHED,
+        policy_violation=False,
+        failure=None,
+        direct_process_completion=EvidenceStatus.ESTABLISHED,
+    )
+    receipt = result_document(DirectCodexResult("invocation", "head", "checkpoint", "stdout", "stderr", evidence, "/workspace", "/runtime"))
+
+    assert receipt["direct_child_completion"] == "established"
+    assert receipt["descendant_termination"] == "unknown"
+    assert receipt["publication"] == "not_performed"
 
 
 def test_private_environment_does_not_inherit_ambient_config(tmp_path, monkeypatch):

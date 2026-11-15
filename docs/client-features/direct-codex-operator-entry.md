@@ -27,7 +27,9 @@ not a validated immutable artifact. It performs no caller writeback, git
 commit/push, GitHub update, or deployment. Inspection/capture, verification of
 captured bytes, caller-checkpoint checking and safe transfer remain separate
 controller work. It deliberately has no session continuation or root reuse.
-Descendant termination is reported as unproven. Attempted execution retains
+The JSON receipt reports `direct_child_completion` from the supervisor evidence
+and reports `descendant_termination` independently as `unknown`; it never treats
+the former as proof of the latter. Attempted execution retains
 runtime/result state, including on failure, for explicit operator disposal.
 This can consume disk space and is not a claim of automatic cleanup completion.
 
