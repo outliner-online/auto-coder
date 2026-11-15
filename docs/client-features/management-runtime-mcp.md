@@ -97,6 +97,13 @@ The normal OAuth resource authentication still yields HTTP **401** for invalid
 credentials, **403** for missing original scope/current permission, and **503**
 when the grant authority is unavailable *before any MCP tool executes*.
 
+Runtime MCP component regressions use the same controlled OAuth clock for grant
+issuance and the MCP transport's independent access-token expiry check. Real
+worker and transport wait deadlines keep their ordinary clocks. The regression
+advances wall time beyond the fixture token's 30-second lifetime while OAuth time
+is fixed, then advances OAuth time and requires HTTP 401 for the expired token.
+Production clocks, token lifetimes and authentication behavior are unchanged.
+
 ## What is authoritative
 
 The signed bridge query binds one fresh nonce to the actual UDS producer's

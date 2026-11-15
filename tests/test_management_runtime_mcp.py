@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from starlette.testclient import TestClient
@@ -141,7 +142,7 @@ class FixedWorkerBoundary:
 
 
 @pytest.fixture
-def runtime_boundary(real_boundary, tmp_path):
+def runtime_boundary(real_boundary, tmp_path, monkeypatch: pytest.MonkeyPatch):
     base, _base_grants, identity, signed, _uids, state = real_boundary
     origin = base.oauth.canonical_issuer
     clients = (
@@ -153,6 +154,9 @@ def runtime_boundary(real_boundary, tmp_path):
     policy.write_text("profile: beta\ntargets:\n  beta-worker:\n    channel: beta\n    repositories: [fixture/beta]\n  release-worker:\n    channel: release\n    repositories: [fixture/release]\n", encoding="utf-8")
     settings = ManagementSettings(tmp_path, oauth, port=base.port, operating_policy_path=policy, operation_state_root=tmp_path / "operations")
     grants = OAuthGrantService(oauth, identity, clock=lambda: state["now"])
+    # MCP also checks AccessToken.expires_at. Keep its OAuth clock aligned with
+    # the grant fixture without changing real worker/transport wait deadlines.
+    monkeypatch.setattr("mcp.server.auth.middleware.bearer_auth.time", SimpleNamespace(time=lambda: grants.clock()))
     beta, release = FixedWorkerBoundary("beta"), FixedWorkerBoundary("release")
     return settings, grants, signed, policy, beta, release
 
@@ -181,6 +185,27 @@ def _request(beta: FixedWorkerBoundary, *, key: str = "key-1", target_id: str = 
         "expected_process_run_id": beta.run,
         "expected_deployment_generation": beta.deployment,
     }
+
+
+def test_runtime_oauth_clock_preserves_lifetime_and_rejects_expiry(runtime_boundary, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real elapsed time must not expire a token issued on the fixture clock."""
+    settings, grants, signed, _policy, _beta, _release = runtime_boundary
+    with TestClient(_application(runtime_boundary), base_url=settings.oauth.canonical_issuer) as client:
+        token = _issue(client, settings, signed, "alice", "alice-client", READ_SCOPE)["access_token"]
+        grant = grants.authenticate_access(token, settings.oauth.resource, (READ_SCOPE,))
+        assert grant.expires_at - grants.clock() == settings.oauth.access_lifetime == 30
+        monkeypatch.setattr(time, "time", lambda: grant.expires_at + 60)
+        assert grants.authenticate_access(token, settings.oauth.resource, (READ_SCOPE,)).grant_id == grant.grant_id
+        arguments = {"target_id": "unknown-worker", "pr_number": 17}
+        assert _call(client, token, "auto_coder_pr_diagnostics", arguments)["status"] == "DENIED"
+        monkeypatch.setattr(grants, "clock", lambda: grant.expires_at - 1)
+        assert _call(client, token, "auto_coder_pr_diagnostics", arguments)["status"] == "DENIED"
+        monkeypatch.setattr(grants, "clock", lambda: grant.expires_at + 1)
+        expired = _mcp(client, token, "tools/call", 3, {"name": "auto_coder_pr_diagnostics", "arguments": arguments})
+        assert expired.status_code == 401
+        assert expired.json() == {"error": "invalid_token"}
+        assert 'error="invalid_token"' in expired.headers["www-authenticate"]
+        assert expired.headers["cache-control"] == "no-store"
 
 
 def test_real_oauth_http_tool_scopes_policy_and_idempotent_journal(runtime_boundary) -> None:
