@@ -48,3 +48,21 @@ than accepting AiderClient's caught ImportError as evidence of availability.
 Production Python 3.12 interpreter selection and numerical versions remain
 unchanged. This dependency repair changes no production trace schema or
 processing behavior, so no dashboard observability update is required.
+
+The advisory workflow also installs a real Python 3.12 interpreter before
+selecting Python 3.14 for the application and pytest host. Worker and management
+staging integration fixtures select that separate production interpreter;
+they still execute the real installers and all original verification checks.
+The installer passes its configured interpreter explicitly to both uv venv and
+uv sync, so an inherited advisory `UV_PYTHON=3.14` cannot replace the required
+3.12 fixture runtime. Candidate bytecode is compiled with the candidate
+interpreter so cache-tampering verification remains meaningful across host
+Python versions. Missing production Python is a test failure, not a skip.
+
+Chromium is cached under the runner's temporary directory, outside the source
+checkout, so later native fixture builds still verify a clean exact revision.
+The complete advisory selection retains coverage context validation using the
+observer's context-capable tracing engine and explicit SQLite connection
+closure at native bootstrap-store boundaries. Publisher policy unit tests
+exercise both Python 3.12 acceptance and Python 3.14 rejection: a successful
+advisory run does not grant Python 3.14 production publication authority.

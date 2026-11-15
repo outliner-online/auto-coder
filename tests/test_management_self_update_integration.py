@@ -55,13 +55,16 @@ from auto_coder.tested_source_refs import TestedSourceRecord as SourceRecord
 from auto_coder.tested_source_refs import serialize_record, tag_name
 from auto_coder.util.gh_cache import GitHubGitDataClient
 from tests.fixtures.ci_timing import installer_span, recorder
+from tests.support.production_runtime import production_python
 
 pytestmark = [pytest.mark.supervisor_integration, pytest.mark.usefixtures("_use_real_commands", "_use_real_sleep")]
+
 
 REPOSITORY = "kitamura-tetsuo/auto-coder"
 INSTANCE = "self-update-integration"
 PROJECT = "self-update-production-boundary"
 SCOPES = (READ_SCOPE, DEPLOY_SCOPE)
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # This source is installed and hashed with every fixture revision. SDK endpoint
@@ -277,7 +280,7 @@ def _snapshot_source(root: Path, revision: str) -> str:
         # CI locks the checked-out project. This new disposable project first
         # needs its own lock; installed staging still uses production --frozen.
         lock_environment = {name: value for name, value in os.environ.items() if name != "UV_LOCKED"}
-        _run([uv, "lock", "--python", sys.executable], root, env=lock_environment)
+        _run([uv, "lock", "--python", str(production_python())], root, env=lock_environment)
     (source / "fixture_revision.json").write_text(json.dumps({"revision": revision}), encoding="utf-8")
     _run(["git", "add", "."], root)
     _run(["git", "commit", "-qm", revision], root)
@@ -480,7 +483,7 @@ def management_system(tmp_path: Path, _use_real_commands: None, _use_real_sleep:
                 "operation_state_root": str(root / "operations"),
                 "bootstrap_config_path": str(bootstrap_path),
                 "self_update_source_repository": str(source),
-                "self_update_python_executable": sys.executable,
+                "self_update_python_executable": str(production_python()),
                 "self_update_uv_executable": str(uv),
                 "self_update_uv_version": uv_version,
             }
@@ -494,7 +497,7 @@ def management_system(tmp_path: Path, _use_real_commands: None, _use_real_sleep:
     with timing.span("management.source_lock_preparation", target_role="candidate"):
         candidate_sha = _snapshot_source(source, "candidate")
     _test_source(services, candidate_sha, 12)
-    stager = ManagementVersionStager(ManagementRuntimeConfig(INSTANCE, REPOSITORY, source, root / "versions", Path(sys.executable), uv, uv_version, management_config=config_path, source_authority=publisher, protected_roots=(state, root / "operations", root / "supervisor")))
+    stager = ManagementVersionStager(ManagementRuntimeConfig(INSTANCE, REPOSITORY, source, root / "versions", production_python(), uv, uv_version, management_config=config_path, source_authority=publisher, protected_roots=(state, root / "operations", root / "supervisor")))
     install = stager._preparer._install
     active_install: dict[str, str] = {"role": "unavailable", "source": "unavailable"}
 
@@ -526,14 +529,15 @@ def management_system(tmp_path: Path, _use_real_commands: None, _use_real_sleep:
         from auto_coder.management.bootstrap_supervisor import RuntimeSpec
 
         executable = root / "bootstrap-python"
-        shutil.copy2(Path(sys.executable).resolve(), executable)
-        package_path = Path(current.environment_path) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        shutil.copy2(production_python().resolve(), executable)
+        package_path = Path(_run([current.interpreter_path, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]))
+        production_home = _run([str(production_python()), "-I", "-c", "import sys; print(sys.base_prefix)"])
         initial = RuntimeSpec(
             "bootstrap",
             "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest(),
             executable,
             ("-m", "auto_coder.cli", "management", "serve", "--config", str(config_path)),
-            (("PATH", os.defpath), ("PYTHONPATH", str(package_path)), ("PYTHONHOME", sys.base_prefix), ("PYTHONDONTWRITEBYTECODE", "1")),
+            (("PATH", os.defpath), ("PYTHONPATH", str(package_path)), ("PYTHONHOME", production_home), ("PYTHONDONTWRITEBYTECODE", "1")),
             root / "drain-bootstrap.json",
         )
         if profile in {"bootstrap", "bootstrap_reserved_path", "recovery_plain", "restart_clean"}:

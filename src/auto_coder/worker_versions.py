@@ -254,7 +254,7 @@ class WorkerVersionPreparer:
         self._run([str(self.config.uv_executable), "venv", "--python", str(self.config.python_executable), "--no-project", str(environment)])
         env = self._safe_environment()
         env["VIRTUAL_ENV"] = str(environment)
-        self._run([str(self.config.uv_executable), "sync", "--frozen", "--no-editable", "--project", str(checkout), "--active"], env=env)
+        self._run([str(self.config.uv_executable), "sync", "--frozen", "--no-editable", "--python", str(self.config.python_executable), "--project", str(checkout), "--active"], env=env)
         # Embed through the installed artifact, not through the manager checkout.
         env["AUTO_CODER_SOURCE_REVISION"] = self._run(["git", "-C", str(checkout), "rev-parse", "HEAD"], output=True).strip()
         self._run([str(environment / "bin" / "python"), "-m", "auto_coder.build_provenance", "embed"], env=env)

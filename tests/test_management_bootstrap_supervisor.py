@@ -10,12 +10,13 @@ import sys
 import threading
 import time
 import urllib.request
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from auto_coder.management.bootstrap_store import ChildPhase, ChildRecord
+from auto_coder.management.bootstrap_store import BootstrapStore, ChildPhase, ChildRecord
 from auto_coder.management.bootstrap_supervisor import BootstrapConfig, ManagementBootstrapSupervisor, Observation, ResultStatus, RuntimeSpec
 
 CHILD = b"""#!/usr/bin/python3
@@ -1028,3 +1029,22 @@ def test_confirmed_candidate_exit_before_start_token_restores_once(tmp_path: Pat
         assert supervisor.start_selected("candidate-start", "c", "candidate").record == restored.record
     finally:
         _stop_process(restored.record.pid)
+
+
+def test_native_supervisor_ledger_connection_is_closed_before_original_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = BootstrapStore(tmp_path / "state", "manager")
+    connections = []
+    connect = store._connect
+
+    def retain_connection():
+        connection = connect()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(store, "_connect", retain_connection)
+    store.publish_supervisor("incarnation", os.getpid(), "start-token")
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connections[0].execute("SELECT 1")
+    with closing(sqlite3.connect(store.path.as_uri() + "?mode=ro&immutable=1", uri=True)) as reader:
+        assert reader.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone() == ("1",)

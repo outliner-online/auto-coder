@@ -200,3 +200,10 @@ acceptance. Full #2824 acceptance additionally requires the actual complete
 current containment verifier, issuer, OS descriptor transfer, consumer receipt
 and durable epoch boundaries. Component provenance tests do not substitute for
 that integrated acceptance.
+
+Supervisor child-ledger operations explicitly close their SQLite connections
+after the existing transaction context completes, including on exceptions.
+Native original-store capture therefore observes checkpointed durable schema
+and contents without relying on interpreter-specific garbage collection to
+close a WAL connection. The original-store and lineage identity comparisons
+remain exact; no receipt schema, trace emission or dashboard projection changes.

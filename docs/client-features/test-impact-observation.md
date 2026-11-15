@@ -130,3 +130,10 @@ sample). These are single local observations, not a controlled benchmark or
 full-suite/hosted-runner estimate. End-to-end overhead can be larger due to
 coverage context recording, postprocessing and artifact upload. Neither
 mandatory CI execution nor its timing is changed by this opt-in workflow.
+
+The observation runner explicitly selects coverage.py's `ctrace` measurement
+core for pytest-cov's dynamic phase contexts. Python 3.14's default `sysmon`
+core does not support those contexts, so using it would lose setup/call/teardown
+provenance even while native tests pass. Context completeness validation and
+all fail-closed normalization rules remain unchanged. This tooling change does
+not alter production trace emissions or dashboard projections.

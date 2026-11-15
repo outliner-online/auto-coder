@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from auto_coder.worker_versions import PreparationFailure, PrepareIntent, WorkerVersionConfig, WorkerVersionError, WorkerVersionPreparer
+from tests.support.production_runtime import production_python
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,14 +76,14 @@ version = {attr = "auto_coder_build_backend.get_build_version"}
     _command(["git", "init", "-q"], repo)
     _command(["git", "config", "user.email", "worker-version-test@example.invalid"], repo)
     _command(["git", "config", "user.name", "Worker Version Test"], repo)
-    _command([str(uv), "lock", "--python", sys.executable], repo)
+    _command([str(uv), "lock", "--python", str(production_python())], repo)
     sha = _commit(repo, "fixture revision")
     uv_version = _command([str(uv), "--version"]).removeprefix("uv ")
     return repo, sha, uv, uv_version
 
 
 def _prepare_in_process(repo: str, root: str, uv: str, uv_version: str, sha: str, attempt: str) -> tuple[str, bool, str]:
-    config = WorkerVersionConfig(Path(repo), Path(root), Path(sys.executable), Path(uv), uv_version)
+    config = WorkerVersionConfig(Path(repo), Path(root), production_python(), Path(uv), uv_version)
     prepared = WorkerVersionPreparer(config).prepare(PrepareIntent(sha, attempt))
     return prepared.receipt.installed_runtime_id, prepared.reused, prepared.receipt.interpreter_path
 
@@ -103,13 +104,14 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def test_real_uv_install_provenance_reconstruction_wrong_source_and_running_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands: None) -> None:
+    monkeypatch.setenv("UV_PYTHON", "3.14")
     repo, sha, uv, uv_version = _create_production_fixture(tmp_path)
     root = tmp_path / "versions"
     unavailable_docker_socket = tmp_path / "no-docker-runtime" / "docker.sock"
     monkeypatch.setenv("DOCKER_HOST", f"unix://{unavailable_docker_socket}")
     assert not unavailable_docker_socket.exists()
     sentinel = tmp_path / "previous-worker"
-    _command([str(uv), "venv", "--python", sys.executable, "--no-project", str(sentinel)])
+    _command([str(uv), "venv", "--python", str(production_python()), "--no-project", str(sentinel)])
     sentinel_process = subprocess.Popen(
         [str(sentinel / "bin" / "python"), "-c", "import os,time; print(os.getpid(), flush=True); time.sleep(120)"],
         stdout=subprocess.PIPE,
@@ -118,12 +120,13 @@ def test_real_uv_install_provenance_reconstruction_wrong_source_and_running_sent
     assert sentinel_process.stdout is not None
     assert int(sentinel_process.stdout.readline()) == sentinel_process.pid
     sentinel_python = (sentinel / "bin" / "python").lstat()
-    config = WorkerVersionConfig(repo, root, Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, root, production_python(), uv, uv_version)
     try:
         prepared = WorkerVersionPreparer(config).prepare(PrepareIntent(sha, "real-install"))
         receipt = prepared.receipt
         interpreter = Path(receipt.interpreter_path)
         assert interpreter == Path(receipt.environment_path) / "bin" / "python"
+        assert _command([str(interpreter), "-I", "-c", "import sys; print(sys.version_info[:2])"]) == "(3, 12)"
         assert _command([str(interpreter), "-c", "import sys; print(sys.prefix)"]) == receipt.environment_path
         observation = json.loads(_command([str(interpreter), "-m", "auto_coder.build_provenance"]))
         assert observation["source_revision"]["value"] == sha
@@ -192,7 +195,7 @@ def test_preinstall_lock_filesystem_failure_is_typed_and_preserves_prior_environ
     previous.mkdir()
     marker = previous / "running-worker-marker"
     marker.write_text("unchanged")
-    config = WorkerVersionConfig(repo, root, Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, root, production_python(), uv, uv_version)
 
     with pytest.raises(WorkerVersionError) as caught:
         WorkerVersionPreparer(config).prepare(PrepareIntent(sha, "must-not-start"))
@@ -213,7 +216,7 @@ def test_retained_revisions_symlink_is_rejected_before_external_writes(tmp_path:
     marker = external / "marker"
     marker.write_text("unchanged")
     (root / "revisions").symlink_to(external, target_is_directory=True)
-    config = WorkerVersionConfig(repo, root, Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, root, production_python(), uv, uv_version)
 
     with pytest.raises(WorkerVersionError) as caught:
         WorkerVersionPreparer(config).prepare(PrepareIntent(sha, "must-not-escape"))
@@ -228,7 +231,7 @@ def test_failing_installed_entrypoint_prevents_ready_publication(tmp_path: Path,
     repo, _sha, uv, uv_version = _create_production_fixture(tmp_path)
     (repo / "src" / "auto_coder" / "cli.py").write_text("def main():\n    raise SystemExit(19)\n")
     sha = _commit(repo, "failing installed entrypoint")
-    config = WorkerVersionConfig(repo, tmp_path / "failed-entrypoint", Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, tmp_path / "failed-entrypoint", production_python(), uv, uv_version)
 
     with pytest.raises(WorkerVersionError) as caught:
         WorkerVersionPreparer(config).prepare(PrepareIntent(sha, "entrypoint-fails"))
@@ -250,7 +253,7 @@ def test_public_prepare_classifies_real_os_space_failure_without_starting_instal
         original_mkdir(path, *arguments, **keywords)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Path, "mkdir", no_space)
-    config = WorkerVersionConfig(repo, root, Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, root, production_python(), uv, uv_version)
 
     with pytest.raises(WorkerVersionError) as caught:
         WorkerVersionPreparer(config).prepare(PrepareIntent(sha, "no-space"))
@@ -275,7 +278,7 @@ def test_actual_uv_locked_download_network_failure_is_typed_and_never_ready(tmp_
         port = server.server_address[1]
         pyproject = repo / "pyproject.toml"
         pyproject.write_text(pyproject.read_text().replace("dependencies = []", f'dependencies = ["fixture-dependency @ http://127.0.0.1:{port}/{wheel.name}"]'))
-        _command([str(uv), "lock", "--no-cache", "--python", sys.executable], repo)
+        _command([str(uv), "lock", "--no-cache", "--python", str(production_python())], repo)
         sha = _commit(repo, "locked network dependency")
     finally:
         server.shutdown()
@@ -283,7 +286,7 @@ def test_actual_uv_locked_download_network_failure_is_typed_and_never_ready(tmp_
         thread.join(timeout=5)
 
     monkeypatch.setenv("UV_NO_CACHE", "1")
-    config = WorkerVersionConfig(repo, tmp_path / "network-versions", Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, tmp_path / "network-versions", production_python(), uv, uv_version)
     with pytest.raises(WorkerVersionError) as caught:
         WorkerVersionPreparer(config).prepare(PrepareIntent(sha, "network-down"))
 
@@ -299,7 +302,7 @@ def test_actual_preparer_crash_retains_partial_attempt_and_reconstruction_uses_d
 import sys, time
 from pathlib import Path
 from auto_coder.worker_versions import PrepareIntent, WorkerVersionConfig, WorkerVersionPreparer
-config = WorkerVersionConfig(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.executable), Path(sys.argv[3]), sys.argv[4])
+config = WorkerVersionConfig(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[7]), Path(sys.argv[3]), sys.argv[4])
 class HeldPreparer(WorkerVersionPreparer):
     def _run(self, arguments, **kwargs):
         result = super()._run(arguments, **kwargs)
@@ -315,7 +318,7 @@ class HeldPreparer(WorkerVersionPreparer):
         return result
 HeldPreparer(config).prepare(PrepareIntent(sys.argv[5], "crashed-process"))
 """
-    process = subprocess.Popen([sys.executable, "-c", script, str(repo), str(root), str(uv), uv_version, sha, str(barrier)], start_new_session=True)
+    process = subprocess.Popen([sys.executable, "-c", script, str(repo), str(root), str(uv), uv_version, sha, str(barrier), str(production_python())], start_new_session=True)
     deadline = time.monotonic() + 30
     partial_venv: Path | None = None
     try:
@@ -335,7 +338,7 @@ HeldPreparer(config).prepare(PrepareIntent(sys.argv[5], "crashed-process"))
     assert partial_venv is not None
     assert not list(root.glob("revisions/*/crashed-process/READY.json"))
 
-    config = WorkerVersionConfig(repo, root, Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, root, production_python(), uv, uv_version)
     prepared = WorkerVersionPreparer(config).prepare(PrepareIntent(sha, "reconstructed-process"))
 
     assert prepared.receipt.attempt_id == "reconstructed-process"
@@ -346,7 +349,7 @@ HeldPreparer(config).prepare(PrepareIntent(sys.argv[5], "crashed-process"))
 
 def test_partial_attempt_frozen_lock_failure_and_cross_runtime_receipt_are_rejected(tmp_path: Path, _use_real_commands: None) -> None:
     repo, sha, uv, uv_version = _create_production_fixture(tmp_path)
-    config = WorkerVersionConfig(repo, tmp_path / "versions-a", Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, tmp_path / "versions-a", production_python(), uv, uv_version)
     lock_bytes = subprocess.run(["git", "show", f"{sha}:uv.lock"], cwd=repo, check=True, capture_output=True).stdout
     lock_hash = hashlib.sha256(lock_bytes).hexdigest()
     key = hashlib.sha256(f"{sha}\0{lock_hash}\0python-3.12".encode()).hexdigest()
@@ -422,7 +425,7 @@ def test_partial_attempt_frozen_lock_failure_and_cross_runtime_receipt_are_rejec
 
 def test_ready_readback_rejects_checkout_provenance_module(tmp_path: Path, _use_real_commands: None) -> None:
     repo, sha, uv, uv_version = _create_production_fixture(tmp_path)
-    config = WorkerVersionConfig(repo, tmp_path / "versions", Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, tmp_path / "versions", production_python(), uv, uv_version)
     preparer = WorkerVersionPreparer(config)
     receipt = preparer.prepare(PrepareIntent(sha, "origin-check")).receipt
     interpreter = Path(receipt.interpreter_path)
@@ -450,7 +453,7 @@ def test_ready_readback_rejects_checkout_provenance_module(tmp_path: Path, _use_
 
 def test_ready_origin_probe_and_provenance_use_different_import_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands: None) -> None:
     repo, sha, uv, uv_version = _create_production_fixture(tmp_path)
-    config = WorkerVersionConfig(repo, tmp_path / "versions", Path(sys.executable), uv, uv_version)
+    config = WorkerVersionConfig(repo, tmp_path / "versions", production_python(), uv, uv_version)
     preparer = WorkerVersionPreparer(config)
     receipt = preparer.prepare(PrepareIntent(sha, "cwd-origin")).receipt
     ready = next(config.version_root.glob("revisions/*/cwd-origin/READY.json"))
