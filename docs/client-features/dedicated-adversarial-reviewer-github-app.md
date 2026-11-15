@@ -108,3 +108,18 @@ adversarial validation. Review roots moved by later commits are verified using
 their original coordinates and original reviewed commit. Unconfirmed recovery
 remains merge-blocking and is reported as a processing failure with its reason;
 it does not consume another reviewer invocation.
+
+### Safe PR publication failure diagnostics
+
+A failed ordinary PR verdict logs a structured `reviewer_publication` diagnostic
+with the last publication stage, exception/cause type names, HTTP status when
+available, and an allowlisted endpoint class. Status 403 is recorded as
+`forbidden`, without assuming whether permissions or a rate limit caused it.
+Exception messages, response bodies, credentials, headers, raw URLs and query
+strings are excluded. The existing unsuccessful result and review safety gates
+remain unchanged; diagnostics do not retry a request, change credentials, fall
+back to the user identity, or establish provider acceptance. The dashboard trace
+schema is unchanged: this adds safe details to an existing publication failure
+log rather than a new processing origin, admission decision, or effect.
+
+Regression: `bash scripts/test.sh tests/test_github_app_reviewer.py`.
