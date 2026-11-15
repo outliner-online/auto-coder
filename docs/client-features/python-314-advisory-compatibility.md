@@ -32,3 +32,19 @@ permission and does not alter any required Python 3.12 workflow, Docker
 base image, production worker, release selection or branch-protection rule.
 Green advisory evidence alone is not approval to migrate the production
 baseline. See `immutable-ci-uv-setup.md` for the shared immutable-lock gate.
+
+The committed graph preserves Aider 0.86.2's NumPy 1.26.4 and SciPy 1.15.3
+on Python below 3.14. On Python 3.14 and later, uv dependency overrides use
+Aider upstream's `numpy>=2.3,<2.5` and `scipy>=1.16.1,<1.18` ranges
+([upstream requirements](https://github.com/Aider-AI/aider/blob/main/requirements.txt)).
+The released Aider metadata still pins numerical releases without Python 3.14
+wheels, so merely installing OpenBLAS would leave unsupported NumPy source
+builds. These overrides retain both dependencies and lock their compatible
+wheels; the compatibility workflow still admits the unchanged committed lock.
+`audioop-lts` is installed on Python 3.13 and later because Aider's pydub
+import requires the removed standard-library `audioop` module. Real backend
+import and PageRank regression tests ensure these dependencies execute, rather
+than accepting AiderClient's caught ImportError as evidence of availability.
+Production Python 3.12 interpreter selection and numerical versions remain
+unchanged. This dependency repair changes no production trace schema or
+processing behavior, so no dashboard observability update is required.
