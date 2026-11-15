@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 120
     env:
       UV_PYTHON: "3.14"
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/python314-playwright
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/auto-coder-python314-playwright-${{ github.run_id }}-${{ github.run_attempt }}
       AUTO_CODER_REQUIRE_BROWSER: "1"
       AUTO_CODER_IMMEDIATE_TEST_FAILURES: "1"
       PYTEST_ADDOPTS: "-o faulthandler_timeout=60 -o faulthandler_exit_on_timeout=false"

@@ -198,7 +198,7 @@ def test_python314_advisory_workflow_is_a_real_non_live_compatibility_check() ->
     assert job["runs-on"] == "ubuntu-latest"
     assert job["env"]["UV_PYTHON"] == "3.14"
     assert job["env"]["AUTO_CODER_REQUIRE_BROWSER"] == "1"
-    assert job["env"]["PLAYWRIGHT_BROWSERS_PATH"] == "${{ runner.temp }}/python314-playwright"
+    assert job["env"]["PLAYWRIGHT_BROWSERS_PATH"] == "/tmp/auto-coder-python314-playwright-${{ github.run_id }}-${{ github.run_attempt }}"
     steps = job["steps"]
     assert not any(step.get("continue-on-error", False) for step in steps)
     assert [step["with"]["python-version"] for step in steps if step.get("uses") == "actions/setup-python@v7"] == ["3.12", "3.14"]
