@@ -67,7 +67,7 @@ def assert_required_workflow_profile(workflow: object) -> None:
     assert "scripts/plan_ci_shards.py" in next(step["run"] for step in plan["steps"] if step.get("name") == "Collect complete current source tests and immutable shard plan")
     assert "-m 'not opencode_live'" in next(step["run"] for step in plan["steps"] if step.get("name") == "Collect complete current source tests and immutable shard plan")
     assert shard["needs"] == ["source-plan"]
-    assert shard["strategy"] == {"fail-fast": False, "max-parallel": 12, "matrix": "${{ fromJSON(needs.source-plan.outputs.matrix) }}"}
+    assert shard["strategy"] == {"fail-fast": False, "matrix": "${{ fromJSON(needs.source-plan.outputs.matrix) }}"}
     assert "runner.temp" not in str(shard.get("env", {}))
     complete_steps = {step.get("name"): step for step in shard["steps"] if isinstance(step, dict) and step.get("name")}
     assert_conditional_chromium_install(complete_steps["Install Chromium"])
