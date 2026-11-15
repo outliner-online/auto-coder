@@ -1102,3 +1102,98 @@ def test_recovers_retained_review_with_missing_list_anchors(tmp_path: Path, monk
         ("GET", "https://api.github.test/repos/owner/repo/pulls/42/reviews/501/comments?per_page=100&page=1"),
         ("GET", "https://api.github.test/repos/owner/repo/pulls/comments/701"),
     ]
+
+
+@pytest.mark.parametrize("status,category", [(401, "authentication"), (403, "forbidden"), (422, "invalid_request"), (429, "rate_limit"), (500, "http_error")])
+def test_publication_diagnostic_identifies_rejected_endpoint_without_secrets(tmp_path, monkeypatch, status, category):
+    from loguru import logger as loguru_logger
+
+    secret = "sensitive-response-and-request-marker"
+    calls = []
+    records = []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(status, json={"message": secret}, headers={"x-sensitive-header": secret})
+
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    reviewer = configured_reviewer(tmp_path, client, monkeypatch)
+    sink = loguru_logger.add(lambda message: records.append(message.record), filter=lambda record: "reviewer_publication" in record["extra"])
+    try:
+        result = reviewer.publish("owner/repo", 42, "sha-a", AdversarialValidationResult(result="PASS"))
+    finally:
+        loguru_logger.remove(sink)
+        client.close()
+    assert not result.success
+    assert len(calls) == 1
+    assert calls[0].method == "GET" and calls[0].url.path == "/repos/owner/repo/installation"
+    assert len(records) == 1, "Every failed publication must retain one safe diagnostic"
+    diagnostic = records[-1]["extra"]["reviewer_publication"]
+    assert diagnostic["stage"] == "installation_token"
+    assert diagnostic["category"] == category
+    assert diagnostic["http_status"] == status
+    assert diagnostic["endpoint"] == "repository_installation"
+    assert secret not in str(diagnostic) + records[-1]["message"] + result.reason
+    assert "fake-app-jwt" not in str(diagnostic) + records[-1]["message"] + result.reason
+
+
+def test_publication_diagnostic_distinguishes_review_submission_from_preflight(tmp_path, monkeypatch):
+    from loguru import logger as loguru_logger
+
+    records = []
+    calls = []
+    replies = auth_responses()[:3] + [response(422, {"message": "secret-review-body"})]
+
+    def handle(request):
+        calls.append(request)
+        reply = replies.pop(0)
+        return httpx.Response(reply.status_code, json=reply.json())
+
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    reviewer = configured_reviewer(tmp_path, client, monkeypatch)
+    sink = loguru_logger.add(lambda message: records.append(message.record), filter=lambda record: "reviewer_publication" in record["extra"])
+    try:
+        result = reviewer.publish("owner/repo", 42, "sha-a", AdversarialValidationResult(result="PASS"))
+    finally:
+        loguru_logger.remove(sink)
+        client.close()
+    assert not result.success
+    assert [request.method for request in calls] == ["GET", "POST", "GET", "POST"]
+    assert len(records) == 1, "Every failed publication must retain one safe diagnostic"
+    diagnostic = records[-1]["extra"]["reviewer_publication"]
+    assert diagnostic["stage"] == "review_publication"
+    assert diagnostic["endpoint"] == "pr_reviews"
+    assert diagnostic["http_status"] == 422
+    assert "secret-review-body" not in str(diagnostic) + records[-1]["message"] + result.reason
+
+
+@pytest.mark.parametrize("failure", ["transport", "local"])
+def test_publication_diagnostic_does_not_expose_exception_or_cause_text(tmp_path, monkeypatch, failure):
+    from loguru import logger as loguru_logger
+
+    records = []
+    reviewer = configured_reviewer(tmp_path, RecordingClient([]), monkeypatch)
+
+    def fail(*args, **kwargs):
+        try:
+            raise ValueError("secret-cause")
+        except ValueError as cause:
+            if failure == "transport":
+                raise httpx.ConnectError("secret-token https://private.invalid/?key=secret", request=httpx.Request("GET", "https://private.invalid/private/secret")) from cause
+            raise RuntimeError("secret-private-key") from cause
+
+    monkeypatch.setattr(reviewer, "_installation_token", fail)
+    sink = loguru_logger.add(lambda message: records.append(message.record), filter=lambda record: "reviewer_publication" in record["extra"])
+    try:
+        result = reviewer.publish("owner/repo", 42, "sha-a", AdversarialValidationResult(result="PASS"))
+    finally:
+        loguru_logger.remove(sink)
+    assert len(records) == 1, "Every failed publication must retain one safe diagnostic"
+    diagnostic = records[-1]["extra"]["reviewer_publication"]
+    assert not result.success
+    assert diagnostic["category"] == ("transport_or_admission" if failure == "transport" else "local_error")
+    assert diagnostic["cause_type"] == "ValueError"
+    assert diagnostic["http_status"] is None
+    assert diagnostic["endpoint"] == "unavailable"
+    assert "secret" not in str(diagnostic) + records[-1]["message"] + result.reason
+    assert reviewer._client.calls == []

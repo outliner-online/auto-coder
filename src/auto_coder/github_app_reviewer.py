@@ -8,7 +8,7 @@ import threading
 import time
 import tomllib
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -83,6 +83,62 @@ class ReviewPublicationResult:
     # A retained transmission may have been accepted, but its exact receipt
     # cannot yet be confirmed. Consumers wait without resubmitting the review.
     pending_receipt: bool = False
+
+
+@dataclass(frozen=True)
+class ReviewPublicationDiagnostic:
+    """Allowlisted failure facts; never retain exception text or HTTP payloads."""
+
+    stage: str = ""
+    category: str = "local_error"
+    exception_type: str = ""
+    cause_type: str = ""
+    http_status: Optional[int] = None
+    endpoint: str = "unavailable"
+
+
+def _publication_diagnostic(exc: Exception, stage: str) -> ReviewPublicationDiagnostic:
+    status: Optional[int] = None
+    path = ""
+    if isinstance(exc, GitHubRequestError):
+        status = exc.outcome.status
+        path = exc.outcome.context.endpoint_template.split("?", 1)[0]
+    elif isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        path = exc.request.url.path
+    elif isinstance(exc, httpx.RequestError):
+        try:
+            path = exc.request.url.path
+        except RuntimeError:
+            pass
+    endpoint = "unavailable"
+    for pattern, name in (
+        (r"/repos/[^/]+/[^/]+/installation", "repository_installation"),
+        (r"/app/installations/[^/]+/access_tokens", "installation_token"),
+        (r"/app", "app_identity"),
+        (r"/repos/[^/]+/[^/]+/pulls/[^/]+/reviews", "pr_reviews"),
+        (r"/repos/[^/]+/[^/]+/pulls/[^/]+/comments", "pr_review_comments"),
+        (r"/repos/[^/]+/[^/]+/pulls/[^/]+/files", "pr_files"),
+        (r"/repos/[^/]+/[^/]+/pulls/[^/]+", "pr_metadata"),
+    ):
+        if re.fullmatch(pattern, path):
+            endpoint = name
+            break
+    if status == 401:
+        category = "authentication"
+    elif status == 403:
+        category = "forbidden"
+    elif status in (400, 422):
+        category = "invalid_request"
+    elif status == 429:
+        category = "rate_limit"
+    elif status is not None:
+        category = "http_error"
+    elif isinstance(exc, (httpx.TransportError, GitHubRequestError)):
+        category = "transport_or_admission"
+    else:
+        category = "local_error"
+    return ReviewPublicationDiagnostic(stage, category, type(exc).__name__, type(exc.__cause__).__name__ if exc.__cause__ is not None else "", status, endpoint)
 
 
 @dataclass(frozen=True)
@@ -551,13 +607,16 @@ class GitHubAppReviewer:
         remains authorized, otherwise the refusal reason.
         """
         event = "APPROVE" if result.allows_auto_merge else "REQUEST_CHANGES" if result.needs_fix or result.needs_tests else "COMMENT"
+        stage = "installation_token"
         try:
             token = self._installation_token(repo_name, frozenset([("pull_requests", "write")]))
+            stage = "head_confirmation"
             current_pr = self._request("GET", f"/repos/{repo_name}/pulls/{pr_number}", token).json()
             current_sha = current_pr.get("head", {}).get("sha") if isinstance(current_pr, dict) else None
             if not validated_head_sha or current_sha != validated_head_sha:
                 return ReviewPublicationResult(False, event, "Pull request head changed after adversarial validation")
 
+            stage = "retained_publication_reconciliation"
             effective_ledger = ledger if ledger is not None else self._ledger
             if effective_ledger is not None:
                 pending = effective_ledger.get_pending_publication_intents(self._api_url, repo_name, pr_number)
@@ -576,6 +635,7 @@ class GitHubAppReviewer:
             reconciled_snapshot: Optional[BlockerLedgerSnapshot] = None
 
             if effective_ledger is not None:
+                stage = "historical_review_comments"
                 comments_raw: list[dict[str, object]] = []
                 page = 1
                 try:
@@ -600,6 +660,7 @@ class GitHubAppReviewer:
                         pass
                     raise
 
+                stage = "reviewer_identity"
                 identity = self.get_identity()
                 hist_parse = parse_historical_pr_review_roots(
                     comments_raw,
@@ -608,6 +669,7 @@ class GitHubAppReviewer:
                     pr_number=pr_number,
                 )
 
+                stage = "contract_reconciliation"
                 reconciliation = reconcile_pr_findings_before_publication(
                     effective_ledger,
                     self._api_url,
@@ -634,6 +696,7 @@ class GitHubAppReviewer:
                 published_gap_ids = self._published_test_oracle_gap_ids(repo_name, pr_number, token)
                 unrooted_gaps = [gap for gap in result.open_test_oracle_gaps if gap.gap_id not in published_gap_ids]
 
+            stage = "review_payload"
             gaps_to_publish = unrooted_gaps
 
             if unrooted_findings or unrooted_gaps or (result.unexplained_changes and result.publish_clarification_thread):
@@ -717,12 +780,14 @@ class GitHubAppReviewer:
             # it before the durable verdict so a failed comment request cannot
             # leave a saved same-SHA result that suppresses the required thread.
             if file_level_clarification is not None:
+                stage = "clarification_publication"
                 response = self._request(
                     "POST",
                     f"/repos/{repo_name}/pulls/{pr_number}/comments",
                     token,
                     json=file_level_clarification,
                 )
+            stage = "review_publication"
             try:
                 response = self._request(
                     "POST",
@@ -748,6 +813,7 @@ class GitHubAppReviewer:
                 raise
 
             if effective_ledger is not None and unrooted_blocker_ids:
+                stage = "receipt_reconciliation"
                 response_data = response.json()
                 review_id = response_data.get("id") if isinstance(response_data, dict) else None
                 if isinstance(review_id, int) and review_id > 0:
@@ -773,10 +839,18 @@ class GitHubAppReviewer:
                     # ordinary GitHub credential for reviewer output.
                     logger.bind(repository=repo_name, target=str(pr_number), phase="publication").error(f"Dedicated reviewer GitHub App could not reply to provenance thread {disposition.thread_id}")
             return ReviewPublicationResult(True, event, "")
-        except Exception:
-            # Deliberately omit exception text: HTTP errors and auth libraries can
-            # include credential-bearing request details.
-            logger.bind(repository=repo_name, target=str(pr_number), phase="publication").error("Dedicated reviewer GitHub App could not publish the adversarial verdict")
+        except Exception as exc:
+            # Never log exception text, causes, headers, URLs, or response bodies.
+            diagnostic = _publication_diagnostic(exc, stage)
+            logger.bind(repository=repo_name, target=str(pr_number), phase="publication", reviewer_publication=asdict(diagnostic)).error(
+                "Dedicated reviewer GitHub App could not publish the adversarial verdict (stage={}, category={}, exception_type={}, cause_type={}, http_status={}, endpoint={})",
+                diagnostic.stage,
+                diagnostic.category,
+                diagnostic.exception_type,
+                diagnostic.cause_type,
+                diagnostic.http_status,
+                diagnostic.endpoint,
+            )
             return ReviewPublicationResult(False, event, "Dedicated reviewer GitHub App publication failed")
 
     @staticmethod
