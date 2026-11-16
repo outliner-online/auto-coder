@@ -3,8 +3,25 @@
 Adversarial validation verdicts are published as native pull-request reviews using
 the separately configured `auto-coder-reviewer` GitHub App. Configure its `app_id`
 and optional `client_id` under `[github-app-auto-coder-reviewer]` in
-`~/.auto-coder/config.toml`; keep the private key at
-`~/.auto-coder/auto-coder-reviewer.pem`. `PASS` maps to `APPROVE`, `NEEDS_FIX`
+`~/.auto-coder/config.toml`. The default private key remains
+`~/.auto-coder/auto-coder-reviewer.pem`. Optional `private_key_path` selects
+a separate external PEM using an absolute path or `~/` relative to the
+worker's HOME. Empty, non-string, and other relative paths are rejected;
+an unreadable selected key fails without falling back to the default key.
+
+The same table in `~/.auto-coder/<owner>/<repo>/config.toml` overrides
+these settings for only that repository. For example:
+
+```toml
+[github-app-auto-coder-reviewer]
+app_id = "222222"
+private_key_path = "~/.auto-coder/outliner-reviewer.pem"
+```
+
+This selects an existing external key; configuration loading never reads,
+creates, copies, or replaces PEM contents. It does not install or transfer an
+App. Keep a personal App's key and configuration intact when selecting a
+different organization App for a repository. `PASS` maps to `APPROVE`, `NEEDS_FIX`
 and `NEEDS_TESTS` map to `REQUEST_CHANGES`, and other outcomes map
 deterministically to `COMMENT`.
 Publication is pinned to the validated head SHA and fails closed without falling
@@ -123,3 +140,19 @@ schema is unchanged: this adds safe details to an existing publication failure
 log rather than a new processing origin, admission decision, or effect.
 
 Regression: `bash scripts/test.sh tests/test_github_app_reviewer.py`.
+
+### Changing publisher identity
+
+Selecting a new App does not re-author or transfer old reviews or receipts.
+Existing author, exact-head, payload and root-association checks still apply.
+A retained unconfirmed PR publication is reconciled before another verdict
+can be sent. If its old-App review is absent, inaccessible, or does not match
+the newly authenticated identity, reconciliation remains unsuccessful and
+the original intent stays retained; the new App must not resend that review.
+Resolve the retained publication through its original identity before switching,
+or hold the transition while that evidence is unknown. This option does not add
+cross-App recovery or reinterpret historical authors as the new App.
+
+This configuration change does not add a dashboard event, processing origin,
+admission outcome or durable-work schema; existing publication diagnostics and
+pending reconciliation remain the observable results.

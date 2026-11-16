@@ -210,10 +210,22 @@ def load_reviewer_app_config(
     client_id = str(section.get("client_id", "")).strip()
     if not app_id or not app_id.isdigit():
         raise ValueError("Reviewer GitHub App app_id is missing or invalid")
+    private_key_path = base_home / ".auto-coder" / "auto-coder-reviewer.pem"
+    if "private_key_path" in section:
+        configured_path = section["private_key_path"]
+        if not isinstance(configured_path, str) or not configured_path.strip():
+            raise ValueError("Reviewer GitHub App private_key_path must be a non-empty path")
+        configured_path = configured_path.strip()
+        if configured_path.startswith("~/"):
+            private_key_path = base_home / configured_path[2:]
+        else:
+            private_key_path = Path(configured_path)
+        if not private_key_path.is_absolute():
+            raise ValueError("Reviewer GitHub App private_key_path must be absolute or start with ~/")
     return ReviewerAppConfig(
         app_id=app_id,
         client_id=client_id,
-        private_key_path=base_home / ".auto-coder" / "auto-coder-reviewer.pem",
+        private_key_path=private_key_path,
     )
 
 

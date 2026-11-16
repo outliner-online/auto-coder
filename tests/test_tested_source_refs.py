@@ -50,6 +50,24 @@ def test_pull_request_full_source_selection_checks_out_head_without_publishing()
     assert publisher["jobs"]["publish-tested-source"]["if"] == "github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'"
 
 
+def test_unsuccessful_matrix_keeps_optional_diagnostic_prerequisites_available() -> None:
+    """The fail-closed gate must not strand always-run diagnostics without tools/data."""
+    workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / WORKFLOW_PATH).read_text())
+    steps = workflow["jobs"]["complete-source-tests"]["steps"]
+    rejection = next(i for i, step in enumerate(steps) if step.get("name") == "Reject an unsuccessful matrix dependency")
+    prerequisites = steps[:rejection]
+
+    for action in ("actions/checkout@", "astral-sh/setup-uv@", "actions/setup-python@"):
+        assert any(str(step.get("uses", "")).startswith(action) for step in prerequisites), action
+    assert any(step.get("run") == "uv sync --locked" for step in prerequisites)
+    assert any(step.get("name") == "Download current-attempt immutable source plan" for step in prerequisites)
+    assert any(step.get("name") == "Download current-attempt native shard receipts and timing" for step in prerequisites)
+    verification = next(i for i, step in enumerate(steps) if step.get("name") == "Verify exact current-attempt shard evidence")
+    assert rejection < verification
+    assert steps[rejection]["run"] == "exit 1"
+    assert "continue-on-error" not in steps[rejection]
+
+
 def assert_required_workflow_profile(workflow: object) -> None:
     assert isinstance(workflow, dict)
     jobs = workflow["jobs"]

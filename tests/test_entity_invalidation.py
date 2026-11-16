@@ -2126,7 +2126,8 @@ def test_reopened_invalidation_does_not_consult_cached_closed_state(tmp_path: Pa
     github.get_issue.assert_not_called()
 
 
-def test_urgent_label_transition_preserves_retryable_admission_obligation(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("delayed_final_refresh", [False, True])
+def test_urgent_label_transition_preserves_retryable_admission_obligation(tmp_path: Path, monkeypatch, delayed_final_refresh):
     """The webhook origin must survive the durable queue and a capacity defer."""
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
     engine = AutomationEngine(MagicMock(), AutomationConfig())
@@ -2155,6 +2156,18 @@ def test_urgent_label_transition_preserves_retryable_admission_obligation(tmp_pa
         ),
     )
 
+    refresh_entered = threading.Event()
+    release_refresh = threading.Event()
+    if delayed_final_refresh:
+        refresh = engine._refresh_issue_stage_routing
+
+        def delayed_refresh(*args):
+            refresh_entered.set()
+            assert release_refresh.wait(2), "test must release its final routing checkpoint"
+            return refresh(*args)
+
+        monkeypatch.setattr(engine, "_refresh_issue_stage_routing", delayed_refresh)
+
     async def scenario():
         await process_github_payload(
             "issues",
@@ -2168,12 +2181,34 @@ def test_urgent_label_transition_preserves_retryable_admission_obligation(tmp_pa
             "urgent-delivery",
         )
         worker = asyncio.create_task(engine._worker_loop("owner/repo", 0))
-        for _ in range(100):
-            if processed:
-                break
-            await asyncio.sleep(0.01)
-        worker.cancel()
-        await asyncio.gather(worker, return_exceptions=True)
+
+        async def finish_final_routing():
+            try:
+                for _ in range(200):
+                    if refresh_entered.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                assert refresh_entered.is_set()
+                # Processing has returned, but durable final routing still owns work.
+                await asyncio.sleep(0.03)
+                assert worker.cancelling() == 0, "do not cancel before the durable decision checkpoint"
+            finally:
+                release_refresh.set()
+
+        checkpoint = asyncio.create_task(finish_final_routing()) if delayed_final_refresh else None
+        try:
+            # A callback proves processing started, not that final routing and
+            # durable queue accounting finished. Cancel only at that checkpoint.
+            await asyncio.wait_for(engine.queue.join(), timeout=5)
+            if checkpoint is not None:
+                await checkpoint
+        finally:
+            release_refresh.set()
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            if checkpoint is not None and not checkpoint.done():
+                checkpoint.cancel()
+                await asyncio.gather(checkpoint, return_exceptions=True)
 
     asyncio.run(scenario())
 

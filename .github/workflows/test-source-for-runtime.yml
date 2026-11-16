@@ -171,9 +171,6 @@ jobs:
     needs: [source-plan, complete-source-shard]
     runs-on: ubuntu-latest
     steps:
-      - name: Reject an unsuccessful matrix dependency
-        if: needs.source-plan.result != 'success' || needs.complete-source-shard.result != 'success'
-        run: exit 1
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -195,6 +192,9 @@ jobs:
         with:
           pattern: source-test-shard-${{ github.run_id }}-${{ github.run_attempt }}-*
           path: ${{ runner.temp }}/source-artifacts
+      - name: Reject an unsuccessful matrix dependency
+        if: needs.source-plan.result != 'success' || needs.complete-source-shard.result != 'success'
+        run: exit 1
       - name: Verify exact current-attempt shard evidence
         env:
           GITHUB_TOKEN: ${{ github.token }}
