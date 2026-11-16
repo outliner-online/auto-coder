@@ -198,3 +198,19 @@ no compatible native profile or only partial native measurements. This affects
 packing, not collected membership, native pytest outcomes or exact-run/attempt
 receipt validation. Planning diagnostics distinguish snapshot estimates from
 native observations, runner queue, preparation and measured critical path.
+
+The source aggregate prepares its exact checkout, Python/uv environment and
+current-attempt plan/shard downloads before rejecting unsuccessful dependencies.
+This keeps the existing always-run optional timing diagnostics supplied with
+their required tools and inputs when a shard fails or is cancelled. The same
+dependency rejection remains before qualification; no failed, cancelled, skipped
+or missing shard can become a successful source check. Preparation failures also
+remain failures, and optional timing results never replace the source outcome.
+
+
+The urgent-label capacity-deferral regression waits for its synthetic worker's
+durable queue decision before cancellation, rather than treating entry into
+the processing callback as completion. A controlled delayed final-routing case
+covers this test-harness ordering while retaining the original strict-fetch,
+urgent-admission and unfinished-obligation assertions. Production worker
+cancellation, invocation protection and handoff contracts are unchanged.
