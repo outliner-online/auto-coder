@@ -218,6 +218,153 @@ def test_load_reviewer_app_config_with_repo_override(tmp_path: Path) -> None:
     assert loaded.private_key_path == config_dir / "auto-coder-reviewer.pem"
 
 
+@pytest.mark.parametrize("configured_path", ["/private/reviewer-outliner.pem", "~/.auto-coder/reviewer-outliner.pem"])
+def test_repo_key_override_preserves_personal_app_and_other_repos(tmp_path: Path, configured_path: str) -> None:
+    config_dir = tmp_path / ".auto-coder"
+    repo_dir = config_dir / "owner" / "outliner"
+    repo_dir.mkdir(parents=True)
+    config = config_dir / "config.toml"
+    personal_config = '[github-app-auto-coder-reviewer]\napp_id = "111111"\nclient_id = "personal-client"\n'
+    config.write_text(personal_config)
+    personal_key = config_dir / "auto-coder-reviewer.pem"
+    personal_key.write_text("synthetic-personal-key")
+    (repo_dir / "config.toml").write_text(f'[github-app-auto-coder-reviewer]\napp_id = "222222"\nclient_id = "org-client"\nprivate_key_path = "{configured_path}"\n')
+
+    selected = load_reviewer_app_config(config, tmp_path, repo_name="owner/outliner")
+    other = load_reviewer_app_config(config, tmp_path, repo_name="owner/other")
+
+    expected = tmp_path / configured_path[2:] if configured_path.startswith("~/") else Path(configured_path)
+    assert selected == ReviewerAppConfig("222222", "org-client", expected)
+    assert other == ReviewerAppConfig("111111", "personal-client", personal_key)
+    assert config.read_text() == personal_config
+    assert personal_key.read_text() == "synthetic-personal-key"
+    assert not expected.exists()
+
+
+@pytest.mark.parametrize("value", ['""', '"relative.pem"', '"~other/reviewer.pem"', "123", "false", "[]"])
+def test_invalid_explicit_reviewer_key_path_fails_closed(tmp_path: Path, value: str) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(f'[github-app-auto-coder-reviewer]\napp_id = "222222"\nprivate_key_path = {value}\n')
+
+    with pytest.raises(ValueError, match="private_key_path"):
+        load_reviewer_app_config(config, tmp_path)
+
+
+def test_selected_repo_key_is_used_for_jwt_without_changing_personal_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_dir = tmp_path / ".auto-coder"
+    repo_dir = config_dir / "owner" / "outliner"
+    repo_dir.mkdir(parents=True)
+    config = config_dir / "config.toml"
+    config.write_text('[github-app-auto-coder-reviewer]\napp_id = "111111"\n')
+    personal_key = config_dir / "auto-coder-reviewer.pem"
+    personal_key.write_text("synthetic-personal-key")
+    org_key = config_dir / "org.pem"
+    org_key.write_text("synthetic-org-key")
+    (repo_dir / "config.toml").write_text('[github-app-auto-coder-reviewer]\napp_id = "222222"\nprivate_key_path = "~/.auto-coder/org.pem"\n')
+    captured = []
+
+    def encode(payload, key, algorithm):
+        captured.append((payload["iss"], key, algorithm))
+        return "synthetic-jwt"
+
+    monkeypatch.setattr("auto_coder.github_app_reviewer.jwt.encode", encode)
+    reviewer = GitHubAppReviewer(load_reviewer_app_config(config, tmp_path, repo_name="owner/outliner"), client=RecordingClient([]))
+
+    assert reviewer._jwt() == "synthetic-jwt"
+    assert captured == [("222222", "synthetic-org-key", "RS256")]
+    assert personal_key.read_text() == "synthetic-personal-key"
+
+
+def test_missing_selected_key_does_not_fall_back_to_personal_key(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".auto-coder"
+    config_dir.mkdir()
+    personal_key = config_dir / "auto-coder-reviewer.pem"
+    personal_key.write_text("synthetic-personal-key")
+    config = config_dir / "config.toml"
+    config.write_text('[github-app-auto-coder-reviewer]\napp_id = "222222"\nprivate_key_path = "~/.auto-coder/missing.pem"\n')
+    client = RecordingClient([])
+    reviewer = GitHubAppReviewer(load_reviewer_app_config(config, tmp_path), client=client)
+
+    result = reviewer.publish("owner/repo", 42, "head", AdversarialValidationResult(result="PASS"))
+
+    assert not result.success
+    assert client.calls == []
+    assert personal_key.read_text() == "synthetic-personal-key"
+
+
+@pytest.mark.parametrize("accepted_review_id", [None, 501])
+@pytest.mark.parametrize("visible_old_review", [False, True])
+def test_app_switch_keeps_old_unconfirmed_publication_without_resending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accepted_review_id: int | None, visible_old_review: bool) -> None:
+    ledger = CanonicalPRBlockerLedger(db_path=tmp_path / "ledger.db")
+    snapshot = ledger.initialize_namespace("https://api.github.test", "owner/repo", 42)
+    blocker_id, snapshot = ledger.admit_blocker(
+        "https://api.github.test",
+        "owner/repo",
+        42,
+        "admit",
+        snapshot.ledger_revision,
+        BlockerAdmissionPayload(
+            category="IMPLEMENTATION",
+            authoritative_boundary="src/a.py",
+            incorrect_behavior_or_missing_invariant="Missing validation",
+            required_correction_outcome="Validate input",
+            accepted_scope=CorrectionScope(description="Validate input"),
+        ),
+    )
+    ledger.record_publication_intent(
+        "https://api.github.test",
+        "owner/repo",
+        42,
+        "old-app-operation",
+        snapshot.ledger_revision,
+        (blocker_id,),
+        "owner/repo",
+        42,
+        "old-head",
+        submitted_event="REQUEST_CHANGES",
+        submitted_body="retained old-app summary",
+    )
+    if accepted_review_id is not None:
+        ledger.record_publication_acceptance("https://api.github.test", "owner/repo", 42, "old-app-operation", accepted_review_id)
+    before = ledger.get_publication_intent("https://api.github.test", "owner/repo", 42, "old-app-operation")
+    config_dir = tmp_path / ".auto-coder"
+    repo_dir = config_dir / "owner" / "repo"
+    repo_dir.mkdir(parents=True)
+    config = config_dir / "config.toml"
+    config.write_text('[github-app-auto-coder-reviewer]\napp_id = "111111"\n')
+    (repo_dir / "config.toml").write_text('[github-app-auto-coder-reviewer]\napp_id = "222222"\nprivate_key_path = "~/.auto-coder/org.pem"\n')
+    old_review = {
+        "id": 501,
+        "body": "retained old-app summary",
+        "commit_id": "old-head",
+        "state": "CHANGES_REQUESTED",
+        "user": {"login": "personal-reviewer[bot]"},
+    }
+    recovery_response = response(200 if visible_old_review else 404, old_review if visible_old_review else {}) if accepted_review_id is not None else response(200, [old_review] if visible_old_review else [])
+    client = RecordingClient(
+        [
+            response(200, {"head": {"sha": "new-head"}}),
+            recovery_response,
+        ]
+    )
+    reviewer = GitHubAppReviewer(
+        load_reviewer_app_config(config, tmp_path, repo_name="owner/repo"),
+        api_url="https://api.github.test",
+        client=client,
+        ledger=ledger,
+    )
+    monkeypatch.setattr(reviewer, "_installation_token", lambda *args: "synthetic-org-token")
+    monkeypatch.setattr(reviewer, "get_identity", lambda: ReviewerAppIdentity("org-reviewer[bot]", 222222))
+
+    result = reviewer.publish("owner/repo", 42, "new-head", AdversarialValidationResult(result="PASS"))
+
+    assert not result.success
+    assert ledger.get_publication_intent("https://api.github.test", "owner/repo", 42, "old-app-operation") == before
+    assert before is not None and before.status == "PENDING"
+    assert len(ledger.get_pending_publication_intents("https://api.github.test", "owner/repo", 42)) == 1
+    assert [method for method, _url, _kwargs in client.calls] == ["GET", "GET"]
+
+
 @pytest.mark.parametrize(
     ("result", "event"),
     [
