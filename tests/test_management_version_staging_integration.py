@@ -5,7 +5,6 @@ import errno
 import hashlib
 import json
 import os
-import py_compile
 import shutil
 import subprocess
 import sys
@@ -20,6 +19,7 @@ from auto_coder.tested_source_refs import TestedSourceError as SourceError
 from auto_coder.tested_source_refs import TestedSourceReadback as SourceReadback
 from auto_coder.tested_source_refs import TestedSourceRecord as SourceRecord
 from auto_coder.worker_versions import PreparationFailure, WorkerVersionError, WorkerVersionPreparer
+from tests.support.production_runtime import production_python
 
 
 def _run(args: list[str], cwd: Path | None = None) -> str:
@@ -99,7 +99,7 @@ where=['src']
     _run(["git", "init", "-q"], repo)
     _run(["git", "config", "user.email", "test@example.invalid"], repo)
     _run(["git", "config", "user.name", "Test"], repo)
-    _run([str(uv), "lock", "--python", sys.executable], repo)
+    _run([str(uv), "lock", "--python", str(production_python())], repo)
     _run(["git", "add", "."], repo)
     _run(["git", "commit", "-qm", "fixture"], repo)
     sha = _run(["git", "rev-parse", "HEAD"], repo)
@@ -108,11 +108,12 @@ where=['src']
     authority = Authority(SourceReadback(f"refs/tags/auto-coder-tested-{sha}", "b" * 40, sha, record))
     config_file = tmp_path / "management.yaml"
     config_file.write_text("compatible")
-    config = ManagementRuntimeConfig("manager-a", "owner/repo", repo, tmp_path / "management-versions", Path(sys.executable), uv, _run([str(uv), "--version"]).removeprefix("uv "), management_config=config_file, source_authority=authority)  # type: ignore[arg-type]
+    config = ManagementRuntimeConfig("manager-a", "owner/repo", repo, tmp_path / "management-versions", production_python(), uv, _run([str(uv), "--version"]).removeprefix("uv "), management_config=config_file, source_authority=authority)  # type: ignore[arg-type]
     return config, sha, authority
 
 
-def test_real_prepare_lookup_reuse_and_installed_content_tampering(tmp_path: Path, _use_real_commands: None) -> None:
+def test_real_prepare_lookup_reuse_and_installed_content_tampering(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands: None) -> None:
+    monkeypatch.setenv("UV_PYTHON", "3.14")
     config, sha, authority = _fixture(tmp_path)
     active = tmp_path / "active"
     active.mkdir()
@@ -166,7 +167,7 @@ def test_lookup_rejects_executable_cached_bytecode_before_running_it(tmp_path: P
     malicious_source = tmp_path / "malicious.py"
     malicious_source.write_text("import json\n" + f"open({str(sentinel)!r}, 'w').write('executed')\n" + f"print(json.dumps({{'source_revision':{{'available':True,'value':{sha!r}}},'distribution_version':{{'available':True,'value':'1.2.3'}}}}))\n")
     replacement = tmp_path / "replacement.pyc"
-    py_compile.compile(str(malicious_source), cfile=str(replacement), dfile=str(source), doraise=True)
+    _run([interpreter, "-c", "import py_compile,sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], dfile=sys.argv[3], doraise=True)", str(malicious_source), str(replacement), str(source)])
     cache.write_bytes(original_header + replacement.read_bytes()[16:])
 
     with pytest.raises(WorkerVersionError) as caught:
@@ -240,11 +241,11 @@ def test_real_lookup_rejects_changed_profile_and_configuration(tmp_path: Path, _
 
 def test_real_python_patch_identity_is_bound_and_cannot_silently_reuse(tmp_path: Path, _use_real_commands: None) -> None:
     alternate = Path("/usr/bin/python3.12")
-    if not alternate.exists() or _run([str(alternate), "-c", "import sys; print(sys.version)"]) == _run([sys.executable, "-c", "import sys; print(sys.version)"]):
+    if not alternate.exists() or _run([str(alternate), "-c", "import sys; print(sys.version)"]) == _run([str(production_python()), "-c", "import sys; print(sys.version)"]):
         pytest.skip("a second real Python 3.12 patch runtime is unavailable")
     config, sha, _authority = _fixture(tmp_path)
     first = ManagementVersionStager(config).prepare(ManagementPrepareIntent(sha, "first-runtime"))
-    assert first.receipt.python_full_version == _run([sys.executable, "-c", "import sys; print(sys.version)"])
+    assert first.receipt.python_full_version == _run([str(production_python()), "-c", "import sys; print(sys.version)"])
     assert first.receipt.python_abi
     assert first.receipt.python_implementation == "cpython"
     assert len(first.receipt.python_executable_sha256) == 64

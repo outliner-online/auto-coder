@@ -6,6 +6,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -115,14 +116,14 @@ class BootstrapStore:
         """Record only the live loop owner's reuse-safe OS identity."""
         if not incarnation or pid <= 0 or not start_token:
             raise ValueError("Supervisor presence requires its actual process lifetime")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 "INSERT INTO supervisor_presence VALUES(?,?,?,?,?) ON CONFLICT(instance_id) DO UPDATE SET incarnation=excluded.incarnation,pid=excluded.pid,start_token=excluded.start_token,updated_at=excluded.updated_at",
                 (self.instance_id, incarnation, pid, start_token, time.time()),
             )
 
     def load(self) -> ChildRecord:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute("SELECT record_json FROM child_state WHERE instance_id=?", (self.instance_id,)).fetchone()
         if row is None:
             return ChildRecord(self.instance_id)
@@ -141,7 +142,7 @@ class BootstrapStore:
             raise ValueError("management child instance mismatch")
         encoded = asdict(record)
         encoded["phase"] = record.phase.value
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 "INSERT INTO child_state VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET record_json=excluded.record_json,updated_at=excluded.updated_at",
                 (self.instance_id, json.dumps(encoded, sort_keys=True), time.time()),
@@ -153,7 +154,7 @@ class BootstrapStore:
             raise ValueError("management child instance mismatch")
         expected_json = self._record_json(expected)
         prepared_json = self._record_json(prepared)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT record_json FROM child_state WHERE instance_id=?", (self.instance_id,)).fetchone()
             if row is None:
@@ -182,7 +183,7 @@ class BootstrapStore:
             if len(value) > 256 or "\x00" in value:
                 raise ValueError("effect identity is not bounded")
         now = time.time()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             old = connection.execute("SELECT * FROM effects WHERE operation_id=?", (operation_id,)).fetchone()
             if old is not None:
@@ -197,7 +198,7 @@ class BootstrapStore:
 
     def finish_effect(self, operation_id: str, phase: str, result: dict[str, object]) -> EffectRecord:
         encoded = json.dumps(result, sort_keys=True)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM effects WHERE operation_id=?", (operation_id,)).fetchone()
             if row is None:
@@ -216,7 +217,7 @@ class BootstrapStore:
 
     def has_unresolved_effects(self) -> bool:
         """Return whether an action has durable intent without an observation."""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute("SELECT 1 FROM effects WHERE phase='prepared' LIMIT 1").fetchone()
         return row is not None
 

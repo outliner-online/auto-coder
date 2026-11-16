@@ -110,6 +110,9 @@ def run(directory: Path, repository: str, source_ref: str) -> int:
         "AUTO_CODER_TEST_IMPACT_DIR": str(directory),
         "AUTO_CODER_TEST_IMPACT_INVOCATION": invocation_id,
         "COVERAGE_FILE": str(directory / "coverage.db"),
+        # Python 3.14 defaults to sysmon, which does not support dynamic contexts.
+        # This observer requires pytest-cov phase contexts on every interpreter.
+        "COVERAGE_CORE": "ctrace",
     }
     try:
         exit_code = subprocess.call(command, env=environment)

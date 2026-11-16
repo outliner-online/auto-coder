@@ -43,3 +43,11 @@ produces the provenance observation. A provenance-module symlink to the source
 checkout or a checkout package selected by the working directory cannot pass
 through a separate isolated origin probe and then supply the accepted observation.
 Such origin mismatches use the existing `VERIFICATION_MISMATCH` failure path.
+
+Environment preparation explicitly passes the configured Python executable to
+both `uv venv` and the subsequent frozen `uv sync`. An inherited `UV_PYTHON`
+selection from the controller or its caller cannot replace the selected Python
+3.12 worker environment with another interpreter during synchronization. Real
+worker and management integration tests exercise this boundary with an outer
+Python 3.14 selection while retaining the production runtime checks. No trace
+schema or dashboard projection changes accompany this interpreter binding.

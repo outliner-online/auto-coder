@@ -757,7 +757,14 @@ def test_checkout_record_uses_real_clean_git_identity_and_locked_input(tmp_path:
     subprocess.run(["git", "-C", tmp_path, "commit", "-qm", "fixture"], check=True)
     sha = subprocess.run(["git", "-C", tmp_path, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
 
-    observed = record_from_checkout("owner/repo", sha, 17, 2, 23, tmp_path)
+    # Publication remains a Python 3.12-only boundary even when this unit test
+    # runs on an advisory host. Exercise both policy inputs explicitly.
+    with monkeypatch.context() as interpreter:
+        interpreter.setattr("auto_coder.tested_source_refs.platform.python_version_tuple", lambda: ("3", "14", "0"))
+        with pytest.raises(SourceEvidenceError, match="publisher must run with Python 3.12"):
+            record_from_checkout("owner/repo", sha, 17, 2, 23, tmp_path)
+        interpreter.setattr("auto_coder.tested_source_refs.platform.python_version_tuple", lambda: ("3", "12", "0"))
+        observed = record_from_checkout("owner/repo", sha, 17, 2, 23, tmp_path)
     assert observed.source_sha == sha
     assert len(observed.lock_sha256) == 64
 
