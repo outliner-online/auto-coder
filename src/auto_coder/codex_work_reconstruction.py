@@ -188,12 +188,61 @@ def production_codex_reconstructor(repository: str, issue_number: int) -> CodexW
     def retry_dispatch() -> CodexSourceSnapshot:
         operations = []
         handoffs = retries.list_for_issue(issue_number)
+        issue_runs = runs.list_for_issue(issue_number)
+        slot_snapshot = ImplementationSlotRepository(repository, 1).snapshot()
+        if not isinstance(slot_snapshot, ImplementationSlotSnapshot):
+            raise RuntimeError("Codex retry handoff membership is unavailable")
+        bound_owner = next((item for item in slot_snapshot.owners if item.owner == ImplementationOwner("issue", issue_number)), None)
+        handoff_sources = []
         for handoff in handoffs:
             if handoff.route != "codex-cloud" or handoff.outcome == "definitely-not-started":
                 continue
             phase = CodexWorkPhase.ACCEPTED if handoff.outcome in {"accepted", "completed"} else (CodexWorkPhase.DELIVERY_UNKNOWN if handoff.outcome == "indeterminate" else CodexWorkPhase.RESERVED)
-            operations.append(operation(stable_codex_operation_id("retry", handoff.request_id), "retry", handoff.request_id, phase, handoff.external_id or ""))
-        return CodexSourceSnapshot("retry-dispatch", _value_identity(handoffs), tuple(operations))
+            recovered = recovery.get(repository, handoff.external_id) if handoff.external_id else None
+            matching_runs = [
+                run
+                for run in issue_runs
+                if run.repo_name == repository
+                and run.issue_number == issue_number
+                and run.provider == "codex-cloud"
+                and run.submission_outcome == "accepted"
+                and run.task_id == handoff.external_id
+                and run.launch_identity == handoff.request_id
+                and type(handoff.numeric_attempt) is int
+                and run.attempt == handoff.numeric_attempt
+            ]
+            # Retry dispatch acknowledges provider/slot projection, not PR
+            # publication. Correlate the accepted creation with its own durable
+            # PR-recovery handoff; never borrow an unrelated task's publication.
+            completed_handoff = bool(
+                phase is CodexWorkPhase.ACCEPTED
+                and handoff.repository == repository
+                and handoff.issue_number == issue_number
+                and handoff.tracking_complete
+                and handoff.handoff_complete
+                and len(matching_runs) == 1
+                and recovered is not None
+                and recovered.repository == repository
+                and recovered.task_id == handoff.external_id
+                and recovered.state is RecoveryOutcome.PR_OBSERVED
+                and recovered.handoff_complete
+                and bound_owner is not None
+                and recovered.pr_number in bound_owner.implementation_prs
+            )
+            handoff_sources.append((handoff.request_id, recovered))
+            operations.append(
+                operation(
+                    stable_codex_operation_id("retry", handoff.request_id),
+                    "retry",
+                    handoff.request_id,
+                    phase,
+                    handoff.external_id or "",
+                    publication_complete=completed_handoff,
+                    tracking_complete=completed_handoff,
+                )
+            )
+        owner_binding = None if bound_owner is None else (bound_owner.incarnation, bound_owner.implementation_prs)
+        return CodexSourceSnapshot("retry-dispatch", _value_identity((handoffs, issue_runs, handoff_sources, owner_binding)), tuple(operations))
 
     def followups() -> CodexSourceSnapshot:
         task_ids = {run.task_id for run in runs.list_all() if run.issue_number == issue_number and run.provider == "codex-cloud" and run.task_id}

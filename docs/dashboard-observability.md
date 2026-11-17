@@ -3709,3 +3709,14 @@ and supervisor diagnostics remain available. Unit tests in
 progress. Before production activation, its standalone start/failure/completion
 results need a durable operation record; this staged entry is not evidence that
 a target repository is making progress.
+
+
+Retry PR-handoff reconstruction remains on the existing Codex reclamation path.
+Correlating the dispatch receipt, accepted CloudRun and owned PR-recovery handoff
+repairs missing internal publication/tracking facts; it emits neither a review
+nor provider delivery success, and does not introduce a processing origin,
+route, outcome or structured field. Retention/release diagnostics and the
+capacity projection still follow the existing guarded retirement transaction.
+Run `bash scripts/test.sh tests/test_codex_retry_handoff_reconstruction.py
+tests/test_codex_reclamation_composition.py` for positive correlation,
+incomplete/foreign evidence, source-token invalidation and guarded retirement.
