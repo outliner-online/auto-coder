@@ -1359,6 +1359,8 @@ def _invalidate_retained_discussion_authority(repo_name: str, pr_number: int, th
     retained = store.load(pr_number)
     if retained is None:
         raise DecisionRetentionError("The producing ordinary decision is unavailable")
+    if retained.has_uncertain_ordinary_publication:
+        raise DecisionRetentionError("Retained ordinary publisher publication is pending; discussion revalidation cannot discard it")
     # Clearing the headline must not erase another thread's producing binding.
     # Convert every retained ADDRESSED source to a non-authorizing input obligation.
     bindings = list(retained.prior_discussion_bindings)

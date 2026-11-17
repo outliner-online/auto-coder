@@ -178,3 +178,8 @@ this change neither discards them nor provides a migration command.
 Regression: `bash scripts/test.sh tests/test_ordinary_publisher_identity.py
 tests/test_ordinary_correction_retention.py tests/test_effective_decision_pr_flow.py
 tests/test_github_app_reviewer.py`.
+
+Discussion changes also cannot discard an uncertain ordinary publication. The
+pre-invalidation check holds it before ledger changes, and the locked store
+refuses a stale clear after another writer binds the publisher. Confirmed and
+provably-unsent ordinary decisions remain eligible for discussion revalidation.

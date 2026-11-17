@@ -226,6 +226,10 @@ class RetainedDecision:
     updated_at: float = 0.0
 
     @property
+    def has_uncertain_ordinary_publication(self) -> bool:
+        return self.ordinary_correction is not None and self.publication == PUBLICATION_PENDING and not (type(self.publication_identity_version) is int and self.publication_identity_version == 1 and type(self.publication_publisher_app_id) is int and self.publication_publisher_app_id == 0)
+
+    @property
     def publication_producer(self) -> tuple[object, ...]:
         return (self.repository, self.pr_number, self.head_sha, self.base_sha, self.attempt_id, self.attempt_sequence, self.ordinary_correction)
 
@@ -322,6 +326,8 @@ class EffectiveDecisionStore:
                 state = self._read()
                 previous_raw = state.get(str(record.pr_number))
                 previous = self._decode(previous_raw) if previous_raw is not None else None
+                if previous is not None and previous.has_uncertain_ordinary_publication and stamped.ordinary_correction is None:
+                    raise DecisionRetentionError("Retained ordinary publisher publication is pending; its payload cannot be discarded")
                 if previous is not None and previous.publication_producer == stamped.publication_producer:
                     # Only the atomic pre-send binder may establish authority.
                     # A stale bookkeeping writer cannot erase or change it.

@@ -196,3 +196,76 @@ def test_changed_head_does_not_erase_unknown_or_attempted_publication(env: Env, 
         pr_processor._publish_effective_review(REPO, 8101, "changed-head", raw, None)
     send.assert_not_called()
     assert store.storage_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("version,app_id", [(0, 0), (1, 4765828)])
+def test_discussion_invalidation_preserves_uncertain_publication(env: Env, monkeypatch, version, app_id):
+    env.ledger.initialize_namespace("https://api.github.com", REPO, 8101)
+    monkeypatch.setattr(pr_processor, "CanonicalPRBlockerLedger", lambda: env.ledger)
+    store, _ = retained_ordinary(env, version=version, app_id=app_id)
+    before = store.storage_path.read_bytes()
+    with pytest.raises(DecisionRetentionError, match="publisher.*pending"):
+        pr_processor._invalidate_retained_discussion_authority(REPO, 8101, ("discussion",))
+    assert store.storage_path.read_bytes() == before
+
+
+def test_stale_discussion_clear_cannot_erase_new_publisher_binding(env: Env):
+    store, _ = retained_ordinary(env, app_id=0)
+    stale_clear = replace(store.load(8101), ordinary_correction=None)
+    EffectiveDecisionStore(REPO).pin_publication_publisher(store.load(8101), 4765828)
+    before = store.storage_path.read_bytes()
+    with pytest.raises(DecisionRetentionError, match="publisher.*pending"):
+        store.save(stale_clear)
+    assert store.storage_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_discussion_invalidation_allows_confirmed_or_provably_unsent(env: Env, monkeypatch, confirmed):
+    env.ledger.initialize_namespace("https://api.github.com", REPO, 8101)
+    monkeypatch.setattr(pr_processor, "CanonicalPRBlockerLedger", lambda: env.ledger)
+    from auto_coder.effective_decision_application import PUBLICATION_CONFIRMED
+
+    store, _ = retained_ordinary(env, app_id=4765828 if confirmed else 0)
+    if confirmed:
+        store.update(8101, publication=PUBLICATION_CONFIRMED)
+    pr_processor._invalidate_retained_discussion_authority(REPO, 8101, ("discussion",))
+    retained = store.load(8101)
+    assert retained.ordinary_correction is None
+    assert retained.discussion_revalidation_thread_ids == ["discussion"]
+    assert retained.publication == (PUBLICATION_CONFIRMED if confirmed else PUBLICATION_PENDING)
+
+
+@pytest.mark.parametrize("version,saved_app", [(0, 0), (1, 4765828)])
+def test_production_discussion_change_keeps_uncertain_publisher_hold(flow_env: Env, monkeypatch, version, saved_app):
+    from auto_coder.adversarial_validator import ReviewThreadDisposition
+    from auto_coder.ordinary_closure_evidence import serialize_ordinary_result
+
+    flow, script, _ = _historical_root_with_current_violation(flow_env, monkeypatch, "cloud", "missing")
+    with patch("auto_coder.pr_processor._publish_effective_review", side_effect=SimulatedCrash), pytest.raises(SimulatedCrash):
+        flow.run(closure=script)
+    store = EffectiveDecisionStore(REPO)
+    data = json.loads(store.storage_path.read_text())
+    record = data[str(flow.pr)]
+    ordinary = store.load(flow.pr).ordinary_correction
+    raw = ordinary.restore()
+    raw.thread_dispositions = [ReviewThreadDisposition(thread_id=flow.thread_id, status="ADDRESSED", discussion_evidence_digest="original-discussion")]
+    record["ordinary_correction"]["payload"] = serialize_ordinary_result(raw)
+    record["ordinary_correction"]["requires_strong_policy"] = False
+    record["publication_identity_version"] = version
+    record["publication_publisher_app_id"] = saved_app
+    store.storage_path.write_text(json.dumps(data))
+    before = store.load(flow.pr)
+    assert flow_env.ledger.get_pending_publication_intents("https://api.github.com", REPO, flow.pr) == ()
+    monkeypatch.setattr(pr_processor, "substantive_discussion_digest", lambda *_args: "changed-discussion")
+    _reconstruct_flow_stores(flow)
+    flow.model_responses = []
+    for force in (False, True):
+        actions = flow.run(closure=script, force=force)
+        assert any("publisher" in action and "pending" in action for action in actions), list(actions)
+        assert flow.reviews == []
+        assert flow.handoffs == 0 and flow.merge.call_count == 0
+        assert flow.model_calls == 1
+        after = store.load(flow.pr)
+        assert after.ordinary_correction == before.ordinary_correction
+        assert after.publication == PUBLICATION_PENDING
+        assert (after.publication_identity_version, after.publication_publisher_app_id) == (version, saved_app)
