@@ -6990,6 +6990,7 @@ def _coordinate_pr_review(
                             val_result.diagnostic_reason = str(e)
                             val_result.thread_dispositions = []
                             runtime.active_attempt_status = "ERROR"
+                            actions.record_disposition(ReviewDisposition.OPERATIONAL_FAILURE)
                             effective_application = None  # an unconfirmed checkpoint write must not be overwritten by the precomputed decision
                     if effective_application is not None:
                         try:
