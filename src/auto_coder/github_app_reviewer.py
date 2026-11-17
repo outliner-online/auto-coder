@@ -1223,11 +1223,14 @@ def publish_adversarial_review(
     operation_id: Optional[str] = None,
     expected_ledger_revision: Optional[int] = None,
     approval_authority: Optional[Callable[[], str]] = None,
+    expected_publisher: Optional[ReviewerAppIdentity] = None,
 ) -> ReviewPublicationResult:
     """Load dedicated credentials and publish without touching the user client."""
     try:
         effective_ledger = ledger if ledger is not None else CanonicalPRBlockerLedger()
         reviewer = GitHubAppReviewer(load_reviewer_app_config(repo_name=repo_name), ledger=effective_ledger)
+        if expected_publisher is not None and reviewer.get_identity() != expected_publisher:
+            return ReviewPublicationResult(False, "", "Retained ordinary publisher identity changed before transmission", policy_refusal=True)
     except Exception:
         logger.bind(repository=repo_name, phase="configuration", target=str(pr_number)).error("Dedicated reviewer GitHub App configuration could not be loaded")
         return ReviewPublicationResult(False, "", "Dedicated reviewer GitHub App configuration is unavailable")

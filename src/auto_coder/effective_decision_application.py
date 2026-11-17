@@ -209,6 +209,9 @@ class RetainedDecision:
     reopen_epoch: int = 0
     evidence_revision: str = ""
     publication: str = PUBLICATION_PENDING
+    # Zero is legacy/unknown authority, never a fresh publication permit.
+    publication_identity_version: int = 0
+    publication_publisher_app_id: int = 0
     handoff: str = HANDOFF_NOT_REQUIRED
     wait_reason: str = ""
     # Count of confirmed corrective deliveries and the provider observation taken
@@ -221,6 +224,10 @@ class RetainedDecision:
     # Closure-acceptance attempts already spent, keyed by target/lifecycle revision.
     closure_attempts: list[str] = field(default_factory=list)
     updated_at: float = 0.0
+
+    @property
+    def publication_producer(self) -> tuple[object, ...]:
+        return (self.repository, self.pr_number, self.head_sha, self.base_sha, self.attempt_id, self.attempt_sequence, self.ordinary_correction)
 
     @property
     def requires_handoff(self) -> bool:
@@ -313,6 +320,12 @@ class EffectiveDecisionStore:
         try:
             with self._locked():
                 state = self._read()
+                previous_raw = state.get(str(record.pr_number))
+                previous = self._decode(previous_raw) if previous_raw is not None else None
+                if previous is not None and previous.publication_producer == stamped.publication_producer:
+                    # Only the atomic pre-send binder may establish authority.
+                    # A stale bookkeeping writer cannot erase or change it.
+                    stamped = replace(stamped, publication_identity_version=previous.publication_identity_version, publication_publisher_app_id=previous.publication_publisher_app_id)
                 state[str(record.pr_number)] = asdict(stamped)
                 self._write(state)
         except DecisionRetentionError:
@@ -356,7 +369,7 @@ class EffectiveDecisionStore:
             discussion_revalidation_thread_ids=sorted(set(record.discussion_revalidation_thread_ids + (previous.discussion_revalidation_thread_ids if previous is not None else []))),
         )
         if previous is not None and (previous.head_sha, previous.base_sha) == (record.head_sha, record.base_sha):
-            same_producer = previous.ordinary_correction == record.ordinary_correction and (previous.attempt_id, previous.attempt_sequence) == (record.attempt_id, record.attempt_sequence)
+            same_producer = previous.publication_producer == record.publication_producer
             same_ordinary = record.ordinary_correction is not None and same_producer and previous.next_action == record.next_action and previous.status == record.status and previous.source_identities == record.source_identities and set(record.blocker_ids).issubset(previous.blocker_ids)
             legacy_continuity = previous.ordinary_correction is None and record.ordinary_correction is None
             same_delivery = same_ordinary or (legacy_continuity and previous.blocker_ids == record.blocker_ids)
@@ -371,8 +384,43 @@ class EffectiveDecisionStore:
                 handoff_observation=previous.handoff_observation if same_ordinary or legacy_continuity else record.handoff_observation,
                 handoff=previous.handoff if same_delivery and previous.handoff == HANDOFF_DISPATCHED and record.requires_handoff else record.handoff,
                 publication=previous.publication if same_producer else record.publication,
+                publication_identity_version=previous.publication_identity_version if same_producer else record.publication_identity_version,
+                publication_publisher_app_id=previous.publication_publisher_app_id if same_producer else record.publication_publisher_app_id,
             )
         return self.save(carried)
+
+    def pin_publication_publisher(self, expected: RetainedDecision, app_id: int) -> RetainedDecision:
+        """Bind a fresh intent before effects, or require its original App.
+
+        The store lock keeps a changed producer from inheriting another
+        attempt's authority. Legacy records remain unknown and untouched.
+        """
+        if type(app_id) is not int or app_id <= 0:
+            raise DecisionRetentionError("Retained ordinary publisher identity is unavailable")
+        try:
+            with self._locked():
+                state = self._read()
+                raw = state.get(str(expected.pr_number))
+                if raw is None:
+                    raise DecisionRetentionError("Retained ordinary publisher record is unavailable")
+                current = self._decode(raw)
+                if current.publication_producer != expected.publication_producer or current.publication != PUBLICATION_PENDING:
+                    raise DecisionRetentionError("Retained ordinary publisher target changed")
+                if type(current.publication_identity_version) is not int or current.publication_identity_version != 1:
+                    raise DecisionRetentionError("Retained ordinary publisher identity is unknown")
+                saved = current.publication_publisher_app_id
+                if type(saved) is not int or saved < 0 or saved not in (0, app_id):
+                    raise DecisionRetentionError("Retained ordinary publisher identity changed")
+                if saved == app_id:
+                    return current
+                pinned = replace(current, publication_publisher_app_id=app_id, updated_at=time.time())
+                state[str(current.pr_number)] = asdict(pinned)
+                self._write(state)
+                return pinned
+        except DecisionRetentionError:
+            raise
+        except (OSError, ValueError, TypeError) as exc:
+            raise DecisionRetentionError("Retained ordinary publisher identity could not be persisted") from exc
 
     def update(self, pr_number: int, **changes: object) -> RetainedDecision:
         previous = self.load(pr_number)
@@ -563,6 +611,7 @@ def build_retained_record(decision: EffectiveReviewDecision, projection: Accepte
         reopen_epoch=binding.reopen_epoch,
         evidence_revision=evidence_revision(projection),
         publication=PUBLICATION_PENDING,
+        publication_identity_version=1,
         handoff=HANDOFF_PENDING if decision.next_action in {EffectiveNextAction.IMPLEMENTATION_REPAIR, EffectiveNextAction.FOCUSED_TEST_REPAIR} else HANDOFF_NOT_REQUIRED,
         wait_reason=WAIT_RECONCILIATION if decision.next_action is EffectiveNextAction.RECONCILIATION else "",
     )

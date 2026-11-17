@@ -76,6 +76,7 @@ from .effective_decision_application import (
     HANDOFF_PENDING,
     HANDOFF_WAITING,
     PUBLICATION_CONFIRMED,
+    PUBLICATION_PENDING,
     WAIT_ALLOWANCE_EXHAUSTED,
     WAIT_ASSOCIATION_EVIDENCE,
     WAIT_INDETERMINATE,
@@ -1124,6 +1125,10 @@ class _SavedReviewPorts:
     @property
     def _retain_effective_decision(self) -> Any:
         return _retain_effective_decision
+
+    @property
+    def _pin_retained_review_publisher(self) -> Any:
+        return _pin_retained_review_publisher
 
     @property
     def accepted_finding_dispositions(self) -> Any:
@@ -5962,17 +5967,43 @@ def _dispatch_confirmed_effective_correction(
     return result, facts
 
 
+def _pin_retained_review_publisher(repo_name: str, pr_number: int, head_sha: str, result: Optional[AdversarialValidationResult] = None) -> Optional[ReviewerAppIdentity]:
+    """Keep an ordinary pending review bound to its producing App."""
+    store = EffectiveDecisionStore(repo_name)
+    retained = store.load(pr_number)
+    if retained is None or retained.ordinary_correction is None or retained.publication != PUBLICATION_PENDING:
+        return None
+    if retained.head_sha != head_sha:
+        # Version 1 with no binding proves that this producer never reached send.
+        if type(retained.publication_identity_version) is int and retained.publication_identity_version == 1 and type(retained.publication_publisher_app_id) is int and retained.publication_publisher_app_id == 0:
+            return None
+        raise DecisionRetentionError("Retained ordinary publisher publication belongs to another target")
+    if result is not None and (result.attempt_id, result.attempt_sequence) != (retained.attempt_id, retained.attempt_sequence):
+        raise DecisionRetentionError("Retained ordinary publisher target changed")
+    if type(retained.publication_identity_version) is not int or retained.publication_identity_version != 1:
+        raise DecisionRetentionError("Retained ordinary publisher identity is unknown")
+    try:
+        identity = resolve_reviewer_app_identity(repo_name)
+    except Exception as exc:
+        raise DecisionRetentionError("Retained ordinary publisher identity is unavailable") from exc
+    if type(identity.app_id) is not int or identity.app_id <= 0 or not isinstance(identity.login, str) or not identity.login.strip():
+        raise DecisionRetentionError("Retained ordinary publisher identity is unavailable")
+    store.pin_publication_publisher(retained, identity.app_id)
+    return identity
+
+
 def _publish_effective_review(repo_name: str, pr_number: int, head_sha: str, result: AdversarialValidationResult, authority: Optional[ApprovalAuthority]) -> Any:
     """Publish the effective review; an approval carries its last pre-send authority check."""
+    publisher = _pin_retained_review_publisher(repo_name, pr_number, head_sha, result)
     if authority is None:
-        return publish_adversarial_review(repo_name, pr_number, head_sha, result)
+        return publish_adversarial_review(repo_name, pr_number, head_sha, result, expected_publisher=publisher)
     with contextlib.ExitStack() as ordering:
         if result.allows_auto_merge:
             # An APPROVE can be sent: hold the accepted-state lifecycle's transition fence from the
             # authority check through transmission, so a newly accepted finding either precedes
             # (and refuses) the approval or follows it.
             ordering.enter_context(authority.transition_fence())
-        return publish_adversarial_review(repo_name, pr_number, head_sha, result, approval_authority=authority)
+        return publish_adversarial_review(repo_name, pr_number, head_sha, result, approval_authority=authority, expected_publisher=publisher)
 
 
 def _authentic_root_threads(repo_name: str, state: ClaimedReviewThreadGateState) -> Sequence[ClaimedReviewThread]:
