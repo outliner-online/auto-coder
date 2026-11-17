@@ -72,9 +72,11 @@ def test_production_ordinary_resumption_holds_without_canonical_intent(flow_env:
 
 @pytest.mark.parametrize("app_id", [4765828, 5792531])
 @pytest.mark.parametrize("already_bound", [False, True])
-def test_fresh_or_same_publisher_is_persisted_before_send(env: Env, monkeypatch, app_id, already_bound):
+@pytest.mark.parametrize("with_authority", [False, True])
+def test_fresh_or_same_publisher_is_persisted_before_send(env: Env, monkeypatch, app_id, already_bound, with_authority):
     store, raw = retained_ordinary(env, app_id=app_id if already_bound else 0)
     identity = ReviewerAppIdentity(login="reviewer[bot]", app_id=app_id)
+    authority = MagicMock() if with_authority else None
     monkeypatch.setattr(pr_processor, "resolve_reviewer_app_identity", lambda _repo: identity)
 
     def send(*args, **kwargs):
@@ -82,11 +84,13 @@ def test_fresh_or_same_publisher_is_persisted_before_send(env: Env, monkeypatch,
         assert current.publication_publisher_app_id == identity.app_id
         assert current.publication == PUBLICATION_PENDING
         assert kwargs["expected_publisher"] == identity
+        if authority is not None:
+            assert kwargs["approval_authority"] is authority
         return ReviewPublicationResult(True, "REQUEST_CHANGES")
 
     publish = MagicMock(side_effect=send)
     monkeypatch.setattr(pr_processor, "publish_adversarial_review", publish)
-    assert pr_processor._publish_effective_review(REPO, 8101, env.head, raw, None).success
+    assert pr_processor._publish_effective_review(REPO, 8101, env.head, raw, authority).success
     publish.assert_called_once()
     assert store.load(8101).publication == PUBLICATION_PENDING
 

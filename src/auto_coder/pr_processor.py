@@ -5996,6 +5996,8 @@ def _publish_effective_review(repo_name: str, pr_number: int, head_sha: str, res
     """Publish the effective review; an approval carries its last pre-send authority check."""
     publisher = _pin_retained_review_publisher(repo_name, pr_number, head_sha, result)
     if authority is None:
+        if publisher is None:
+            return publish_adversarial_review(repo_name, pr_number, head_sha, result)
         return publish_adversarial_review(repo_name, pr_number, head_sha, result, expected_publisher=publisher)
     with contextlib.ExitStack() as ordering:
         if result.allows_auto_merge:
@@ -6003,6 +6005,8 @@ def _publish_effective_review(repo_name: str, pr_number: int, head_sha: str, res
             # authority check through transmission, so a newly accepted finding either precedes
             # (and refuses) the approval or follows it.
             ordering.enter_context(authority.transition_fence())
+        if publisher is None:
+            return publish_adversarial_review(repo_name, pr_number, head_sha, result, approval_authority=authority)
         return publish_adversarial_review(repo_name, pr_number, head_sha, result, approval_authority=authority, expected_publisher=publisher)
 
 
