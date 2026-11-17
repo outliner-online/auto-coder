@@ -94,6 +94,48 @@ class GitHubGitDataClient:
             # without provisioning a credential to a replaceable manager.
             self._headers.pop("Authorization")
 
+    def same_repository(self, historical_repository: str) -> bool:
+        """Prove a retained name identifies this repository without following redirects."""
+        if any(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) is None for name in (self._repository, historical_repository)):
+            raise RuntimeError("repository identity name is invalid")
+
+        def canonical_id(response: httpx.Response, name: str) -> int:
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise RuntimeError("repository identity metadata is malformed") from exc
+            if response.status_code != 200 or not isinstance(data, dict):
+                raise RuntimeError("repository identity metadata is unavailable")
+            numeric_id, full_name = data.get("id"), data.get("full_name")
+            if type(numeric_id) is not int or numeric_id <= 0 or not isinstance(full_name, str) or full_name.casefold() != name.casefold():
+                raise RuntimeError("repository identity metadata conflicts")
+            return numeric_id
+
+        try:
+            with github_http_client(subsystem="git-data", api_origin=self._api_url, timeout=self._timeout, follow_redirects=False) as client:
+                current = client.get(self._base, headers=self._headers)
+                numeric_id = canonical_id(current, self._repository)
+                historical = client.get(f"{self._api_url}/repos/{historical_repository}", headers=self._headers)
+                if historical.status_code == 200:
+                    if canonical_id(historical, historical_repository) != numeric_id:
+                        raise RuntimeError("historical repository identity conflicts")
+                    return True
+                if historical.status_code != 301:
+                    raise RuntimeError("historical repository identity is unavailable")
+                # A permanent move supplied by the trusted API is evidence.
+                # Parse its numeric identity only; never follow this URL.
+                try:
+                    target = httpx.URL(historical.headers.get("location", ""))
+                    api = httpx.URL(self._api_url)
+                except (httpx.InvalidURL, ValueError) as exc:
+                    raise RuntimeError("historical repository move is malformed") from exc
+                expected_path = api.raw_path.rstrip(b"/") + f"/repositories/{numeric_id}".encode("ascii")
+                if (target.scheme, target.host, target.port) != (api.scheme, api.host, api.port) or target.userinfo or target.query or target.fragment or target.raw_path != expected_path:
+                    raise RuntimeError("historical repository move conflicts")
+                return True
+        except httpx.RequestError as exc:
+            raise RuntimeError("repository identity request unavailable") from exc
+
     def _repository_read_redirect(self, response: httpx.Response) -> httpx.URL | None:
         """Recognize GitHub's permanent move to the same repository's ID route."""
         try:

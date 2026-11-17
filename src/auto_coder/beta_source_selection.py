@@ -238,6 +238,28 @@ class BetaSourceSelector:
             raise BetaSourceConflict("current selection is not an immutable tag object")
         return target["sha"]
 
+    def _validated_current_record(self, oid: str) -> BetaSelectionRecord:
+        """Read the immutable predecessor and prove any repository transfer."""
+        previous_tag = _object(self.client.request("GET", f"git/tags/{oid}"), "current selection history object")
+        previous_name = previous_tag.get("tag")
+        if not isinstance(previous_name, str) or re.fullmatch(r"auto-coder-beta-selection-r[1-9][0-9]*", previous_name) is None:
+            raise BetaSourceConflict("current selection has no valid immutable operation identity")
+        prior_ref = _object(self.client.request("GET", f"git/ref/tags/{previous_name}"), "prior selection history ref")
+        prior_target = prior_ref.get("object")
+        if prior_ref.get("ref") != f"refs/tags/{previous_name}" or not isinstance(prior_target, dict) or prior_target.get("type") != "tag" or prior_target.get("sha") != oid:
+            raise BetaSourceConflict("current selection history object is not immutable")
+        record = self._read_record(previous_name)
+        if record is None or record.serialize() != previous_tag.get("message") or record.operation_id != previous_name.removeprefix("auto-coder-beta-selection-"):
+            raise BetaSourceConflict("current selection record does not match its historical identity")
+        if record.repository != self.repository:
+            try:
+                same = self.client.same_repository(record.repository)
+            except RuntimeError as exc:
+                raise BetaSourceConflict("current selection repository identity is unproven") from exc
+            if same is not True:
+                raise BetaSourceConflict("current selection repository identity conflicts")
+        return record
+
     def _confirm_current_selection(self, record: BetaSelectionRecord) -> BetaSelectionReceipt:
         """Confirm both pointers and the exact history identity, including same-SHA replacements."""
         name = self._history_name(record.operation_id)
@@ -249,17 +271,7 @@ class BetaSourceSelector:
         current_oid = self._current_selection_oid()
         if current_oid != oid:
             if current_oid is not None:
-                previous_tag = _object(self.client.request("GET", f"git/tags/{current_oid}"), "current selection history object")
-                previous_name = previous_tag.get("tag")
-                if not isinstance(previous_name, str) or re.fullmatch(r"auto-coder-beta-selection-r[1-9][0-9]*", previous_name) is None:
-                    raise BetaSourceConflict("current selection has no valid immutable operation identity")
-                prior_ref = _object(self.client.request("GET", f"git/ref/tags/{previous_name}"), "prior selection history ref")
-                prior_target = prior_ref.get("object")
-                if not isinstance(prior_target, dict) or prior_target.get("type") != "tag" or prior_target.get("sha") != current_oid:
-                    raise BetaSourceConflict("current selection history object is not immutable")
-                current_record = self._read_record(previous_name)
-                if current_record is None or current_record.serialize() != previous_tag.get("message") or current_record.repository != self.repository or current_record.operation_id != previous_name.removeprefix("auto-coder-beta-selection-"):
-                    raise BetaSourceConflict("current selection record does not match its historical identity")
+                current_record = self._validated_current_record(current_oid)
                 if int(current_record.operation_id[1:]) >= int(record.operation_id[1:]):
                     return BetaSelectionReceipt(f"refs/tags/{name}", BETA_REF, MutationCertainty.SUPERSEDED, record.source_sha, self._pointer())
             marker = f"{name}-current-attempt"
@@ -352,6 +364,14 @@ class BetaSourceSelector:
         expected = SourceExecution(record.selected_run_id, record.selected_run_attempt, record.source_sha, record.selected_completed_at)
         if selected != expected:
             raise BetaSourceConflict("a later eligible execution exists before the first pointer effect")
+        # Validate the predecessor before either mutable pointer can change.
+        # Confirmation repeats this read because supported recovery may enter
+        # after a source pointer effect from an earlier invocation.
+        current_oid = self._current_selection_oid()
+        if current_oid is not None:
+            predecessor = self._validated_current_record(current_oid)
+            if int(predecessor.operation_id[1:]) >= int(record.operation_id[1:]):
+                return BetaSelectionReceipt(f"refs/tags/{name}", BETA_REF, MutationCertainty.SUPERSEDED, record.source_sha, current)
         self._publish_immutable_record(effect_name, record, "pointer-attempt")
         if current == record.source_sha:
             return self._confirm_current_selection(record)

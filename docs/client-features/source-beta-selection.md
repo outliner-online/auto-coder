@@ -51,3 +51,20 @@ attempt may be selected when the operator supplies the actual previous SHA;
 the selected execution must still be the latest successful eligible attempt.
 The manager requires both refs and the immutable selection object to agree
 before replacing a worker. The source pointer alone is never selection proof.
+
+Before the first source-pointer effect, the selector also validates the current
+selection's immutable predecessor and operation ordering. It repeats that check
+before confirming the selection pointer. A repository transfer is accepted only
+when fresh current repository metadata supplies its canonical name and positive
+numeric ID and the historical name either returns that same ID with its own
+canonical name or the API returns a permanent move to that exact numeric ID on
+the same API origin. Redirect targets are parsed, never fetched by this check.
+Unavailable reads, reused names, aliases without this evidence, and malformed or
+foreign redirects fail closed before the first pointer effect. Existing history
+names, annotations, and object identities remain unchanged. Durable attempt
+markers and uncertain-write recovery retain their existing behavior.
+
+This controller-only identity check does not change worker admission, provider
+routing, durable worker state, or structured dashboard events. Its existing
+selection receipt/error remains the observable result; no dashboard event schema
+or production-to-view mapping changes.
