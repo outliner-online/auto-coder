@@ -2554,6 +2554,17 @@ Run `bash scripts/test.sh tests/test_worktree_isolation.py tests/test_muse_msp.p
 
 ## Pending ordinary review publication recovery
 
+Saved ordinary decisions also retain their publisher authority before any send.
+A changed or unknown publisher is surfaced by the existing
+`pr.repair-delegation` failure event with `review_disposition=OPERATIONAL_FAILURE`
+and a non-secret `reason`; the processing result remains failed/PENDING and
+there is no provider handoff or extra model invocation. There is no new trace
+schema or dashboard renderer behavior. The production-flow regression
+`tests/test_ordinary_publisher_identity.py::test_production_ordinary_resumption_holds_without_canonical_intent`
+covers restart and forced processing without a canonical intent. Run
+`bash scripts/test.sh tests/test_ordinary_publisher_identity.py`.
+
+
 Before a fresh ordinary PR adversarial validation (including a changed head with
 no saved verdict), `_handle_pr_merge` recovers accepted pending publications.
 Unconfirmed recovery emits `pr.adversarial-validation`, `Outcome.FAILED`, with

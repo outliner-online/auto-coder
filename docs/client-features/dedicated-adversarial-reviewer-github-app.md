@@ -156,3 +156,30 @@ cross-App recovery or reinterpret historical authors as the new App.
 This configuration change does not add a dashboard event, processing origin,
 admission outcome or durable-work schema; existing publication diagnostics and
 pending reconciliation remain the observable results.
+
+### Ordinary retained publisher continuity
+
+New ordinary decisions carry publication identity version 1. Before the first
+send, the controller atomically binds the resolved App ID to the exact producing
+repository, PR, head/base and ordinary attempt. Same-producer retention and stale
+bookkeeping writes preserve this binding. A selected transport must resolve the
+same publisher before it can send. A matching App can resume ordinary recovery;
+a changed, unavailable, malformed or legacy-unknown publisher leaves the saved
+decision PENDING without a new review, repair handoff, reviewer invocation or
+merge. Missing canonical publication intents do not waive this check. A changed head
+also cannot discard an unknown or attempted pending publication; only a new
+version-1 decision that has not reached its pre-send binding is known unsent.
+
+Existing records without this binding remain version 0; a configuration change
+cannot retroactively assign them to a new App. They require independently
+established original-publication evidence and a supported migration decision;
+this change neither discards them nor provides a migration command.
+
+Regression: `bash scripts/test.sh tests/test_ordinary_publisher_identity.py
+tests/test_ordinary_correction_retention.py tests/test_effective_decision_pr_flow.py
+tests/test_github_app_reviewer.py`.
+
+Discussion changes also cannot discard an uncertain ordinary publication. The
+pre-invalidation check holds it before ledger changes, and the locked store
+refuses a stale clear after another writer binds the publisher. Confirmed and
+provably-unsent ordinary decisions remain eligible for discussion revalidation.

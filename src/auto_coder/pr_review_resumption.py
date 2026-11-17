@@ -193,6 +193,7 @@ def _resume_saved_ordinary_correction(ports, github_client: Any, repo_name: str,
     try:
         store = ports.EffectiveDecisionStore(repo_name)
         retained = store.load(pr_number)
+        ports._pin_retained_review_publisher(repo_name, pr_number, head_sha)
         if retained is not None and retained.head_sha == head_sha and (retained.status == "PASS") and (retained.next_action == ports.EffectiveNextAction.NONE.value):
             return False
         attempts = ports.AdversarialValidationAttemptRepository(repo_name)
