@@ -102,3 +102,14 @@ unknown operation to free capacity. If correlation or the producer binding is
 unavailable, retain the reservation with its ordinary reevaluation obligation
 until independently supported evidence or an explicitly authorized disposition
 exists. The repair never infers responsibility from the task-level handoff alone.
+
+
+Accepted retry reconstruction also correlates its exact request, numeric attempt
+and task with an accepted CloudRun and the same reservation's verified
+`pr_observed` recovery handoff. Dispatch tracking/slot acknowledgement alone
+does not prove PR publication. Both dispatch checkpoints, matching creation
+provenance, completed recovery handoff and owned PR membership are required to
+recover publication/tracking facts. The retry source consistency token includes
+the run, recovery and owner binding, so later changes invalidate the observation.
+This never declares execution settled: current, causally terminal native
+provider evidence and the existing closed-PR predicate remain necessary.
