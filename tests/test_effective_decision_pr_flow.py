@@ -1936,7 +1936,9 @@ def test_acceptance_after_the_authority_check_is_ordered_after_the_authorized_tr
     assert processor.isolated_pr_head_worktree is original_worktree
 
 
-def test_failed_checkpoint_write_is_not_overwritten_by_the_precomputed_decision(flow_env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("checkpoint_writable", [False, True], ids=["save-failure", "normal"])
+def test_checkpoint_write_preserves_result_and_returned_disposition(flow_env: Env, monkeypatch: pytest.MonkeyPatch, checkpoint_writable: bool) -> None:
+    from auto_coder.execution_trace import Outcome, get_trace_collector
     from auto_coder.reviewer_session_registry import ReviewerSessionRegistry
 
     pr = 9301
@@ -1947,12 +1949,36 @@ def test_failed_checkpoint_write_is_not_overwritten_by_the_precomputed_decision(
     def failing_save(self: ReviewerSessionRegistry, *_args: object, **_kwargs: object) -> None:
         raise OSError("registry unavailable")
 
-    monkeypatch.setattr(ReviewerSessionRegistry, "save", failing_save)
-    actions = flow.run()
+    if not checkpoint_writable:
+        monkeypatch.setattr(ReviewerSessionRegistry, "save", failing_save)
+    collector = get_trace_collector()
+    with collector.start_execution(REPO, "pr", pr, "checkpoint-persistence-regression") as execution:
+        actions = flow.run()
 
-    assert all(review["event"] != "APPROVE" for review in flow.reviews), actions
-    assert flow.handoffs == 0 and flow.merge.call_count == 0
-    assert flow.status.outcome is not PRProcessingOutcome.SUCCESS
+    events = [event for event in collector.get_snapshot().events if event.execution_id == execution.scope.execution_id]
+    validation = [event for event in events if event.stage_id == "pr.adversarial-validation" and (event.facts or {}).get("result")][-1]
+    attempts = AdversarialValidationAttemptRepository(REPO)._read()["attempts"]
+    assert len(attempts) == 1
+    assert flow.model_calls == 1
+    assert flow.handoffs == 0
+    if checkpoint_writable:
+        assert attempts[0]["status"] == "PASS"
+        assert validation.outcome == Outcome.COMPLETED.value
+        assert validation.facts["result"] == "PASS"
+        assert validation.facts["review_disposition"] == "REVIEW_VERIFIED"
+        assert actions.disposition.value == "MERGE_COMPLETED"
+        assert [review["event"] for review in flow.reviews] == ["APPROVE"]
+        flow.merge.assert_called_once()
+        assert flow.status.outcome is PRProcessingOutcome.SUCCESS
+    else:
+        assert attempts[0]["status"] == "ERROR"
+        assert validation.outcome == Outcome.FAILED.value
+        assert validation.facts["result"] == "ERROR"
+        assert validation.facts["diagnostic_category"] == "reviewer_gap_persistence_failure"
+        assert validation.facts["review_disposition"] == actions.disposition.value == "OPERATIONAL_FAILURE"
+        assert [review["event"] for review in flow.reviews] == ["COMMENT"], actions
+        flow.merge.assert_not_called()
+        assert flow.status.outcome is not PRProcessingOutcome.SUCCESS
 
 
 def test_closure_proposal_superseded_by_a_head_change_during_external_review_is_not_accepted(flow_env: Env, monkeypatch: pytest.MonkeyPatch) -> None:

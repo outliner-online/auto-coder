@@ -52,6 +52,14 @@ and `--force` all reach it, for local-origin and cloud-origin repairs alike.
   completed PASS with no pending action continues through saved-verdict clearance
   checks and remains eligible for an explicitly forced fresh review.
 
+If the owning attempt cannot save its deferred reviewer-session checkpoint, it
+clears the uncommitted checkpoint and records `ERROR`. The typed coordinator
+returns `OPERATIONAL_FAILURE`, matching the existing failed
+`pr.adversarial-validation` trace and its `reviewer_gap_persistence_failure`
+diagnostic. An error diagnostic may be published as a `COMMENT`; approval,
+corrective handoff and merge remain suppressed. A successful checkpoint continues
+through the ordinary review and final merge gates.
+
 ## Saved headlines are not clearance
 
 Before a saved same-head PASS is consumed the accepted state is re-acquired. A
