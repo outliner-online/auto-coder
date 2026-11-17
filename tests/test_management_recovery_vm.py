@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -168,15 +169,23 @@ def test_real_guest_block_stops_all_timers_before_services_and_retains_actual_ma
 
 
 @pytest.mark.parametrize("unit", UNITS)
-def test_existing_mask_is_preserved_without_stopping_or_resetting(maintenance, unit: str) -> None:
+@pytest.mark.parametrize("observation_delay", (0.0, 1.05), ids=("immediate", "delayed"))
+def test_existing_mask_is_preserved_without_stopping_or_resetting(maintenance, unit: str, observation_delay: float, _use_real_sleep) -> None:
     inhibit, prepare, output, masks = maintenance
     path = masks / unit
     path.symlink_to("/dev/null")
     before = path.lstat()
+    if observation_delay:
+        time.sleep(observation_delay)
     systemd = prepare()
     with pytest.raises(ValueError, match="mask paths are not empty"):
         inhibit(output)
-    assert path.lstat() == before and os.readlink(path) == "/dev/null"
+    after = path.lstat()
+    # Following the symlink during preflight may update access time, but must
+    # preserve its identity, protection and modification metadata.
+    preserved = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+    assert {name: getattr(after, name) for name in preserved} == {name: getattr(before, name) for name in preserved}
+    assert os.readlink(path) == "/dev/null"
     assert systemd.calls == []
     assert json.loads(output.read_text())["status"] == "failed"
 
