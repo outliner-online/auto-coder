@@ -4761,6 +4761,11 @@ class AutomationEngine:
                     await asyncio.sleep(max(1.0, min(60.0, REFILL_RETRY_INTERVAL_SECONDS)))
                     continue
                 available_count, identity = observed
+                if available_count > 0:
+                    # Check retained obligations even without a transition:
+                    # capacity may have become free before retention committed,
+                    # or this process may have restarted with free capacity.
+                    await self._wake_pr_capacity_waiters(repo_name)
                 if available_count > 0 and (refill_pending or (capacity_initialized and (previous_count == 0 or identity != previous_identity))):
                     refill_pending = True
                     logger.info("Normal implementation capacity became available; requesting fresh Issue refill")
@@ -4784,6 +4789,32 @@ class AutomationEngine:
                 self._record_refill_fault(repo_name, None, "service_control", exc, "intervention_required")
                 delay = CAPACITY_STATE_CHECK_INTERVAL_SECONDS
             await asyncio.sleep(delay)
+
+    async def _wake_pr_capacity_waiters(self, repo_name: str) -> int:
+        identities = await asyncio.to_thread(self.invalidations.wake_pr_capacity_waiters, repo_name)
+        for identity in identities:
+            self._record_pr_capacity_wait(identity, Outcome.COMPLETED, "capacity_guard_released")
+        if identities and self._invalidation_wake_event is not None:
+            self._invalidation_wake_event.set()
+        return len(identities)
+
+    @staticmethod
+    def _record_pr_capacity_wait(identity: EntityIdentity, outcome: Outcome, reason: str) -> None:
+        """Diagnostics cannot alter a committed capacity scheduling transition."""
+        try:
+            collector = get_trace_collector()
+            with collector.start_execution(
+                repository=identity.repository,
+                item_type="pr",
+                item_number=identity.number,
+                origin="durable-invalidation-worker",
+                stage_id="pr.capacity-wait",
+                label=f"pr#{identity.number} capacity scheduling",
+            ) as handle:
+                collector.record_event(EventKind.STAGE_RESULT, stage_id="pr.capacity-wait", origin="durable-invalidation-worker", outcome=outcome, facts={"reason": reason, "effect": "scheduling-only"})
+                handle.set_outcome(outcome)
+        except Exception:
+            logger.opt(exception=True).debug("Capacity wait diagnostic failed; preserving durable state")
 
     async def _worker_loop(self, repo_name: str, worker_id: int, item_type: Optional[str] = None) -> None:
         """Process candidates from the selected queue lane."""
@@ -5022,7 +5053,18 @@ class AutomationEngine:
                     decision_completed = (not bool(result.error) or result.blocked_cacheable or result.definitive_parent_refusal) and not (candidate.urgent_admission and result.capacity_deferred)
                     retry_failed_processing = bool(result.error) and not decision_completed
 
-                    if invalidation_claim is not None and candidate.type == "pr" and result.outcome is PRProcessingOutcome.DEFERRED and result.retry_not_before is not None:
+                    if invalidation_claim is not None and candidate.type == "pr" and result.capacity_deferred and not result.error:
+                        decision_completed = False
+                        try:
+                            await asyncio.to_thread(self.invalidations.retain_pr_capacity_wait, invalidation_claim, result.retry_not_before)
+                        except Exception:
+                            stop_after_persistence_failure = True
+                            self._record_pr_capacity_wait(invalidation_claim.identity, Outcome.FAILED, "capacity_wait_persistence_failed")
+                            raise
+                        deferral_committed = True
+                        self._record_pr_capacity_wait(invalidation_claim.identity, Outcome.DEFERRED, "implementation_capacity_unavailable")
+
+                    if invalidation_claim is not None and not deferral_committed and candidate.type == "pr" and result.outcome is PRProcessingOutcome.DEFERRED and result.retry_not_before is not None:
                         # Pending review is never completion, even if persisting
                         # its wake fails. Retain this claim rather than allowing
                         # the generic finalizer to acknowledge or release it.

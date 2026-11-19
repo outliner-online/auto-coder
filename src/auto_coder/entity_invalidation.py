@@ -318,6 +318,8 @@ class DurableInvalidationQueue:
             self._connection.execute("ALTER TABLE entity_invalidations ADD COLUMN deferral_reason TEXT")
         if "deferral_api_origin" not in invalidation_columns:
             self._connection.execute("ALTER TABLE entity_invalidations ADD COLUMN deferral_api_origin TEXT")
+        if "capacity_waiting" not in invalidation_columns:
+            self._connection.execute("ALTER TABLE entity_invalidations ADD COLUMN capacity_waiting INTEGER NOT NULL DEFAULT 0")
 
         delivery_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(github_deliveries)")}
         if "entity_type" not in delivery_columns:
@@ -884,6 +886,7 @@ class DurableInvalidationQueue:
                    WHERE rowid = (
                        SELECT rowid FROM entity_invalidations
                        WHERE repository = ? AND state = 'dirty'
+                         AND capacity_waiting = 0
                          AND (not_before IS NULL OR not_before <= ?)
                          AND (retry_not_before IS NULL OR retry_not_before <= ?)
                        ORDER BY rowid LIMIT 1
@@ -902,6 +905,7 @@ class DurableInvalidationQueue:
             row = self._connection.execute(
                 """SELECT MIN(MAX(COALESCE(not_before, 0), COALESCE(retry_not_before, 0)))
                    FROM entity_invalidations WHERE repository = ? AND state = 'dirty'
+                     AND capacity_waiting = 0
                      AND (not_before IS NOT NULL OR retry_not_before IS NOT NULL)""",
                 (repository,),
             ).fetchone()
@@ -955,6 +959,44 @@ class DurableInvalidationQueue:
                 (identity.repository, identity.entity_type, identity.number),
             )
             return CompletionTransition(CompletionOutcome.CLEARED, False, None)
+
+    def retain_pr_capacity_wait(self, claim: ClaimedInvalidation, retry_not_before: Optional[float] = None) -> int:
+        """Keep the entire current generation unfinished, without a timed retry.
+
+        A notification racing the evaluation belongs to this same obligation.
+        Independent retry and stabilization bounds are deliberately untouched.
+        """
+        identity = claim.identity
+        if identity.entity_type != "pr":
+            raise ValueError("Only PR claims can wait for implementation capacity")
+        if retry_not_before is not None and (not math.isfinite(retry_not_before) or retry_not_before < 0):
+            raise ValueError("Capacity wait retry bound must be finite and non-negative")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """UPDATE entity_invalidations
+                   SET state = 'dirty', claimed_generation = NULL, capacity_waiting = 1,
+                       retry_not_before = CASE WHEN ? IS NULL THEN retry_not_before
+                           ELSE MAX(COALESCE(retry_not_before, 0), ?) END
+                   WHERE repository = ? AND entity_type = 'pr' AND entity_number = ?
+                     AND state = 'processing' AND claimed_generation = ?
+                   RETURNING generation""",
+                (retry_not_before, retry_not_before, identity.repository, identity.number, claim.generation),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Capacity deferral claim is no longer current")
+        return int(row[0])
+
+    def wake_pr_capacity_waiters(self, repository: str) -> tuple[EntityIdentity, ...]:
+        """Release only the capacity guard; this grants no processing authority."""
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                """UPDATE entity_invalidations SET capacity_waiting = 0
+                   WHERE repository = ? AND entity_type = 'pr'
+                     AND state = 'dirty' AND capacity_waiting = 1
+                   RETURNING entity_number""",
+                (repository,),
+            ).fetchall()
+        return tuple(EntityIdentity(repository, "pr", number) for (number,) in rows)
 
     def release(self, claim: ClaimedInvalidation) -> None:
         """Return an interrupted or failed reevaluation to the dirty set."""
