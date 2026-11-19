@@ -72,6 +72,16 @@ The durable worker logs deferred PR processing explicitly, with the action
 diagnostics that explain the wait. Its `Worker` trace carries `outcome=deferred`
 and those actions; a deferred repair is never logged as successfully processed.
 
+An explicit PR admission `SKIPPED` result is logged as evaluated/skipped, with
+its original reason and actions, even when the legacy processing outcome is
+`SUCCESS`. Other error-free PR evaluations use `outcome=evaluated` and
+`effect_confirmation=not_inferred`; this generic worker diagnostic does not
+certify a commit, repair dispatch, review publication or merge. Confirmed effects
+remain owned by their existing effect-specific stages and receipts. Issue
+reporting, eligibility, claim acknowledgement and retry behavior are unchanged.
+The existing dashboard legacy-log table projects the same diagnostic message and
+details. Regression: `tests/test_pr_worker_observation_status.py`.
+
 A successful exact-head CI evaluation selects the merge route once. If its final
 strong-audit gate is still pending or the merge operation does not confirm
 completion, processing returns a deferred merge disposition and does not fall

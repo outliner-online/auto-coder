@@ -5101,15 +5101,15 @@ class AutomationEngine:
                             item_number=item_number,
                             details={"worker_id": worker_id, "outcome": ExplicitTargetOutcome.DEFERRED.value, "actions": result.actions},
                         )
-                    elif candidate.type == "issue" and result.target_outcome is ExplicitTargetOutcome.SKIPPED:
+                    elif (candidate.type == "issue" or (candidate.type == "pr" and not result.error)) and result.target_outcome is ExplicitTargetOutcome.SKIPPED:
                         diagnostic = result.target_reason or "; ".join(result.actions) or "evaluation skipped"
-                        logger.info("Worker {} evaluated/skipped issue #{}: {}", worker_id, item_number, diagnostic)
+                        logger.info("Worker {} evaluated/skipped {} #{}: {}", worker_id, candidate.type, item_number, diagnostic)
                         get_trace_logger().log(
                             "Worker",
-                            f"Worker {worker_id} evaluated/skipped issue #{item_number}",
-                            item_type="issue",
+                            f"Worker {worker_id} evaluated/skipped {candidate.type} #{item_number}",
+                            item_type=candidate.type,
                             item_number=item_number,
-                            details={"worker_id": worker_id, "outcome": ExplicitTargetOutcome.SKIPPED.value, "actions": result.actions},
+                            details={"worker_id": worker_id, "outcome": ExplicitTargetOutcome.SKIPPED.value, "actions": result.actions, **({"reason": diagnostic} if candidate.type == "pr" else {})},
                         )
                     elif result.error:
                         logger.error(f"Worker {worker_id} failed to process {candidate.type} #{item_number}: {result.error}")
@@ -5118,6 +5118,9 @@ class AutomationEngine:
                         diagnostic = "; ".join(result.actions)
                         logger.info(f"Worker {worker_id} deferred pr #{item_number}: {diagnostic}")
                         get_trace_logger().log("Worker", f"Worker {worker_id} deferred pr #{item_number}", item_type="pr", item_number=item_number, details={"worker_id": worker_id, "outcome": result.outcome.value, "actions": result.actions})
+                    elif candidate.type == "pr":
+                        logger.info("Worker {} evaluated pr #{}: {}", worker_id, item_number, "; ".join(result.actions))
+                        get_trace_logger().log("Worker", f"Worker {worker_id} evaluated pr #{item_number}", item_type="pr", item_number=item_number, details={"worker_id": worker_id, "outcome": "evaluated", "actions": result.actions, "effect_confirmation": "not_inferred"})
                     else:
                         logger.info(f"Worker {worker_id} successfully processed {candidate.type} #{item_number}")
                         get_trace_logger().log("Worker", f"Worker {worker_id} successfully processed {candidate.type} #{item_number}", item_type=candidate.type, item_number=item_number, details={"worker_id": worker_id})
