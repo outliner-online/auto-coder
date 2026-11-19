@@ -320,6 +320,10 @@ class DurableInvalidationQueue:
             self._connection.execute("ALTER TABLE entity_invalidations ADD COLUMN deferral_api_origin TEXT")
         if "capacity_waiting" not in invalidation_columns:
             self._connection.execute("ALTER TABLE entity_invalidations ADD COLUMN capacity_waiting INTEGER NOT NULL DEFAULT 0")
+        watch_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(ci_watches)")}
+        for column in ("batch_first_seen", "batch_watchdog_at"):
+            if column not in watch_columns:
+                self._connection.execute(f"ALTER TABLE ci_watches ADD COLUMN {column} REAL")
 
         delivery_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(github_deliveries)")}
         if "entity_type" not in delivery_columns:
@@ -509,16 +513,12 @@ class DurableInvalidationQueue:
                     "INSERT INTO ci_delivery_targets(repository, delivery_id, pr_number) VALUES (?, ?, ?)",
                     (delivery.repository, delivery.delivery_id, number),
                 )
+                prior_batch = self._connection.execute("SELECT first_seen FROM ci_pending_prs WHERE repository = ? AND pr_number = ?", (delivery.repository, number)).fetchone()
                 self._advance_ci_pr(delivery.repository, number, received)
                 # A webhook is invalidation evidence, not a result.  Move the
                 # matching durable observation obligation to the same quiet
                 # window; the consumer will still perform an authoritative read.
-                self._connection.execute(
-                    """UPDATE ci_watches SET observation_epoch = observation_epoch + 1,
-                           next_reconcile_at = MIN(next_reconcile_at, ?)
-                       WHERE repository = ? AND pr_number = ? AND active = 1""",
-                    (received + 2, delivery.repository, number),
-                )
+                self._advance_ci_batch_watches(delivery, number, received, prior_batch is None)
             if not delivery.pull_request_numbers and delivery.head_sha:
                 self._connection.execute(
                     """INSERT INTO ci_correlations(repository, head_sha, observation_epoch,
@@ -533,6 +533,31 @@ class DurableInvalidationQueue:
                 )
             return True
 
+    def _advance_ci_batch_watches(self, delivery: CIWebhookDelivery, number: int, received: float, new_batch: bool) -> None:
+        """Bind only an exactly headed webhook's own batch, keeping its old clock.
+
+        Called inside the intake transaction. Unknown/mixed-head batches,
+        restored legacy rows and independent clock changes stay conservative.
+        Every delivery still advances the epoch, independently of scheduling.
+        """
+        first_seen, eligible_at = self._connection.execute("SELECT first_seen, eligible_at FROM ci_pending_prs WHERE repository = ? AND pr_number = ?", (delivery.repository, number)).fetchone()
+        rows = self._connection.execute("SELECT head_sha, workflow_id, next_reconcile_at, operational_block, batch_first_seen, batch_watchdog_at FROM ci_watches WHERE repository = ? AND pr_number = ? AND active = 1", (delivery.repository, number)).fetchall()
+        for head, workflow, next_at, block, bound_batch, bound_watchdog in rows:
+            watchdog = None
+            if delivery.head_sha == head and block is None:
+                if new_batch:
+                    watchdog = next_at
+                elif bound_batch == first_seen and bound_watchdog is not None:
+                    watchdog = bound_watchdog
+            original_trigger = bound_batch + 2 if bound_batch is not None else next_at
+            scheduled = min(watchdog, eligible_at) if watchdog is not None else min(next_at, original_trigger, received + 2)
+            self._connection.execute(
+                """UPDATE ci_watches SET observation_epoch = observation_epoch + 1,
+                       next_reconcile_at = ?, batch_first_seen = ?, batch_watchdog_at = ?
+                   WHERE repository = ? AND pr_number = ? AND head_sha = ? AND workflow_id = ?""",
+                (scheduled, first_seen if watchdog is not None else None, watchdog, delivery.repository, number, head, workflow),
+            )
+
     def ensure_ci_watch(self, repository: str, pr_number: int, head_sha: str, workflow_id: str = "", *, now: Optional[float] = None) -> bool:
         """Durably create a targeted CI obligation without weakening an existing one."""
         if not repository or pr_number <= 0 or not head_sha:
@@ -543,7 +568,7 @@ class DurableInvalidationQueue:
                 """INSERT INTO ci_watches(repository, pr_number, head_sha, workflow_id,
                        next_reconcile_at) VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(repository, pr_number, head_sha, workflow_id)
-                   DO UPDATE SET active = 1""",
+                   DO UPDATE SET active = 1, next_reconcile_at = MIN(next_reconcile_at, COALESCE(batch_first_seen + 2, next_reconcile_at)), batch_first_seen = NULL, batch_watchdog_at = NULL""",
                 (repository, pr_number, head_sha, workflow_id, created),
             )
         return True
@@ -560,7 +585,7 @@ class DurableInvalidationQueue:
             ).fetchall()
             for number, head_sha, workflow_id in rows:
                 self._connection.execute(
-                    """UPDATE ci_watches SET last_attempt_at = ?, next_reconcile_at = ?
+                    """UPDATE ci_watches SET last_attempt_at = ?, next_reconcile_at = ?, batch_first_seen = NULL, batch_watchdog_at = NULL
                        WHERE repository = ? AND pr_number = ? AND head_sha = ? AND workflow_id = ?""",
                     (attempted, attempted + CI_RECONCILIATION_SECONDS, repository, number, head_sha, workflow_id),
                 )
@@ -578,12 +603,12 @@ class DurableInvalidationQueue:
         with self._lock, self._connection:
             if current_head is None:
                 self._connection.execute(
-                    "UPDATE ci_watches SET active = 0 WHERE repository = ? AND pr_number = ?",
+                    "UPDATE ci_watches SET active = 0, next_reconcile_at = MIN(next_reconcile_at, COALESCE(batch_first_seen + 2, next_reconcile_at)), batch_first_seen = NULL, batch_watchdog_at = NULL WHERE repository = ? AND pr_number = ?",
                     (repository, pr_number),
                 )
             else:
                 self._connection.execute(
-                    "UPDATE ci_watches SET active = 0 WHERE repository = ? AND pr_number = ? AND head_sha <> ?",
+                    "UPDATE ci_watches SET active = 0, next_reconcile_at = MIN(next_reconcile_at, COALESCE(batch_first_seen + 2, next_reconcile_at)), batch_first_seen = NULL, batch_watchdog_at = NULL WHERE repository = ? AND pr_number = ? AND head_sha <> ?",
                     (repository, pr_number, current_head),
                 )
 
@@ -606,7 +631,7 @@ class DurableInvalidationQueue:
             if history is None:
                 return False
             self._connection.execute(
-                "UPDATE ci_watches SET active = 0 WHERE repository = ? AND pr_number = ? AND head_sha <> ?",
+                "UPDATE ci_watches SET active = 0, next_reconcile_at = MIN(next_reconcile_at, COALESCE(batch_first_seen + 2, next_reconcile_at)), batch_first_seen = NULL, batch_watchdog_at = NULL WHERE repository = ? AND pr_number = ? AND head_sha <> ?",
                 (repository, pr_number, current_head),
             )
             current = self._connection.execute(
@@ -620,7 +645,7 @@ class DurableInvalidationQueue:
                 )
             else:
                 self._connection.execute(
-                    "UPDATE ci_watches SET active = 1 WHERE repository = ? AND pr_number = ? AND head_sha = ?",
+                    "UPDATE ci_watches SET active = 1, next_reconcile_at = MIN(next_reconcile_at, COALESCE(batch_first_seen + 2, next_reconcile_at)), batch_first_seen = NULL, batch_watchdog_at = NULL WHERE repository = ? AND pr_number = ? AND head_sha = ?",
                     (repository, pr_number, current_head),
                 )
         return True
@@ -632,7 +657,7 @@ class DurableInvalidationQueue:
         target = time.time() + delay_seconds
         with self._lock, self._connection:
             cursor = self._connection.execute(
-                """UPDATE ci_watches SET next_reconcile_at = MIN(next_reconcile_at, ?)
+                """UPDATE ci_watches SET batch_first_seen = NULL, batch_watchdog_at = NULL, next_reconcile_at = MIN(next_reconcile_at, COALESCE(batch_first_seen + 2, next_reconcile_at), ?)
                    WHERE repository = ? AND pr_number = ? AND head_sha = ? AND active = 1""",
                 (target, repository, pr_number, head_sha),
             )
@@ -704,7 +729,7 @@ class DurableInvalidationQueue:
                 )
                 self._connection.execute(
                     """UPDATE ci_watches SET observation_epoch = observation_epoch + ?,
-                           next_reconcile_at = MIN(next_reconcile_at, ?)
+                           batch_first_seen = NULL, batch_watchdog_at = NULL, next_reconcile_at = MIN(next_reconcile_at, COALESCE(batch_first_seen + 2, next_reconcile_at), ?)
                        WHERE repository = ? AND pr_number = ? AND active = 1""",
                     (epoch, eligible_at, repository, number),
                 )
@@ -766,7 +791,7 @@ class DurableInvalidationQueue:
                 # Future/blocked watches and already-serviced observations keep
                 # their independent clocks. No payload becomes authority.
                 self._connection.execute(
-                    """UPDATE ci_watches SET last_attempt_at = ?, next_reconcile_at = ?
+                    """UPDATE ci_watches SET last_attempt_at = ?, next_reconcile_at = ?, batch_first_seen = NULL, batch_watchdog_at = NULL
                        WHERE repository = ? AND pr_number = ? AND active = 1
                          AND operational_block IS NULL AND next_reconcile_at <= ?
                          AND observation_epoch > 0
