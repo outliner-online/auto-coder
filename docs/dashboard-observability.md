@@ -3742,3 +3742,12 @@ capacity projection still follow the existing guarded retirement transaction.
 Run `bash scripts/test.sh tests/test_codex_retry_handoff_reconstruction.py
 tests/test_codex_reclamation_composition.py` for positive correlation,
 incomplete/foreign evidence, source-token invalidation and guarded retirement.
+
+CI own-batch watch scheduling changes only when a fresh normal PR evaluation is
+enqueued. Existing coalesced-promotion counts and Worker evaluated/skipped events
+remain the observable result, not a new success/effect event. No trace schema or
+renderer changes are needed. `bash scripts/test.sh tests/test_ci_watch_own_batch.py
+tests/test_pr_worker_observation_status.py` exercises real SQLite/controller/worker
+processing, canonical CI reads and the existing skip-to-dashboard contract.
+The deterministic 0/1/1.5-second burst reduces two evaluations to one; it does not
+prove progress or authorize a merge in a live worker.

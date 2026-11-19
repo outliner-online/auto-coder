@@ -143,7 +143,7 @@ def test_due_batch_services_same_due_watch_once_without_losing_epoch(tmp_path, m
     assert queue.promote_due_ci_watches(REPO, now=312) == 1
 
 
-def test_new_delivery_after_promotion_and_earlier_watch_remain_independent(tmp_path, monkeypatch):
+def test_own_batch_watch_waits_for_quiet_and_next_rerun_is_preserved(tmp_path, monkeypatch):
     queue = DurableInvalidationQueue(tmp_path / "queue.db")
     queue.ensure_ci_watch(REPO, 6031, "head", now=0)
     queue.promote_due_ci_watches(REPO, now=0)
@@ -151,10 +151,10 @@ def test_new_delivery_after_promotion_and_earlier_watch_remain_independent(tmp_p
     queue.accept_ci_delivery(CIWebhookDelivery(REPO, "second", "check_run", "completed", (6031,), "head"), now=11)
     monkeypatch.setattr("auto_coder.entity_invalidation.time.time", lambda: 12.0)
     assert queue.promote_due_ci(REPO) == 0  # quiet window is still 13
-    assert queue.promote_due_ci_watches(REPO, now=12) == 1  # pre-existing MIN clock
+    assert queue.promote_due_ci_watches(REPO, now=12) == 0  # same batch is still settling
     monkeypatch.setattr("auto_coder.entity_invalidation.time.time", lambda: 13.0)
     assert queue.promote_due_ci(REPO) == 1
-    assert queue._connection.execute("SELECT next_reconcile_at FROM ci_watches").fetchone() == (312,)  # not extended by the later batch
+    assert queue._connection.execute("SELECT next_reconcile_at FROM ci_watches").fetchone() == (313,)  # single observation at its quiet deadline
     queue.accept_ci_delivery(CIWebhookDelivery(REPO, "rerun", "workflow_run", "completed", (6031,), "head", run_id="new-run", run_attempt=2), now=14)
     monkeypatch.setattr("auto_coder.entity_invalidation.time.time", lambda: 16.0)
     assert queue.promote_due_ci(REPO) == 1

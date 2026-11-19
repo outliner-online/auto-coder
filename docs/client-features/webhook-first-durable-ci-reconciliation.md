@@ -25,11 +25,26 @@ webhook observation. The following watch pass does not promote that observation
 a second time or advance an in-flight generation twice. Raw deliveries, applied
 target metadata and every observation epoch remain intact. Future, blocked and
 already-serviced watch clocks remain independent, and failed persistence rolls
-back the combined promotion. An earlier watch made due by `MIN(received + 2)`
-can still precede a later batch quiet deadline; this bounded correction does not
-remove that earlier observation or assert that separate unchanged bursts are
-semantically redundant. The two-second/ten-second intake and 300-second no-event
-reconciliation rules are unchanged. Regression:
+back the combined promotion.
+
+When an exactly headed delivery starts a new PR batch, intake retains the watch's
+pre-batch independent deadline and binds that watch to this batch's first receipt.
+Further matching deliveries can move only this batch's webhook wake to its quiet
+deadline (two seconds after the latest receipt, capped at ten after the first).
+The effective wake remains the earlier of that deadline and the retained independent
+deadline. For receipts at 0, 1 and 1.5 seconds, a watch formerly advanced to 2 now
+shares the batch's 3.5-second observation, unless an independent deadline is sooner.
+This binding survives restart; it does not identify CI results or confer authority.
+Raw deliveries and epochs are never deduplicated by semantic result.
+
+Unknown/mixed heads, legacy rows without a binding, lifecycle restoration, explicit
+watch rechecks and SHA correlation discard the binding conservatively, retaining
+the original early webhook trigger. Blocked watches remain blocked. Independent
+watchdog, governor, stabilization and retry clocks are not unified or shortened.
+After a promotion, same-head reruns start a new observation; the normal worker still
+fetches authoritative PR and CI state and runs every admission/protection gate.
+This reduces duplicate reads within a provably shared burst, not repeated no-effect
+work across separate bursts. Regressions: `tests/test_ci_watch_own_batch.py` and
 `tests/test_pr_worker_observation_status.py`.
 
 An ordinary durable PR reevaluation retires every stored CI watch for that PR
