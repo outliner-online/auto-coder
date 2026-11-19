@@ -728,10 +728,11 @@ class DurableInvalidationQueue:
     def promote_due_ci(self, repository: str) -> int:
         """Atomically turn due PR batches into ordinary authoritative reevaluations."""
         promoted = 0
+        attempted = time.time()
         with self._lock, self._connection:
             rows = self._connection.execute(
                 "SELECT pr_number, observation_epoch FROM ci_pending_prs WHERE repository = ? AND eligible_at <= ?",
-                (repository, time.time()),
+                (repository, attempted),
             ).fetchall()
             for number, epoch in rows:
                 target_rows = self._connection.execute(
@@ -757,6 +758,22 @@ class DurableInvalidationQueue:
                        ON CONFLICT(repository, entity_type, entity_number) DO UPDATE SET
                          generation = CASE WHEN state = 'processing' THEN generation + 1 ELSE generation END""",
                     (repository, number),
+                )
+                # The due batch already schedules the same authoritative PR
+                # read as a due webhook-advanced watch. Service that watch's
+                # bookkeeping in this transaction, rather than incrementing an
+                # in-flight generation twice in the following watch pass.
+                # Future/blocked watches and already-serviced observations keep
+                # their independent clocks. No payload becomes authority.
+                self._connection.execute(
+                    """UPDATE ci_watches SET last_attempt_at = ?, next_reconcile_at = ?
+                       WHERE repository = ? AND pr_number = ? AND active = 1
+                         AND operational_block IS NULL AND next_reconcile_at <= ?
+                         AND observation_epoch > 0
+                         AND (last_attempt_at IS NULL OR last_attempt_at < (
+                             SELECT latest_seen FROM ci_pending_prs
+                             WHERE repository = ? AND pr_number = ?))""",
+                    (attempted, attempted + CI_RECONCILIATION_SECONDS, repository, number, attempted, repository, number),
                 )
                 self._connection.execute("DELETE FROM ci_pending_prs WHERE repository = ? AND pr_number = ? AND observation_epoch = ?", (repository, number, epoch))
                 promoted += 1

@@ -1,5 +1,17 @@
 # Dashboard observability verification
 
+PR `Worker` diagnostics distinguish admission `skipped`, processing `deferred`,
+and an error-free `evaluated` observation. A successful function return alone
+does not mean completed business effects; the evaluated row explicitly carries
+`effect_confirmation=not_inferred`. Skipped rows retain the gate reason and all
+three retain actions. Existing effect-specific traces remain the authority for
+actual dispatch, publication and merge. `bash scripts/test.sh
+tests/test_pr_worker_observation_status.py` drives real worker/SQLite claims and
+the dashboard's `prepare_log_rows` projection. It also verifies that combined
+due batch/watch promotion preserves epochs, follow-up, restart, raw deliveries,
+the 300-second watch, and transaction failure. Coalescing those two scheduling
+owners adds no business-effect event or dashboard-owned decision.
+
 Reusing a saved same-head adversarial-validation `ERROR` emits a deferred
 `pr.adversarial-validation` stage result with `effect=saved-validation-wait`,
 `saved_verdict=ERROR`, `examined_head`, and

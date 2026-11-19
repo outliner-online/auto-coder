@@ -19,6 +19,19 @@ the normal pull-request evaluation path; no per-PR polling thread, run-appearanc
 timeout, or monitor-owned merge path remains.  Dispatch claims remain a separate
 suppressing safety record when observations are missing or unavailable.
 
+When a due CI batch schedules an authoritative PR reevaluation, the same SQLite
+transaction services due, healthy, active watches advanced by that still-unserved
+webhook observation. The following watch pass does not promote that observation
+a second time or advance an in-flight generation twice. Raw deliveries, applied
+target metadata and every observation epoch remain intact. Future, blocked and
+already-serviced watch clocks remain independent, and failed persistence rolls
+back the combined promotion. An earlier watch made due by `MIN(received + 2)`
+can still precede a later batch quiet deadline; this bounded correction does not
+remove that earlier observation or assert that separate unchanged bursts are
+semantically redundant. The two-second/ten-second intake and 300-second no-event
+reconciliation rules are unchanged. Regression:
+`tests/test_pr_worker_observation_status.py`.
+
 An ordinary durable PR reevaluation retires every stored CI watch for that PR
 before completing its generation when its cache-bypassing GitHub read confirms
 the PR is closed, merged, or authoritatively absent. Operational read failures
