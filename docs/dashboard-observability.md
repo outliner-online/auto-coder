@@ -67,6 +67,16 @@ operational block and existing pending-work snapshot, without a new trace schema
 The local-job-store and subsequent-candidate variants of that regression also
 check exact last_error, zero not-before and failed-boundary call counts.
 
+Ordinary PR capacity deferrals emit target-scoped `pr.capacity-wait` events.
+`deferred` / `implementation_capacity_unavailable` means SQLite retention
+committed; `completed` / `capacity_guard_released` means only that the capacity
+scheduling guard was released. `failed` / `capacity_wait_persistence_failed`
+means the worker stopped with its claim unfinished. All carry
+`effect=scheduling-only`; the generic evidence rows must not present them as
+implementation, review, or merge completion. Run `bash scripts/test.sh
+tests/test_pr_capacity_waiters.py` for the producer-to-detail evidence oracle.
+Operational behavior: [durable PR capacity waits](client-features/durable-pr-capacity-waits.md).
+
 Durable worker failures emit repository/target-scoped `worker.failure-backoff`
 stage results under origin `durable-invalidation-worker`. `deferred` means the
 unfinished entity's retry deadline was committed; its facts retain the reason,
