@@ -10,6 +10,7 @@ from typing import Callable, Iterator, Optional
 
 from .backend_manager import BackendManager, run_llm_prompt
 from .individual_evidence_envelope import decode_individual_evidence, encode_individual_evidence
+from .issue_review_execution import IssueReviewCheckoutError
 from .logger_config import get_logger
 from .objective_evidence import ObjectiveAnchor
 from .prompt_loader import render_prompt
@@ -403,6 +404,8 @@ def analyze_issue_specification(
             if backend_manager is None:
                 return _error("No strong specification-analysis backend is available")
             response = run_llm_prompt(prompt, backend_manager=backend_manager, is_noedit=True)
+    except IssueReviewCheckoutError as exc:
+        return _error(f"Local Issue review setup failure: {exc}")
     except Exception as exc:
         logger.exception("Specification analysis execution failed: %s", exc)
         return _error(f"Specification analysis execution failed: {type(exc).__name__}")

@@ -36,6 +36,7 @@ from .invocation_admission import (
     set_pending_invocation_handle,
 )
 from .invocation_process_supervisor import CgroupV2Owner, InvocationProcessSupervisor
+from .issue_review_execution import issue_specification_execution_cwd
 from .llm_backend_config import LLMBackendConfiguration, get_llm_config
 from .llm_client_base import LLMBackendManagerBase
 from .local_execution_boundary import bind_local_execution_boundary
@@ -610,15 +611,16 @@ class BackendManager(LLMBackendManagerBase):
             should_resume = backend_type in CLOUD_BACKEND_TYPES and self._automatic_session_resume and backend_name == self._last_backend and bool(self._last_session_id)
             try:
                 try:
-                    result = self._execute_backend_with_providers(
-                        backend_name=backend_name,
-                        cli=cli,
-                        prompt=prompt,
-                        backend_attempt_number=attempts + 1,
-                        temp_env_cls=TemporaryEnvironment,
-                        session_id=self._last_session_id if should_resume else None,
-                        requested_noedit=requested_noedit,
-                    )
+                    with issue_specification_execution_cwd(backend_type, requested_noedit or getattr(cli, "use_noedit_options", False) is True):
+                        result = self._execute_backend_with_providers(
+                            backend_name=backend_name,
+                            cli=cli,
+                            prompt=prompt,
+                            backend_attempt_number=attempts + 1,
+                            temp_env_cls=TemporaryEnvironment,
+                            session_id=self._last_session_id if should_resume else None,
+                            requested_noedit=requested_noedit,
+                        )
                 except (
                     AutoCoderUsageLimitError,
                     AutoCoderTimeoutError,
