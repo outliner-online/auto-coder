@@ -320,7 +320,8 @@ def test_old_ambient_directory_path_fails_the_ordinary_positive_case(tmp_path, m
     "backend,stage,noedit",
     [("claude", "specification_validation", True), ("muse", "pr_review", True), ("muse", "decomposition_validation", True), ("muse", "specification_validation", False)],
 )
-def test_other_providers_and_review_kinds_keep_their_existing_directory(backend, stage, noedit, tmp_path):
+def test_other_providers_and_review_kinds_keep_their_existing_directory(backend, stage, noedit, tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG", str(tmp_path / "unrelated-controller-config"))
     token = bind_command_execution_cwd(str(tmp_path))
     try:
         with bind_invocation_target("owner/repo", "issue#1", stage), issue_specification_execution_cwd(backend, noedit):
@@ -328,3 +329,89 @@ def test_other_providers_and_review_kinds_keep_their_existing_directory(backend,
         assert _COMMAND_EXECUTION_CWD.get() == str(tmp_path)
     finally:
         reset_command_execution_cwd(token)
+
+
+@pytest.mark.parametrize("metadata", ["missing", "wrong", "correct"])
+@pytest.mark.parametrize("inherited", ["global", "alternate-file", "parameters", "command", "include"])
+def test_inherited_origin_cannot_replace_checkout_metadata(tmp_path, monkeypatch, review_runtime, metadata, inherited):
+    engine_for, launches, controller, _, managers = review_runtime
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    repository = "owner/selected"
+    checkout = checkout_for(tmp_path / "selected", repository)
+    head = git(checkout, "rev-parse", "HEAD")
+    expected = f"https://github.com/{repository}.git"
+    if metadata == "missing":
+        git(checkout, "config", "--local", "--unset-all", "remote.origin.url")
+    elif metadata == "wrong":
+        git(checkout, "remote", "set-url", "origin", "https://github.com/other/repo.git")
+    stale = tmp_path / "controller-gitconfig"
+    stale.write_text(f'[remote "origin"]\nurl = {expected}\n[protocol]\nallow = never\n[protocol "file"]\nallow = always\n')
+    if inherited == "global":
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(stale))
+    elif inherited == "alternate-file":
+        monkeypatch.setenv("GIT_CONFIG", str(stale))
+    elif inherited == "parameters":
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'remote.origin.url={expected}'")
+    elif inherited == "command":
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "remote.origin.url")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", expected)
+    else:
+        git(checkout, "config", "--local", "include.path", str(stale))
+    # The old unscoped query sees the stale controller value. It must not
+    # establish checkout ownership, even though it names the requested repo.
+    assert expected in git(checkout, "config", "--get-all", "remote.origin.url").splitlines()
+    configure(repository, str(checkout))
+    engine = engine_for(repository, 29)
+    outcome = pump(engine, repository, 29)
+    assert outcome.status == "error" and not outcome.handed_off
+    assert launches == []
+    decision = next(iter(outcome.decisions.values()))
+    assert decision.verdict == "ERROR" and decision.remediation_reason.startswith("Local Issue review setup failure:")
+    assert engine._specification_validators[repository].store.get(decision.identity) is None
+    assert engine.issue_stage_routing.pending(repository, IMPLEMENTATION_STAGE) == ()
+    assert len(engine.issue_stage_routing.pending(repository, REVIEW_STAGE)) == 1
+    assert engine.github.comments == [] and engine.github.removals == []
+    assert Path.cwd() == controller and _COMMAND_EXECUTION_CWD.get() is None
+    # Remove only this benign fixture's inherited config, repair its owned
+    # metadata, and prove that the same arrival can retry on the same worker.
+    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+        monkeypatch.delenv(name, raising=False)
+    if inherited == "include":
+        git(checkout, "config", "--local", "--unset", "include.path")
+    git(checkout, "config", "--local", "remote.origin.url", expected)
+    retried = pump(engine, repository, 29)
+    assert retried.status == "completed" and retried.handed_off
+    assert len(launches) == 1 and launches[0].source == checkout
+    assert (launches[0].repository, launches[0].issue, launches[0].head) == (repository, "issue#29", head)
+    managers[repository].close()
+    assert not launches[0].worktree.exists()
+    assert_unchanged(checkout, head)
+
+
+@pytest.mark.parametrize("origin_scope", ["common", "worktree"])
+def test_linked_worktree_uses_common_or_worktree_owned_origin(tmp_path, monkeypatch, review_runtime, origin_scope):
+    engine_for, launches, _, _, managers = review_runtime
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    repository = "owner/selected"
+    source = checkout_for(tmp_path / "selected", repository)
+    head = git(source, "rev-parse", "HEAD")
+    checkout = tmp_path / "linked"
+    if origin_scope == "worktree":
+        git(source, "config", "--local", "extensions.worktreeConfig", "true")
+    git(source, "worktree", "add", "--detach", str(checkout), "HEAD")
+    if origin_scope == "worktree":
+        git(source, "config", "--local", "--unset-all", "remote.origin.url")
+        git(checkout, "config", "--worktree", "remote.origin.url", f"https://github.com/{repository}.git")
+    controller_config = tmp_path / "controller-gitconfig"
+    controller_config.write_text('[user]\nemail = controller@example.invalid\n[protocol]\nallow = never\n[protocol "file"]\nallow = always\n')
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(controller_config))
+    configure(repository, str(checkout))
+    engine = engine_for(repository, 31)
+    outcome = pump(engine, repository, 31)
+    assert outcome.status == "completed" and outcome.handed_off
+    assert len(launches) == 1
+    assert (launches[0].source, launches[0].head, launches[0].issue) == (checkout, head, "issue#31")
+    managers[repository].close()
+    assert not launches[0].worktree.exists()
+    assert_unchanged(checkout, head)

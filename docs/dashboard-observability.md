@@ -986,7 +986,11 @@ with no `llm.local-execution` start or implementation handoff.
 drives ordinary intake and the actual scheduler and asserts absence of that start
 alongside absence of a host launch or terminal authorization. Its positive and
 overlapping-repository cases cross real Muse Git preflight and the launch
-boundary. Existing mounted-view dispatch regressions below remain applicable;
+boundary. `test_inherited_origin_cannot_replace_checkout_metadata` additionally
+checks stale controller/global/injected/included origin configuration through
+the same ordinary lane: no host launch, terminal authority, or implementation
+handoff occurs. The scoped-origin repair stays before the existing dispatch
+stage and adds no event or projection. Existing mounted-view dispatch regressions below remain applicable;
 the event schema and projection are unchanged. Run
 `bash scripts/test.sh tests/test_issue_review_checkout.py tests/test_dashboard_observability.py::test_local_llm_preparation_failure_never_emits_start tests/test_dashboard_observability.py::test_local_llm_dispatch_reaches_mounted_detail_before_return`.
 

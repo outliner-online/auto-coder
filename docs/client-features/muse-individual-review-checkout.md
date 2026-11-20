@@ -20,7 +20,13 @@ The path must resolve to a non-bare Git worktree root with a readable committed
 HEAD and exactly one origin URL identifying that exact GitHub repository. HTTPS,
 GitHub SSH, and `ssh://git@github.com/` origin formats are accepted. Missing,
 relative, invalid, ambiguous, and cross-repository selections fail locally before
-Muse dispatch. Git directory/index environment overrides also fail closed.
+Muse dispatch. Origin evidence comes only from the checkout's local Git config
+and, when enabled, its worktree-specific config, without following includes.
+Inherited system/global defaults cannot supply missing checkout metadata.
+Additional inherited or included origin values are rejected, even when direct
+checkout metadata matches, so they cannot redirect private-workspace cloning.
+Git directory/index overrides, alternate config-file selection, and injected
+command-configuration environment variables fail closed before Muse dispatch.
 No checkout is inferred from the controller directory, neighboring repositories,
 or the independent auto-coder update-source workspace.
 

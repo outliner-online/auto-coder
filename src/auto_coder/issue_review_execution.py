@@ -33,19 +33,32 @@ def _verified_checkout(repository: str) -> Path:
             raise IssueReviewCheckoutError("issue_review.checkout is not a directory")
         if any(name in os.environ for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")):
             raise IssueReviewCheckoutError("Git directory overrides make the selected review checkout ambiguous")
+        if any(name in os.environ for name in ("GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")) or any(name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for name in os.environ):
+            raise IssueReviewCheckoutError("Git configuration overrides make the selected review checkout ambiguous")
 
-        def git(*arguments: str) -> str:
+        def git(*arguments: str, missing_ok: bool = False) -> str:
             result = subprocess.run(["git", *arguments], cwd=checkout, capture_output=True, text=True, timeout=10, check=False)
+            if missing_ok and result.returncode == 1:
+                return ""
             if result.returncode:
                 raise IssueReviewCheckoutError("selected review checkout is missing usable Git worktree, origin, or HEAD evidence")
             return result.stdout.strip()
 
         if git("rev-parse", "--is-inside-work-tree") != "true" or Path(git("rev-parse", "--show-toplevel")).resolve() != checkout:
             raise IssueReviewCheckoutError("issue_review.checkout must identify the selected Git worktree root")
-        remotes = git("config", "--get-all", "remote.origin.url").splitlines()
+        # Origin evidence belongs to this repository, never an inherited global
+        # default or an included controller file. Linked worktrees share local
+        # config and may additionally own config.worktree when enabled.
+        remotes = git("config", "--local", "--no-includes", "--get-all", "remote.origin.url", missing_ok=True).splitlines()
+        if git("config", "--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig", missing_ok=True) == "true":
+            remotes.extend(git("config", "--worktree", "--no-includes", "--get-all", "remote.origin.url", missing_ok=True).splitlines())
         remote = _GITHUB_REMOTE.fullmatch(remotes[0]) if len(remotes) == 1 else None
         if remote is None or remote.group(1).lower() != repository.lower():
             raise IssueReviewCheckoutError("selected review checkout origin does not uniquely match the target repository")
+        # Inherited/included origins cannot replace owned evidence, and cannot
+        # redirect the subsequent private clone after owned evidence passed.
+        if git("config", "--includes", "--get-all", "remote.origin.url").splitlines() != remotes:
+            raise IssueReviewCheckoutError("effective Git origin conflicts with the checkout-owned origin")
         git("rev-parse", "--verify", "HEAD^{commit}")
         return checkout
     except IssueReviewCheckoutError:
