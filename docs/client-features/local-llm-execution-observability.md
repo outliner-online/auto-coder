@@ -7,6 +7,15 @@ explicit continuation calls, including implementation and read-only review.
 Cloud backend calls do not produce this local stage. Preparation or admission
 failures do not claim that a local call started.
 
+Muse individual Issue review additionally verifies its explicit repository-scoped
+`issue_review.checkout` before private-workspace preparation. A local setup
+failure returns a retryable specification `ERROR` without a
+`llm.local-execution` start, model verdict, or implementation handoff.
+`tests/test_issue_review_checkout.py` exercises this boundary through ordinary
+intake and the real scheduler; existing generic mounted-view tests continue to
+cover dispatched local calls. No event schema, projection, or provider routing
+changes are introduced.
+
 The dashboard detail diagram and decision log show `Local LLM call: <alias>`
 under the caller's existing Issue/PR execution identity while the call is still
 pending. A matching INFO log says `Local LLM call started` and records the
