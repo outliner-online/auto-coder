@@ -82,6 +82,7 @@ from .implementation_reclamation_scheduler import (
 )
 from .implementation_skip_diagnostic import duplicate_suppression_guidance, explain_already_owned
 from .implementation_slots import (
+    ImplementationAdmissionPreparationRequired,
     ImplementationAdmissionRefused,
     ImplementationHierarchyConflict,
     ImplementationHierarchyUnavailable,
@@ -135,10 +136,10 @@ from .merge_operation_scheduler import get_merge_operation_scheduler
 from .merge_operation_state import MergeOperation
 from .open_target_observations import OpenTarget, OpenTargetObservations
 from .parent_issue_reconciliation import ParentDeclarationStatus, ParentOperationalError, ParentSpecificationError, parse_parent_declaration
-from .pr_processor import PR_PROCESSING_STAGE, LocalPRRepairContext
+from .pr_processor import PR_PROCESSING_STAGE, DraftPRAdmissionEvidence, DraftPRRepairAuthority, LocalPRRepairContext
 from .pr_processor import _create_pr_analysis_prompt as _engine_pr_prompt
 from .pr_processor import _get_pr_diff as _pr_get_diff
-from .pr_processor import _should_skip_waiting_for_jules, process_pull_request
+from .pr_processor import _should_skip_waiting_for_jules, draft_pr_repair_authority_scope, process_pull_request
 from .progress_footer import ProgressStage
 from .prompt_loader import render_prompt
 from .reissue_required_store import ReissueRequiredStore
@@ -7756,14 +7757,29 @@ class AutomationEngine:
             result.error = str(exc)
             return result
 
+        draft_evidence = DraftPRAdmissionEvidence()
+        head = candidate.data.get("head") or {}
+        expected_draft_head = (str(head.get("ref") or ""), str(head.get("sha") or ""))
+        draft_authority = DraftPRRepairAuthority(repo_name, item_number, *expected_draft_head, (owner.number,) if owner.kind == "issue" else ()) if candidate.type == "pr" and candidate.data.get("draft") is True and not explicit_only else None
+
         def check_fresh_pr_admission() -> Optional[str]:
-            from .pr_processor import draft_pr_implementation_blocker
+            if not draft_evidence.prepared:
+                raise ImplementationAdmissionPreparationRequired("Fresh draft evidence must be prepared outside the store lock")
+            return draft_evidence.blocker
 
-            head = candidate.data.get("head") or {}
-            expected_head = (str(head.get("ref") or ""), str(head.get("sha") or ""))
-            return draft_pr_implementation_blocker(repo_name, item_number, self.github, owner.number if owner.kind == "issue" else None, expected_head=expected_head)
+        fresh_pr_admission = {"fresh_admission_check": check_fresh_pr_admission} if draft_authority is not None else {}
 
-        fresh_pr_admission = {"fresh_admission_check": check_fresh_pr_admission} if candidate.type == "pr" and candidate.data.get("draft") is True and not explicit_only else {}
+        def start_reserved_execution(generation: Optional[str], **start_kwargs: Any) -> tuple[Optional[str], bool]:
+            try:
+                return self._start_issue_implementation_execution(repo_name, slots, owner, generation, **start_kwargs)
+            except ImplementationAdmissionPreparationRequired:
+                from .pr_processor import draft_pr_implementation_blocker
+
+                # start_execution has unwound its store lock. Strict GitHub and
+                # provider reads must not serialize unrelated slot writers.
+                draft_evidence.blocker = draft_pr_implementation_blocker(repo_name, item_number, self.github, owner.number if owner.kind == "issue" else None, expected_head=expected_draft_head, evidence=draft_evidence)
+                draft_evidence.prepared = True
+                return self._start_issue_implementation_execution(repo_name, slots, owner, generation, **start_kwargs)
 
         implementation_pr = item_number if candidate.type == "pr" and owner.kind != "pr" else None
         labels = candidate.data.get("labels", [])
@@ -8079,10 +8095,7 @@ class AutomationEngine:
                             retry_authority = admission.authority if admission.disposition is IssueRetryDisposition.OWNED else None
                             auto_retry_deferred = admission.disposition in {IssueRetryDisposition.DEFERRED, IssueRetryDisposition.STALE}
                         else:
-                            execution_id, already_owned = self._start_issue_implementation_execution(
-                                repo_name,
-                                slots,
-                                owner,
+                            execution_id, already_owned = start_reserved_execution(
                                 implementation_key,
                                 implementation_pr=implementation_pr,
                                 **fresh_pr_admission,
@@ -8107,10 +8120,7 @@ class AutomationEngine:
                         result.actions = ["Skipped - validated Issue generation changed during capacity reconciliation"]
                         return result
                     implementation_key = self._compute_implementation_generation(repo_name, generation_context["snapshot"], generation_context.get("family_set")) if candidate.type == "issue" else None
-                    execution_id, already_owned = self._start_issue_implementation_execution(
-                        repo_name,
-                        slots,
-                        owner,
+                    execution_id, already_owned = start_reserved_execution(
                         implementation_key,
                         implementation_pr=implementation_pr,
                         **fresh_pr_admission,
@@ -8202,7 +8212,7 @@ class AutomationEngine:
                 else:
                     result = self._process_single_candidate_reserved(repo_name, candidate, config, jules_mode, force_adversarial_validation=True)
             else:
-                with slots.serialize(owner):
+                with slots.serialize(owner), draft_pr_repair_authority_scope(draft_evidence.authority or draft_authority):
                     if retry_authority is not None:
                         _record_issue_stage_result(
                             item_number,

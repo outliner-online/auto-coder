@@ -393,3 +393,238 @@ def test_retained_active_execution_survives_draft_admission_guard(tmp_path):
     assert slots.snapshot().owners[0].implementation_prs == (5488,)
     policy.assert_not_called()
     dispatch.assert_not_called()
+
+
+CONTAINER_CODE_EXAMPLES = [
+    "\tCloses #5459",
+    "- ~~~\n  Closes #5459\n  ~~~",
+    "~~~\n~~~ not a closing fence\nCloses #5459\n~~~",
+]
+
+
+@pytest.mark.parametrize("body", CONTAINER_CODE_EXAMPLES)
+@pytest.mark.parametrize("path", ["intake", "startup"])
+def test_commonmark_code_examples_cannot_create_ownership(tmp_path, body, path):
+    from tests.test_implementation_slots import GitHubState
+
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    owner = ImplementationOwner("issue", 5459)
+    assert slots.reserve(owner, implementation_pr=5488)
+    pr = {"number": 5940, "body": body, "head": {"ref": "grid-cleanup"}}
+    github = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}, 5940: {"state": "open"}}, open_prs=[pr])
+    if path == "intake":
+        assert slots.resolve_owner("pr", pr, github) == ImplementationOwner("pr", 5940)
+    else:
+        slots.reconcile(github, discover_open_prs=True)
+        assert slots.active_owners() == ()
+    assert extract_lifecycle_directive_issue_references(body) == []
+
+
+@pytest.mark.parametrize("body", CONTAINER_CODE_EXAMPLES)
+@pytest.mark.parametrize("verb", ["close", "closes", "closed", "closing", "fix", "fixes", "fixed", "resolve", "resolves", "resolved", "resolving"])
+def test_genuine_directive_after_commonmark_code_example_survives(tmp_path, body, verb):
+    from tests.test_implementation_slots import GitHubState
+
+    body = body + f"\n\n{verb}: owner/repo#5459"
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    owner = ImplementationOwner("issue", 5459)
+    assert slots.reserve(owner, implementation_pr=5488)
+    pr = {"number": 5940, "body": body, "head": {"ref": "grid-cleanup"}}
+    github = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}, 5940: {"state": "open"}}, open_prs=[pr])
+    assert extract_lifecycle_directive_issue_references(body) == [("owner/repo", 5459)]
+    assert slots.resolve_owner("pr", pr, github) == owner
+    slots.reconcile(github, discover_open_prs=True)
+    assert slots.snapshot().owners[0].implementation_prs == (5488, 5940)
+
+
+@pytest.mark.parametrize("other_binding", [False, True])
+@pytest.mark.parametrize("retained", [False, True])
+def test_draft_admission_and_actual_review_repair_use_same_issue_provider(tmp_path, other_binding, retained):
+    _joined_draft_review_repair(tmp_path, other_binding=other_binding, retained=retained)
+
+
+@pytest.mark.parametrize("change", ["binding", "head", "unavailable"])
+def test_draft_repair_holds_when_preflight_authority_changes(tmp_path, change):
+    _joined_draft_review_repair(tmp_path, other_binding=True, change=change)
+
+
+def _joined_draft_review_repair(tmp_path, *, other_binding, retained=False, change=""):
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.execution_trace import Outcome
+    from auto_coder.pr_processor import _adversarial_repair_outcome, _delegate_cloud_review_thread_repair, _resolve_pr_issue_numbers
+    from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
+
+    manager = CloudManager("owner/repo")
+    assert manager.add_session(5459, "task-A", provider="jules")
+    if other_binding:
+        assert manager.add_session(5460, "task-B", provider="jules")
+    calls = []
+
+    class Transport:
+        def send_followup(self, task_id, prompt):
+            calls.append((task_id, prompt))
+            return True
+
+    pr = {"number": 5940, "title": "Grid", "body": "Related to #5460", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "base": {"ref": "main", "sha": "base"}, "labels": [], "user": {"login": "maintainer"}}
+    github = MagicMock()
+    github.get_issue.return_value = {"number": 5459, "state": "open"}
+    github.get_issue_details.side_effect = lambda issue: issue
+    github.get_pull_request_metadata_strict.return_value = pr
+    github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(head_ref=pr["head"]["ref"], head_sha=pr["head"]["sha"], base_ref="main")
+    github.get_pr_comments.return_value = []
+    config = AutomationConfig()
+    engine = AutomationEngine(github, config=config)
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    engine.implementation_slots = slots
+    if retained:
+        assert slots.reserve(ImplementationOwner("issue", 5459), implementation_pr=5940)
+    repairs = []
+    thread = ReviewThread(id="thread-1", is_resolved=False, comments=[ReviewThreadComment(database_id=1, body="Please cover the empty grid case", author_login="reviewer")])
+
+    def dispatch(*_args, **_kwargs):
+        if change == "binding":
+            assert manager.add_session(5459, "task-C", provider="jules")
+        elif change == "head":
+            github.get_pull_request_metadata_strict.return_value = {**pr, "head": {**pr["head"], "sha": "b" * 40}}
+        elif change == "unavailable":
+            github.get_pull_request_metadata_strict.side_effect = RuntimeError("GitHub unavailable after admission")
+        repairs.append(_delegate_cloud_review_thread_repair("owner/repo", pr, github_client=github, unresolved_threads=(thread,)))
+        return CandidateProcessingResult(type="pr", number=5940, success=repairs[-1].delivered, target_outcome=ExplicitTargetOutcome.SUCCESS if repairs[-1].delivered else ExplicitTargetOutcome.DEFERRED)
+
+    with patch.object(engine, "refresh_review_adjudications"), patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory, patch.object(engine, "_process_single_candidate_reserved", side_effect=dispatch):
+        factory.return_value.get_client_for_provider.return_value = Transport()
+        result = engine._process_single_candidate_unified("owner/repo", Candidate(type="pr", data=pr, priority=0), config)
+    assert _resolve_pr_issue_numbers("owner/repo", pr, github) == [5460]
+    assert len(repairs) == 1
+    if change:
+        assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
+        assert repairs[0].deferred is True
+        assert repairs[0].delivered is False
+        assert _adversarial_repair_outcome(repairs[0]) is Outcome.DEFERRED
+        assert calls == []
+    else:
+        assert result.success is True
+        assert repairs[0].delivered is True
+        assert _adversarial_repair_outcome(repairs[0]) is Outcome.ACCEPTED_HANDOFF
+        assert len(calls) == 1
+        assert calls[0][0] == "task-A"
+        assert "existing pull request #5940" in calls[0][1]
+
+
+def test_strict_draft_preflight_does_not_hold_slot_store_lock(tmp_path):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    github = MagicMock()
+    pr = {"number": 5940, "title": "Grid", "body": "", "draft": True, "state": "open", "head": {"ref": "grid-cleanup", "sha": "a" * 40}, "labels": []}
+    entered = threading.Event()
+    continue_read = threading.Event()
+
+    def metadata(*_args):
+        entered.set()
+        assert continue_read.wait(10)
+        return pr
+
+    github.get_pull_request_metadata_strict.side_effect = metadata
+    config = AutomationConfig()
+    engine = AutomationEngine(github, config=config)
+    engine.implementation_slots = slots
+    with patch.object(engine, "refresh_review_adjudications"), patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), ThreadPoolExecutor(max_workers=2) as pool:
+        processing = pool.submit(engine._process_single_candidate_unified, "owner/repo", Candidate(type="pr", data=pr, priority=0), config)
+        try:
+            assert entered.wait(5)
+            another = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+            writer = pool.submit(another.reserve, ImplementationOwner("issue", 9999))
+            assert writer.result(timeout=3) is True
+            another.release(ImplementationOwner("issue", 9999))
+        finally:
+            continue_read.set()
+        result = processing.result(timeout=5)
+    assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
+    assert slots.active_owners() == ()
+
+
+@pytest.mark.parametrize("body", [r"\`literal` . Closes #5459`", "Cl\\oses #5459", "Cl&#111;ses #5459", "> Example\nCloses #5459", "- > Example: Closes #5459"])
+def test_commonmark_inline_and_quote_regions_do_not_manufacture_directives(body):
+    assert extract_lifecycle_directive_issue_references(body) == []
+
+
+def test_code_comment_example_does_not_hide_following_real_directive():
+    body = "```html\n<!-- unclosed example comment\n```\n\nCloses owner/repo#5459"
+    assert extract_lifecycle_directive_issue_references(body) == [("owner/repo", 5459)]
+
+
+def test_directive_whitespace_can_span_authored_paragraphs():
+    assert extract_lifecycle_directive_issue_references("Closes:\n\n#5459") == [(None, 5459)]
+
+
+@pytest.mark.parametrize("change", ["", "binding", "head"])
+def test_bound_draft_conflict_repair_rechecks_authority_before_send(tmp_path, change):
+    from auto_coder import pr_processor
+    from auto_coder.cloud_manager import CloudManager
+
+    manager = CloudManager("owner/repo")
+    assert manager.add_session(5459, "task-A", provider="claude-routine")
+    assert manager.add_session(5460, "task-B", provider="claude-routine")
+    sent = []
+
+    class Transport:
+        backend_name = "claude-routine"
+
+        def send_followup(self, task_id, message):
+            sent.append(task_id)
+            return True
+
+    pr = {"number": 5940, "body": "Related to #5460", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "base": {"ref": "main", "sha": "base"}}
+    github = MagicMock()
+    github.get_pull_request_metadata_strict.return_value = pr
+    evidence = pr_processor.DraftPRAdmissionEvidence()
+    recorder = pr_processor._record_cloud_conflict_deliveries
+    changed = False
+
+    def record(path, deliveries):
+        nonlocal changed
+        recorder(path, deliveries)
+        if not changed and any(item.status == "pending" for item in deliveries.values()):
+            changed = True
+            if change == "binding":
+                assert manager.add_session(5459, "task-C", provider="claude-routine")
+            elif change == "head":
+                github.get_pull_request_metadata_strict.return_value = {**pr, "head": {**pr["head"], "sha": "b" * 40}}
+
+    with patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory, patch("auto_coder.pr_processor._record_cloud_conflict_deliveries", side_effect=record):
+        factory.return_value.get_client_for_provider.return_value = Transport()
+        assert pr_processor.draft_pr_implementation_blocker("owner/repo", 5940, github, 5459, expected_head=(pr["head"]["ref"], pr["head"]["sha"]), evidence=evidence) is None
+        with pr_processor.draft_pr_repair_authority_scope(evidence.authority):
+            result = pr_processor._delegate_cloud_merge_conflict_repair_result("owner/repo", pr, github)
+    assert changed is True
+    if change:
+        assert result.deferred is True
+        assert result.delegated is False
+        assert sent == []
+    else:
+        assert result.delegated is True
+        assert sent == ["task-A"]
+
+
+def test_draft_preparation_does_not_repeat_locked_hierarchy_reads(tmp_path):
+    from auto_coder.implementation_slots import ImplementationAdmissionPreparationRequired
+    from tests.test_implementation_slots import AuthoritativeHierarchy
+
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    owner = ImplementationOwner("issue", 5459)
+    prepared = False
+
+    def policy():
+        if not prepared:
+            raise ImplementationAdmissionPreparationRequired("prepare outside the store lock")
+        return None
+
+    with patch.object(slots, "_read_issue_hierarchy", wraps=slots._read_issue_hierarchy) as hierarchy:
+        with pytest.raises(ImplementationAdmissionPreparationRequired):
+            slots.start_execution(owner, implementation_pr=5940, github_client=AuthoritativeHierarchy(), fresh_admission_check=policy)
+        hierarchy.assert_not_called()
+        prepared = True
+        assert slots.start_execution(owner, implementation_pr=5940, github_client=AuthoritativeHierarchy(), fresh_admission_check=policy) is not None
+        assert hierarchy.call_count == 3

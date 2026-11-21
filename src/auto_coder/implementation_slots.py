@@ -49,6 +49,10 @@ class ImplementationAdmissionRefused(ImplementationSlotUnavailable):
     """A fresh reservation was refused before ownership or execution existed."""
 
 
+class ImplementationAdmissionPreparationRequired(ImplementationSlotUnavailable):
+    """Fresh admission needs evidence prepared outside the store lock."""
+
+
 class ImplementationSlotLockTimeout(ImplementationSlotUnavailable):
     """Raised when slot coordination is busy beyond the requested wait."""
 
@@ -707,6 +711,14 @@ class ImplementationSlotRepository:
                     raise ImplementationHierarchyUnavailable(f"Interrupted hierarchy admission for {owner.key} requires authoritative GitHub evidence")
                 admission_hierarchy = self._parse_stored_hierarchy(record)
             if record is None:
+                normal_usage, emergency_in_use = self._capacity_usage(owners)
+                capacity_available = normal_usage < self.max_implementations or bypass_capacity or (allow_urgent_emergency and not emergency_in_use)
+                # Preparation requests must unwind before even the existing
+                # hierarchy reads, avoiding extra network work on re-entry.
+                if fresh_admission_check is not None and capacity_available:
+                    refusal = fresh_admission_check()
+                    if refusal is not None:
+                        raise ImplementationAdmissionRefused(refusal)
                 if owner.kind == "issue":
                     if github_client is not None:
                         first_hierarchy = self._read_issue_hierarchy(github_client, owner.number)
@@ -715,19 +727,11 @@ class ImplementationSlotRepository:
                             raise ImplementationHierarchyUnavailable(f"Direct hierarchy changed while admitting issue:{owner.number}")
                         self._raise_hierarchy_conflict(owner, owners, second_hierarchy)
                         admission_hierarchy = second_hierarchy
-                normal_usage, emergency_in_use = self._capacity_usage(owners)
                 use_emergency = False
                 if normal_usage >= self.max_implementations and not bypass_capacity:
                     if not allow_urgent_emergency or emergency_in_use:
                         return None
                     use_emergency = True
-                # Reconciliation uses this same store lock. The owner-absence
-                # predicate and its fresh-admission policy must be atomic with
-                # creating the owner, including a retry after reconciliation.
-                if fresh_admission_check is not None:
-                    refusal = fresh_admission_check()
-                    if refusal is not None:
-                        raise ImplementationAdmissionRefused(refusal)
                 record = {
                     "kind": owner.kind,
                     "number": owner.number,

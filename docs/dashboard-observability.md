@@ -3800,3 +3800,31 @@ retained-execution case verifies that this refusal does not erase active work.
 The Markdown-region extraction shares existing structural filtering without
 changing role-assessment decisions; run `tests/test_role_structural_assessment.py`
 alongside the lifecycle admission regressions.
+
+
+### Draft repair origin continuity and lock scope
+
+Fresh draft preparation now performs strict PR/provider reads outside the
+shared slot-store lock. The atomic creation callback consumes only prepared
+evidence, then rechecks owner absence; it does not hold capacity coordination
+while waiting for GitHub. `test_strict_draft_preflight_does_not_hold_slot_store_lock`
+pauses the strict read and proves an independent real store writer can finish.
+The prior retirement-race, capacity-retry and retained-execution cases remain.
+
+The bound draft's lifecycle Issue, provider/task, attribution token and head
+constrain downstream origin resolution and final send validation. A changed
+or unavailable origin yields the existing deferred repair outcome, never an
+accepted handoff. The joined cases in
+`tests/test_lifecycle_admission_regression.py` drive actual review/conflict
+repair to captured transport, with related-Issue context unchanged, and cover
+wrong-task prevention and binding/head/read failures. These outcomes reuse the
+existing admission and `pr.repair-delegation` projection; no stage, schema or
+renderer additions are required. CommonMark documentary-region filtering is
+pure evidence extraction and emits no invented execution or completion.
+
+Preparation requests also unwind before existing hierarchy reads; the regression
+`test_draft_preparation_does_not_repeat_locked_hierarchy_reads` confirms zero
+hierarchy reads for the preparation request and the normal three after evidence
+is ready. The deployment registry's existing dispatch-authority guard remains
+in place, so the independent-writer proof is specifically about the slot-store
+mutex, not a claim that every admission guard is absent during preparation.

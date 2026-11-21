@@ -211,6 +211,37 @@ cmd = CommandExecutor()
 
 
 @dataclass(frozen=True)
+class DraftPRRepairAuthority:
+    repository: str = ""
+    pr_number: int = 0
+    head_ref: str = ""
+    head_sha: str = ""
+    issue_numbers: tuple[int, ...] = ()
+    provider: str = ""
+    task_id: str = ""
+    attribution_token: str = ""
+
+
+@dataclass
+class DraftPRAdmissionEvidence:
+    prepared: bool = False
+    blocker: Optional[str] = None
+    authority: Optional[DraftPRRepairAuthority] = None
+
+
+_draft_pr_repair_authority: ContextVar[Optional[DraftPRRepairAuthority]] = ContextVar("draft_pr_repair_authority", default=None)
+
+
+@contextmanager
+def draft_pr_repair_authority_scope(authority: Optional[DraftPRRepairAuthority]):
+    token = _draft_pr_repair_authority.set(authority)
+    try:
+        yield
+    finally:
+        _draft_pr_repair_authority.reset(token)
+
+
+@dataclass(frozen=True)
 class LocalPRRepairContext:
     store: LocalJobStore
     implementation_execution_id: str
@@ -2137,14 +2168,17 @@ def _selected_local_backend_name(repo_name: Optional[str] = None) -> str:
     return candidates[0] if candidates else ""
 
 
-def draft_pr_implementation_blocker(repo_name: str, pr_number: int, github_client: Any, issue_owner_number: Optional[int] = None, *, expected_head: Optional[tuple[str, str]] = None) -> Optional[str]:
+def draft_pr_implementation_blocker(repo_name: str, pr_number: int, github_client: Any, issue_owner_number: Optional[int] = None, *, expected_head: Optional[tuple[str, str]] = None, evidence: Optional[DraftPRAdmissionEvidence] = None) -> Optional[str]:
     """Refuse a fresh autonomous draft reservation with no executable route.
 
     Existing reservations and explicit manual processing are handled by the
     caller. This is admission only: uncertainty cannot release retained work.
     """
+    authority = DraftPRRepairAuthority(repo_name, pr_number, *(expected_head or ("", "")), (issue_owner_number,) if issue_owner_number is not None else ())
     try:
         if _selected_local_backend_name(repo_name):
+            if evidence is not None:
+                evidence.authority = authority
             return None
         current = github_client.get_pull_request_metadata_strict(repo_name, pr_number)
         if not isinstance(current, dict) or current.get("number") != pr_number or not isinstance(current.get("draft"), bool):
@@ -2156,9 +2190,14 @@ def draft_pr_implementation_blocker(repo_name: str, pr_number: int, github_clien
         if current.get("state") != "open":
             return "Draft implementation admission deferred: PR is no longer open"
         if current["draft"] is False:
+            if evidence is not None:
+                evidence.authority = authority
             return None
         origin = _resolve_cloud_task_origin(repo_name, current, github_client, source_issue_numbers=(issue_owner_number,) if issue_owner_number is not None else ())
         if origin.origin is not None:
+            if evidence is not None:
+                selected = origin.origin
+                evidence.authority = replace(authority, provider=selected.provider, task_id=selected.task_id, attribution_token=selected.attribution_token)
             return None
         return f"No implementation backend for autonomous draft PR: no local PR repair backend is configured; {origin.reason}"
     except Exception as exc:
@@ -9770,6 +9809,10 @@ def _resolve_cloud_conflict_origin(
 ) -> Optional[Tuple[Any, str]]:
     """Return the capable client and existing task ID that originated a PR."""
     guarded = _resolve_cloud_task_origin(repo_name, pr_data, github_client)
+    if _draft_pr_repair_authority.get() is not None:
+        if guarded.origin is not None and guarded.origin.provider in {"codex-cloud", "claude-routine"}:
+            return guarded.origin.client, guarded.origin.task_id
+        return None
     if guarded.origin is not None and guarded.origin.attribution_token:
         return guarded.origin.client, guarded.origin.task_id
     if "Codex PR attribution is" in guarded.reason:
@@ -10232,6 +10275,25 @@ def _resolve_cloud_task_origin(
     *,
     source_issue_numbers: Optional[Sequence[int]] = None,
 ) -> CloudTaskOriginResolution:
+    authority = _draft_pr_repair_authority.get()
+    if authority is None:
+        return _resolve_cloud_task_origin_from_sources(repo_name, pr_data, github_client, source_issue_numbers=source_issue_numbers)
+    head = pr_data.get("head") or {}
+    if (repo_name, pr_data.get("number"), head.get("ref"), head.get("sha")) != (authority.repository, authority.pr_number, authority.head_ref, authority.head_sha):
+        return CloudTaskOriginResolution(reason="draft admission target/head authority changed")
+    resolution = _resolve_cloud_task_origin_from_sources(repo_name, pr_data, github_client, source_issue_numbers=authority.issue_numbers)
+    if authority.provider and resolution.origin is not None and (resolution.origin.provider, resolution.origin.task_id, resolution.origin.attribution_token) != (authority.provider, authority.task_id, authority.attribution_token):
+        return CloudTaskOriginResolution(reason="draft admission provider/task authority changed")
+    return resolution
+
+
+def _resolve_cloud_task_origin_from_sources(
+    repo_name: str,
+    pr_data: Dict[str, Any],
+    github_client: Optional[Any] = None,
+    *,
+    source_issue_numbers: Optional[Sequence[int]] = None,
+) -> CloudTaskOriginResolution:
     """Resolve exactly one durable provider/session association for a PR."""
     pr_number = int(pr_data["number"])
     manager = CloudManager(repo_name)
@@ -10337,8 +10399,20 @@ def _resolve_cloud_task_origin(
     return CloudTaskOriginResolution(origin=CloudTaskOrigin(provider=provider, task_id=task_id, client=client))
 
 
-def _revalidate_cloud_origin(repo_name: str, pr_number: int, origin: CloudTaskOrigin) -> Optional[str]:
-    """Fail closed if a Codex PR binding changed after route selection."""
+def _revalidate_cloud_origin(repo_name: str, pr_number: int, origin: CloudTaskOrigin, *, github_client: Optional[Any] = None) -> Optional[str]:
+    """Reconfirm a bound draft route and existing Codex publication authority."""
+    if _draft_pr_repair_authority.get() is not None:
+        try:
+            if github_client is None:
+                return "draft repair authority cannot be revalidated without GitHub evidence"
+            current = github_client.get_pull_request_metadata_strict(repo_name, pr_number)
+            resolution = _resolve_cloud_task_origin(repo_name, current, github_client)
+            if resolution.origin is None:
+                return resolution.reason
+            if (resolution.origin.provider, resolution.origin.task_id, resolution.origin.attribution_token) != (origin.provider, origin.task_id, origin.attribution_token):
+                return "draft repair provider/task changed after selection"
+        except Exception as exc:
+            return f"draft repair authority is unavailable: {type(exc).__name__}: {exc}"
     if not origin.attribution_token:
         return None
     from .codex_pr_attribution import AttributionDisposition, CodexPrAttributionRepository
@@ -10532,7 +10606,7 @@ def _delegate_cloud_review_thread_repair(
 
     resolution = _resolve_cloud_task_origin(repo_name, pr_data, github_client)
     if resolution.origin is None:
-        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {resolution.reason}"])
+        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {resolution.reason}"], deferred=_draft_pr_repair_authority.get() is not None)
     provider, task_id, client = resolution.origin.provider, resolution.origin.task_id, resolution.origin.client
     selected_origin = resolution.origin
     provider_label = {"codex-cloud": "Codex Cloud", "jules": "Jules", "claude-routine": "Claude Routine"}.get(provider, provider)
@@ -10692,11 +10766,11 @@ def _delegate_cloud_review_thread_repair(
         details = Template(get_prompt_template("codex_cloud.review_thread_repair_details")).safe_substitute(actionable_feedback=feedback)
         prompt = build_existing_pr_repair_prompt(target, details)
     try:
-        attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin)
+        attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin, github_client=github_client)
         if attribution_error:
             with _cloud_review_delivery_lock:
                 _record_review_feedback_state(state_path, delivered, indeterminate)
-            return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {attribution_error}"])
+            return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {attribution_error}"], deferred=_draft_pr_repair_authority.get() is not None)
         if provider == "codex-cloud":
             accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, tuple(sorted(pending_identities)), repair_target=target)
         else:
@@ -10998,7 +11072,7 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
                     else:
                         details = Template(get_prompt_template("codex_cloud.adjudication_upheld_repair_details")).safe_substitute(rationale=upheld.rationale, raw_finding=upheld.raw_finding)
                         prompt = build_existing_pr_repair_prompt(target, details)
-                        attribution_error = _revalidate_cloud_origin(repo_name, pr_number, resolution.origin)
+                        attribution_error = _revalidate_cloud_origin(repo_name, pr_number, resolution.origin, github_client=github_client)
                         if attribution_error:
                             actions.append(f"Adjudicated repair for PR #{pr_number} was not delivered: {attribution_error}")
                             status = "pending"
@@ -11200,13 +11274,13 @@ def _delegate_cloud_merge_conflict_repair_locked(
     failure_reason: Optional[str] = None
     try:
         final_origin = _resolve_cloud_task_origin(repo_name, pr_data, github_client)
-        if final_origin.origin is not None and final_origin.origin.attribution_token:
-            attribution_error = _revalidate_cloud_origin(repo_name, pr_number, final_origin.origin)
-            if attribution_error or final_origin.origin.task_id != task_id:
+        if _draft_pr_repair_authority.get() is not None or (final_origin.origin is not None and final_origin.origin.attribution_token):
+            attribution_error = final_origin.reason if final_origin.origin is None else _revalidate_cloud_origin(repo_name, pr_number, final_origin.origin, github_client=github_client)
+            if attribution_error or final_origin.origin is None or final_origin.origin.task_id != task_id:
                 with _cloud_conflict_delivery_lock:
                     delivered.pop(fingerprint, None)
                     _record_cloud_conflict_deliveries(state_path, delivered)
-                return CloudConflictDelegationResult(reason=attribution_error or "verified PR origin changed before send")
+                return CloudConflictDelegationResult(reason=attribution_error or "verified PR origin changed before send", deferred=_draft_pr_repair_authority.get() is not None)
         elif "Codex PR attribution is" in final_origin.reason:
             with _cloud_conflict_delivery_lock:
                 delivered.pop(fingerprint, None)
@@ -11315,9 +11389,9 @@ def _send_codex_cloud_error_feedback(
     try:
         resolution = _resolve_cloud_task_origin(repo_name, pr_data, github_client)
         if resolution.origin is None:
-            if pr_data.get("_codex_pr_attribution_required"):
+            if pr_data.get("_codex_pr_attribution_required") or _draft_pr_repair_authority.get() is not None:
                 actions.append(f"Cannot resume Codex Cloud task for PR #{pr_number}: {resolution.reason}")
-                return CodexCloudFeedbackResult(retryable=True, actions=tuple(actions))
+                return CodexCloudFeedbackResult(retryable=True, actions=tuple(actions), deferred=_draft_pr_repair_authority.get() is not None)
             task_id = _resolve_codex_cloud_task_id(repo_name, pr_data, github_client)
             if not task_id:
                 actions.append(f"Cannot resume Codex Cloud task for PR #{pr_number}: no valid Codex task ID found")
@@ -11349,7 +11423,7 @@ def _send_codex_cloud_error_feedback(
                 actions.append(f"Deferred Codex Cloud continuation for PR #{pr_number}: {authority.reason}")
                 return CodexCloudFeedbackResult(retryable=True, actions=tuple(actions), deferred=True)
             logger.info(f"Initiating Codex Cloud CI repair for PR #{pr_number}; " f"head={expected_head} failures={authority.failure_identities}")
-            attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin)
+            attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin, github_client=github_client)
             if attribution_error:
                 actions.append(f"Deferred Codex Cloud continuation for PR #{pr_number}: {attribution_error}")
                 return CodexCloudFeedbackResult(retryable=True, actions=tuple(actions), deferred=True)
@@ -11705,7 +11779,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
 
     try:
         identities = tuple(sorted(generation_identity for _body, _finding_identity, generation_identity in pending_feedback))
-        attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin)
+        attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin, github_client=github_client)
         if attribution_error:
             return [f"Adversarial feedback was not delivered for PR #{pr_number}: {attribution_error}"]
         accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, identities, repair_target=target)

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from .logger_config import get_logger
-from .markdown_regions import authored_markdown_lines
+from .markdown_regions import authored_lifecycle_markdown
 
 logger = get_logger(__name__)
 
@@ -85,15 +85,7 @@ def extract_lifecycle_directive_issue_references(pr_body: str) -> List[Tuple[Opt
     """
     if not pr_body:
         return []
-    # Keep excluded regions non-whitespace so a directive cannot bridge a documentary
-    # region into an otherwise genuine Issue token on the next authored line.
-    uncommented = re.sub(r"<!--[\s\S]*?(?:-->|$)", lambda match: re.sub(r"[^\n]", "\x00", match.group()), pr_body)
-    lines = ["\x00"] * len(uncommented.split("\n"))
-    for number, line in authored_markdown_lines(uncommented):
-        if number <= len(lines):
-            lines[number - 1] = line
-    authored = "\n".join(lines)
-    authored = re.sub(r"(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)", lambda match: re.sub(r"[^\n]", "\x00", match.group()), authored)
+    authored = authored_lifecycle_markdown(pr_body)
     return [(match.group(1), int(match.group(2))) for match in re.finditer(_LIFECYCLE_DIRECTIVE_PATTERN, authored, re.IGNORECASE | re.MULTILINE)]
 
 
