@@ -504,6 +504,13 @@ def run_monitor(client: Client, workflows: tuple[Workflow, ...], repository: str
     }
 
 
+def _logging(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    logger.remove()
+    logger.add(sys.stdout, format=LOG_FORMAT, colorize=True)
+    logger.add(directory / "monitor.log", format=LOG_FORMAT, rotation="10 MB", retention=5)
+
+
 def main(argv: list[str] | None = None, *, client_factory: Callable[[str, str], Client] | None = None, now: datetime | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
@@ -513,10 +520,7 @@ def main(argv: list[str] | None = None, *, client_factory: Callable[[str, str], 
     parser.add_argument("--lookback-hours", type=int, default=48)
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args(argv)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    logger.remove()
-    logger.add(sys.stdout, format=LOG_FORMAT, colorize=True)
-    logger.add(args.output_dir / "monitor.log", format=LOG_FORMAT, rotation="10 MB", retention=5)
+    _logging(args.output_dir)
     try:
         if not args.repository or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository) is None:
             raise ValueError("--repository must be owner/repository")
@@ -525,11 +529,17 @@ def main(argv: list[str] | None = None, *, client_factory: Callable[[str, str], 
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", "")
         if args.publish and not token:
             raise ValueError("Publishing requires GITHUB_TOKEN")
-        if client_factory is None:
-            from ci_duration_github import create_client
+        try:
+            if client_factory is None:
+                from ci_duration_github import create_client
 
-            client_factory = create_client
-        report = run_monitor(client_factory(token, args.repository), read_config(args.config), args.repository, args.source_ref, now=now or datetime.now(timezone.utc), lookback_hours=args.lookback_hours, publish=args.publish)
+                client_factory = create_client
+            client = client_factory(token, args.repository)
+        finally:
+            # Project transport imports may configure the shared Loguru logger.
+            # Reclaim this CLI's stdout/file sinks after successful or failed bootstrap.
+            _logging(args.output_dir)
+        report = run_monitor(client, read_config(args.config), args.repository, args.source_ref, now=now or datetime.now(timezone.utc), lookback_hours=args.lookback_hours, publish=args.publish)
         (args.output_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         summary = f"# CI duration monitor\n\nMode: {'publish' if args.publish else 'dry run'}. Runs created in the last {args.lookback_hours} hours; threshold >= {THRESHOLD_SECONDS} seconds.\n\n"
         summary += "\n".join(f"- {item['action']}: `{item['workflow']}` / `{item['family']}` (issue {item['issue'] or 'not created'})." for item in cast(list[dict[str, object]], report["actions"])) or "No qualifying job families."
