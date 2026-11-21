@@ -13,6 +13,15 @@ publication; `cancel-in-progress: false` avoids interrupting issue submissions.
 worker workflows and the Python 3.14 advisory workflow. Known matrix shards are
 combined into one logical family; any other job in a monitored workflow receives
 its own exact-name family. A new workflow requires an explicit config entry.
+The Python 3.14 family recognizes current shard names and historical monolithic
+jobs under the same stable `python314` identity. It opts in to
+`require_test_step: true`, so only recognized jobs containing the configured
+`Run complete non-live test selection` step contribute samples. The current
+aggregate reuses the historical job name but contains no such step; it and the
+recognized quality/planning job produce neither test samples nor fallback
+families. Step presence does not require success or valid timestamps: failed
+tests and unavailable optional timing retain their existing handling. Other
+families omit this option and retain their existing job-name matching behavior.
 Publication, promotion, rollback, manually selected impact experiments, and prompt
 model evaluations are outside this initial monitor's CI allowlist.
 
