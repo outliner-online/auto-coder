@@ -16,8 +16,8 @@ repository's default interpreter pin cannot silently create a Python 3.12
 virtual environment even after `setup-python` selects 3.14. A separate
 version assertion refuses an unexpected interpreter. The workflow verifies
 the selected interpreter and clean exact Git checkout,
-then runs Black, isort, Flake8 and package-wide mypy before the complete
-`not opencode_live` pytest selection. Like the required source workflow, it
+then runs Black, isort, Flake8 and package-wide mypy before planning the complete
+`not opencode_live` pytest selection. Like the required source workflow, each test shard
 prepares the Python-only management Docker fixture from the tested source and
 verifies real headless Chromium before running the tests. These prerequisites
 are required to avoid incorrectly reporting success with eligible tests
@@ -27,7 +27,7 @@ evaluation: Python 3.14 is selected for the installed application and host
 pytest process.
 
 This independent workflow is **advisory**, not a publication, merge or
-deployment authority. It publishes no artifact, grants no package write
+deployment authority. It publishes only diagnostic CI artifacts, grants no package write
 permission and does not alter any required Python 3.12 workflow, Docker
 base image, production worker, release selection or branch-protection rule.
 Green advisory evidence alone is not approval to migrate the production
@@ -66,3 +66,52 @@ observer's context-capable tracing engine and explicit SQLite connection
 closure at native bootstrap-store boundaries. Publisher policy unit tests
 exercise both Python 3.12 acceptance and Python 3.14 rejection: a successful
 advisory run does not grant Python 3.14 production publication authority.
+
+The quality/planning job invokes `scripts/plan_python314_tests.py`, which binds
+the exact checkout, Python interpreter, selectors, harness and semantic environment
+to the existing `scripts/plan_ci_shards.py` planner. Its separate
+`python314-advisory-v1` profile cannot consume Python 3.12 native history.
+The source estimator's validated tracked snapshot is an optional, explicitly
+non-native bootstrap; missing entries retain its conservative same-file/five-second
+fallback. These are scheduling estimates, never measured Python 3.14 execution
+times. The existing 420-second estimated-work target, twelve-shard cap and
+indivisible-node policy apply. Each matrix member recollects the full native
+selection and applies only its immutable assignment via `scripts/ci_shard_plugin.py`.
+Browser, Muse and Supervisor tests remain selected; only OpenCode live tests are
+excluded. Native failures keep their exit status, with no whole-suite retries or
+fail-fast matrix cancellation. Prerequisite preparation is duplicated on every
+test runner; quality runs once before the matrix.
+
+The original `Python 3.14 source quality and non-live tests (advisory)` check name
+now aggregates planning/quality and every native shard. Failed, cancelled, skipped
+or missing dependencies fail it. This changes no branch protection or merge gate.
+Current-run-and-attempt plan artifacts retain the full inventory and assignments;
+each shard retains JUnit and the existing opt-in native timing diagnostics even
+after a failed test command. No outer coverage invocation existed in this profile;
+the native selection still executes its coverage-context regressions unchanged.
+
+For comparison, record the actual checked-out SHA separately from event SHA,
+locked dependency hashes, exact Python/uv and runner image versions, cache state,
+runner count, queue seconds, quality/planning/setup steps, every test-command step,
+and native setup/call/teardown times. Compare complete successful same-source
+attempts with identical instrumentation and prerequisites. Use maximum shard job
+elapsed time and aggregate completion latency separately, accounting for the
+serial planning job, duplicated collection and browser/fixture setup, and available
+concurrency. Repeat/interleave when possible and report variation or inconclusive
+results. Historical run 44853039779 attempt 1 used Python 3.14.10 on Ubuntu 26.04:
+4,910 job seconds, 3 queue seconds, 4,706 test-command seconds, and 4,695.26 seconds
+for its single native pytest session (13,898 passed, 137 skipped, 27 deselected).
+Its collection occupied about 38 seconds; no outer retry was observed. Progress
+timestamps locate expensive independent management fixtures, but are not native
+phase measurements. A new matrix or estimated work total alone proves no measured
+end-to-end improvement. Publication and comparable Actions runs are separate
+evidence still needed before claiming a runtime reduction.
+
+Verify orchestration locally with
+`CI=true bash scripts/test.sh tests/test_ci_uv_lock_policy.py tests/test_python314_orchestration.py tests/test_ci_shard_plan.py`.
+The orchestration regression executes the workflow's actual planner and native
+shard command with complete parameterized non-live profiles, then exercises the
+actual aggregate shell gate. It proves exact single assignment, unchanged passing
+outcomes, retained JUnit, and propagation of a genuine native assertion failure.
+This workflow-only scheduling change emits no production dashboard events and
+requires no dashboard observability schema change.
