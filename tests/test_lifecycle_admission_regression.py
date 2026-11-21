@@ -153,7 +153,7 @@ def test_retained_and_manual_drafts_reach_ordinary_processing(tmp_path, retained
     process.assert_called_once()
 
 
-@pytest.mark.parametrize("body", ["Fixes #1, closes #2", "Fixes #1. Also resolves #2", "Summary: This PR fixes #1; closed #2", "### Fixed #1\n- Resolving #2"])
+@pytest.mark.parametrize("body", ["Fixes #1, closes #2", "Fixes #1. Also resolves #2", "Summary: This PR fixes #1; closed #2", "### Fixed #1\n- Resolving #2", "Fixes:\n#1\nCloses:\n#2"])
 def test_multiple_explicit_directives_remain_ordered(body):
     assert extract_lifecycle_directive_issue_references(body) == [(None, 1), (None, 2)]
 

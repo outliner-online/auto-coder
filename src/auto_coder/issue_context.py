@@ -71,7 +71,7 @@ def extract_linked_issues_from_pr_body(pr_body: str) -> List[int]:
 _LIFECYCLE_DIRECTIVE_KEYWORDS = r"(?:close|closes|closed|closing|fix|fixes|fixed|resolve|resolves|resolved|resolving)"
 # A directive starts a line/list item or a sentence. A keyword embedded in
 # narrative ("existing closed #5459/REQ-007") is not an ownership declaration.
-_LIFECYCLE_DIRECTIVE_PATTERN = r"(?:^|[.!?;,:][ \t]+)[ \t]*(?:(?:[-*+]|\d+[.)]|\#{1,6})[ \t]+)?" rf"(?:also[ \t]+)?(?:this[ \t]+(?:(?:pr|pull request|change)[ \t]+)?)?" rf"{_LIFECYCLE_DIRECTIVE_KEYWORDS}\b:?[ \t]+([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)?#(\d+)"
+_LIFECYCLE_DIRECTIVE_PATTERN = r"(?:^|[.!?;,:][ \t]+)[ \t]*(?:(?:[-*+]|\d+[.)]|\#{1,6})[ \t]+)?" rf"(?:also[ \t]+)?(?:this[ \t]+(?:(?:pr|pull request|change)[ \t]+)?)?" rf"{_LIFECYCLE_DIRECTIVE_KEYWORDS}\b:?\s+([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)?#(\d+)"
 
 
 def extract_lifecycle_directive_issue_references(pr_body: str) -> List[Tuple[Optional[str], int]]:
