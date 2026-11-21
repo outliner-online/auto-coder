@@ -204,7 +204,7 @@ from .trace_logger import get_trace_logger
 from .two_tier_pr_gate import TwoTierPrGate
 from .util.github_action import _create_github_action_log_summary
 from .util.github_request_outcome import GitHubRequestError
-from .utils import CommandExecutor, CommandResult, bind_command_execution_cwd, get_pr_author_login, is_same_github_login, log_action, reset_command_execution_cwd
+from .utils import _COMMAND_EXECUTION_CWD, CommandExecutor, CommandResult, bind_command_execution_cwd, get_pr_author_login, is_same_github_login, log_action, reset_command_execution_cwd
 
 logger = get_logger(__name__)
 cmd = CommandExecutor()
@@ -5385,6 +5385,25 @@ def _get_published_adversarial_validation_comment(
     return _get_legacy_adversarial_validation_comment(github_client, repo_name, pr_number, head_sha)
 
 
+def _pr_validation_repository_cwd(repo_name: str) -> str:
+    """Select the worker checkout without discovering a repository from service cwd."""
+    configured = os.environ.get("AUTO_CODER_WORKSPACE_ROOT")
+    selected = configured if configured is not None else (_COMMAND_EXECUTION_CWD.get() or os.getcwd())
+    if not selected or (configured is not None and not Path(selected).is_absolute()):
+        raise RuntimeError("AUTO_CODER_WORKSPACE_ROOT must name an absolute repository checkout")
+    if any(name in os.environ for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")):
+        raise RuntimeError("Git directory overrides make the PR validation repository ambiguous")
+    root = cmd.run_command(["git", "rev-parse", "--show-toplevel"], cwd=selected)
+    if not root.success or not root.stdout.strip():
+        raise RuntimeError("Cannot identify the target repository checkout for PR validation")
+    repository_cwd = str(Path(root.stdout.strip()).resolve())
+    origin = cmd.run_command(["git", "config", "--get-all", "remote.origin.url"], cwd=repository_cwd)
+    remote = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/\s]+/[^/\s]+?)(?:\.git)?/?", origin.stdout.strip()) if origin.success else None
+    if remote is None or remote.group(1).casefold() != repo_name.casefold():
+        raise RuntimeError("PR validation checkout origin does not uniquely match the target repository")
+    return repository_cwd
+
+
 @contextlib.contextmanager
 def isolated_pr_head_worktree(repo_name: str, pr_number: int, head_sha: Optional[str] = None):
     """Context manager that creates an isolated, detached git worktree at head_sha for side-effect-free validation.
@@ -5398,7 +5417,7 @@ def isolated_pr_head_worktree(repo_name: str, pr_number: int, head_sha: Optional
         raise ValueError(f"head_sha is required for isolated worktree validation of PR #{pr_number}")
 
     worktree_dir = None
-    repository_cwd = os.getcwd()
+    repository_cwd = _pr_validation_repository_cwd(repo_name)
     execution_token = None
     registered = False
     try:
