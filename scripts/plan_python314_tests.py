@@ -24,15 +24,50 @@ HARNESS = (
 )
 
 
+def _verify_planner(args: argparse.Namespace) -> None:
+    """Admit only the plan identified by this dependency's successful producer."""
+    if args.planner_result != "success" or not args.planner_artifact or not args.planner_digest:
+        raise ValueError("a successful authoritative planner and its exact outputs are required")
+    plan, _raw = read_plan(args.verify_plan)
+    origin = plan.context.origin
+    attempt = str(origin.get("run_attempt", ""))
+    current = os.environ["GITHUB_RUN_ATTEMPT"]
+    if not attempt.isdecimal() or str(int(attempt)) != attempt or not 1 <= int(attempt) <= int(current):
+        raise ValueError("planner attempt is not a valid retained attempt of this run")
+    expected = {
+        "repository": os.environ["GITHUB_REPOSITORY"],
+        "workflow": os.environ["GITHUB_WORKFLOW"],
+        "run_id": os.environ["GITHUB_RUN_ID"],
+        "event_sha": os.environ["GITHUB_SHA"],
+        "ref": os.environ["GITHUB_REF"],
+        "planning_attempt": f"python314-plan-{os.environ['GITHUB_RUN_ID']}-{attempt}",
+    }
+    if any(origin.get(key) != value for key, value in expected.items()):
+        raise ValueError("planner origin differs from this workflow run/ref/source")
+    if args.planner_artifact != f"python314-plan-{expected['run_id']}-{attempt}" or args.planner_digest != plan.digest:
+        raise ValueError("downloaded plan contradicts the successful planner outputs")
+    if plan.context.repository != expected["repository"] or plan.context.checkout_sha != args.source_sha or plan.context.profile_id != "python314-advisory-v1" or plan.context.pytest_args != SELECTORS:
+        raise ValueError("planner source/profile differs from the required advisory selection")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-sha", required=True)
-    parser.add_argument("--directory", type=Path, required=True)
-    parser.add_argument("--github-output", type=Path, required=True)
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--verify-plan", type=Path)
+    parser.add_argument("--planner-result", default="")
+    parser.add_argument("--planner-artifact", default="")
+    parser.add_argument("--planner-digest", default="")
     args = parser.parse_args()
     checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     if checkout != args.source_sha:
         raise ValueError("actual checkout differs from requested advisory source")
+    if args.verify_plan is not None:
+        _verify_planner(args)
+        return 0
+    if args.directory is None or args.github_output is None:
+        parser.error("planning requires --directory and --github-output")
     repository = os.environ["GITHUB_REPOSITORY"]
     context = ShardContext(
         repository,
@@ -48,6 +83,7 @@ def main() -> int:
             "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "planning_attempt": f"python314-plan-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}",
             "event_sha": os.environ["GITHUB_SHA"],
+            "ref": os.environ["GITHUB_REF"],
         },
     )
     args.directory.mkdir(parents=True, exist_ok=True)
@@ -80,6 +116,8 @@ def main() -> int:
     with args.github_output.open("a", encoding="utf-8") as stream:
         stream.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
         stream.write(f"count={len(plan.shards)}\n")
+        stream.write(f"artifact=python314-plan-{context.origin['run_id']}-{context.origin['run_attempt']}\n")
+        stream.write(f"digest={plan.digest}\n")
     return 0
 
 

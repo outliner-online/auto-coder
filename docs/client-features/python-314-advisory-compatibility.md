@@ -90,6 +90,20 @@ each shard retains JUnit and the existing opt-in native timing diagnostics even
 after a failed test command. No outer coverage invocation existed in this profile;
 the native selection still executes its coverage-context regressions unchanged.
 
+The successful planner exports its exact artifact name and immutable plan digest
+as dependency outputs. A failed-only GitHub rerun can retain that successful job:
+the rerun shard downloads its producer's artifact, rather than inventing a name
+from the new consumer attempt. Before prerequisites or native execution, the
+planner wrapper verifies the successful dependency result, digest, producing
+attempt, repository, workflow, run, Git ref, event SHA and exact checked-out
+source/profile. A retained attempt must not be newer than the consumer attempt.
+Missing outputs/artifacts or contradictory evidence fail closed; a failed current
+planner cannot fall back to an older successful plan. An all-jobs rerun uses its
+new planner's outputs. The native shard plugin still verifies the effective
+profile and full inventory. Shard timing/results retain their actual execution
+attempt identities. This uses same-run artifact access with the existing
+`contents: read` permission; it adds no API lookup, credential or automatic retry.
+
 For comparison, record the actual checked-out SHA separately from event SHA,
 locked dependency hashes, exact Python/uv and runner image versions, cache state,
 runner count, queue seconds, quality/planning/setup steps, every test-command step,

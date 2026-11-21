@@ -37,6 +37,8 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       count: ${{ steps.plan.outputs.count }}
+      artifact: ${{ steps.plan.outputs.artifact }}
+      digest: ${{ steps.plan.outputs.digest }}
     steps:
       - name: Checkout exact source revision
         uses: actions/checkout@v7
@@ -117,11 +119,19 @@ jobs:
         run: |
           uv run python -c 'import sys; assert sys.version_info[:2] == (3, 14), sys.version'
           uv run python -c 'from auto_coder.build_identity import resolve_build_identity; r=resolve_build_identity("."); assert r.state == "clean" and r.source_revision == "${{ github.event.pull_request.head.sha || github.sha }}"'
-      - name: Download current-attempt immutable assignments
+      - name: Download authoritative successful planner assignments
         uses: actions/download-artifact@v8
         with:
-          name: python314-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.python314-plan.outputs.artifact }}
           path: ${{ runner.temp }}/python314-plan
+      - name: Verify authoritative successful planner binding
+        run: >-
+          uv run python -m scripts.plan_python314_tests
+          --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+          --verify-plan "$RUNNER_TEMP/python314-plan/plan.json"
+          --planner-result '${{ needs.python314-plan.result }}'
+          --planner-artifact '${{ needs.python314-plan.outputs.artifact }}'
+          --planner-digest '${{ needs.python314-plan.outputs.digest }}'
       - name: Prepare required Python-only management fixture
         run: uv run python scripts/prepare_management_test_image.py
       - name: Install real Chromium
