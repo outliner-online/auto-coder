@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterator, Optional, Sequence
 
 from .backend_manager import BackendManager, run_llm_prompt
+from .issue_review_execution import IssueReviewCheckoutError
 from .objective_evidence import ObjectiveAnchor, objective_evidence_json
 from .prompt_loader import render_prompt
 from .requirement_contract import NormativeIssueManifest
@@ -306,6 +307,8 @@ def analyze_issue_decomposition(
             if backend_manager is None:
                 return _error("No strong decomposition-analysis backend is available")
             response = run_llm_prompt(prompt, backend_manager=backend_manager, is_noedit=True)
+    except IssueReviewCheckoutError as exc:
+        return _error(f"Local Issue review setup failure: {exc}")
     except Exception as exc:
         return _error(f"Decomposition analysis execution failed: {type(exc).__name__}")
     return parse_decomposition_analysis_response(response, parent, children)

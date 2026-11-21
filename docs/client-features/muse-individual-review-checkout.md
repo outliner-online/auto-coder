@@ -1,6 +1,7 @@
-# Muse individual Issue review checkout
+# Muse Issue review checkout
 
-Operators using Muse for individual Issue specification review must supply an
+Operators using Muse for individual Issue specification or parent/child
+decomposition review must supply an
 absolute target checkout path in the existing repository-scoped application
 configuration. For example, in `~/.auto-coder/OWNER/REPO/config.toml`:
 
@@ -36,8 +37,9 @@ selects the configured checkout and binds the invocation's command directory
 before the existing private-workspace preparation and real Muse no-edit Git
 snapshot. The binding is restored on return and exception without changing the
 process directory. Private copies and retained sessions keep their existing
-ownership and cleanup rules. PR review, decomposition review, editable execution,
-and other providers retain their existing directory behavior.
+ownership and cleanup rules. Decomposition review uses the same binding with the
+scheduled parent identity and complete direct-child set. PR review, editable
+execution, and other providers retain their existing directory behavior.
 
 Setup errors produce an explicit retryable `ERROR`, never a saved `READY` or
 `BLOCKED` authorization or an implementation handoff. Correcting configuration
@@ -52,3 +54,12 @@ reads the actual Git worktree/HEAD, verifies overlapping repository and Issue
 identities, and checks invalid inputs, retry, exception cleanup and thread reuse.
 An explicit old-behavior control removes only the new binding and reproduces
 the non-Git controller's Muse HEAD failure before host launch.
+
+`tests/test_decomposition_review_checkout.py` crosses the engine's authoritative
+family scheduling, real validation scheduler, default decomposition analyzer,
+private-workspace preparation and real Muse no-edit Git preflight. It stops at
+`Popen` before any MSP host or external provider starts. An independent Git oracle
+verifies the selected source, private worktree, HEAD and parent identity from
+non-Git, unrelated-Git and matching controller directories. Invalid selections,
+retry, concurrent repositories and an old-binding control are covered. The
+deliberate stop returns `ERROR` and grants no terminal review authorization.
