@@ -192,11 +192,10 @@ class MonitorTests(unittest.TestCase):
 
     def test_failed_and_timed_out_completed_work_is_observed(self) -> None:
         for conclusion in ("failure", "timed_out"):
-            with self.subTest(conclusion=conclusion):
-                self.github = GitHub()
-                self.github.jobs[(10, 1)] = [job(seconds=610, conclusion=conclusion)]
-                self.assertEqual(self.run_cli(), 0)
-                self.assertEqual(len(self.github.issues), 1)
+            self.github = GitHub()
+            self.github.jobs[(10, 1)] = [job(seconds=610, conclusion=conclusion)]
+            self.assertEqual(self.run_cli(), 0)
+            self.assertEqual(len(self.github.issues), 1)
 
     def test_queue_and_workflow_total_alone_are_report_only(self) -> None:
         self.github.jobs[(10, 1)] = [job(seconds=100)]
@@ -259,15 +258,14 @@ class MonitorTests(unittest.TestCase):
 
     def test_lost_create_comment_or_label_response_recovers_without_duplicate(self) -> None:
         for route in ("issues", "issues/1/comments", "issues/1/labels"):
-            with self.subTest(route=route):
-                self.github = GitHub()
-                self.github.lose_after = route
-                self.assertEqual(self.run_cli(), 1)
-                self.assertEqual(self.run_cli(), 0)
-                self.assertEqual(len(self.github.issues), 1)
-                self.assertEqual(len(self.github.comments[1]), 1)
-                self.assertEqual(len(self.github.events[1]), 1)
-                self.assertEqual(len([call for call in self.github.mutations if call[1] == "issues"]), 1)
+            self.github = GitHub()
+            self.github.lose_after = route
+            self.assertEqual(self.run_cli(), 1)
+            self.assertEqual(self.run_cli(), 0)
+            self.assertEqual(len(self.github.issues), 1)
+            self.assertEqual(len(self.github.comments[1]), 1)
+            self.assertEqual(len(self.github.events[1]), 1)
+            self.assertEqual(len([call for call in self.github.mutations if call[1] == "issues"]), 1)
 
     def test_reviewer_body_rewrite_and_consumed_readiness_are_preserved(self) -> None:
         self.assertEqual(self.run_cli(), 0)
@@ -337,48 +335,46 @@ class MonitorTests(unittest.TestCase):
 
     def test_transient_get_status_and_transport_errors_are_retried(self) -> None:
         for failure in (Result(502, None), Result(503, None), Result(504, None), ConnectionError("transport unavailable")):
-            with self.subTest(failure=failure):
-                self.github = GitHub()
-                original = self.github.request
-                failed = False
-                requests = 0
+            self.github = GitHub()
+            original = self.github.request
+            failed = False
+            requests = 0
 
-                def flaky(method: str, path: str, payload: dict[str, object] | None = None) -> Result:
-                    nonlocal failed, requests
-                    if method == "GET" and "/jobs?" in path:
-                        requests += 1
-                        if not failed:
-                            failed = True
-                            if isinstance(failure, Exception):
-                                raise failure
-                            return failure
-                    return original(method, path, payload)
-
-                with patch.object(self.github, "request", side_effect=flaky):
-                    self.assertEqual(self.run_cli(), 0)
-                self.assertEqual(requests, 2)
-                self.assertEqual(len(self.github.issues), 1)
-
-    def test_read_retries_are_bounded_and_do_not_retry_auth_rate_or_schema_errors(self) -> None:
-        for failure, attempts in ((Result(502, None), 3), (Result(401, None), 1), (Result(403, None), 1), (Result(429, None), 1), (RuntimeError("malformed JSON"), 1)):
-            with self.subTest(failure=failure):
-                self.github = GitHub()
-                original = self.github.request
-                requests = 0
-
-                def failed(method: str, path: str, payload: dict[str, object] | None = None) -> Result:
-                    nonlocal requests
-                    if method == "GET" and "/jobs?" in path:
-                        requests += 1
+            def flaky(method: str, path: str, payload: dict[str, object] | None = None) -> Result:
+                nonlocal failed, requests
+                if method == "GET" and "/jobs?" in path:
+                    requests += 1
+                    if not failed:
+                        failed = True
                         if isinstance(failure, Exception):
                             raise failure
                         return failure
-                    return original(method, path, payload)
+                return original(method, path, payload)
 
-                with patch.object(self.github, "request", side_effect=failed):
-                    self.assertEqual(self.run_cli(), 1)
-                self.assertEqual(requests, attempts)
-                self.assertEqual(self.github.mutations, [])
+            with patch.object(self.github, "request", side_effect=flaky):
+                self.assertEqual(self.run_cli(), 0)
+            self.assertEqual(requests, 2)
+            self.assertEqual(len(self.github.issues), 1)
+
+    def test_read_retries_are_bounded_and_do_not_retry_auth_rate_or_schema_errors(self) -> None:
+        for failure, attempts in ((Result(502, None), 3), (Result(401, None), 1), (Result(403, None), 1), (Result(429, None), 1), (RuntimeError("malformed JSON"), 1)):
+            self.github = GitHub()
+            original = self.github.request
+            requests = 0
+
+            def failed(method: str, path: str, payload: dict[str, object] | None = None) -> Result:
+                nonlocal requests
+                if method == "GET" and "/jobs?" in path:
+                    requests += 1
+                    if isinstance(failure, Exception):
+                        raise failure
+                    return failure
+                return original(method, path, payload)
+
+            with patch.object(self.github, "request", side_effect=failed):
+                self.assertEqual(self.run_cli(), 1)
+            self.assertEqual(requests, attempts)
+            self.assertEqual(self.github.mutations, [])
 
     def test_failed_mutation_response_is_never_retried(self) -> None:
         self.github.reject_before = "issues"
