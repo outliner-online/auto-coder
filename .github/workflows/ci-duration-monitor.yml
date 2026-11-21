@@ -1,0 +1,64 @@
+name: CI Duration Monitor
+
+'on':
+  schedule:
+    - cron: '17 21 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report candidates without creating or updating issues'
+        type: boolean
+        default: true
+      lookback_hours:
+        description: 'Discover workflow runs created within this many hours'
+        type: number
+        default: 48
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  group: ci-duration-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout default branch revision
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.7.22'
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Inspect CI and submit review-ready issues
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MONITOR_PUBLISH: ${{ github.event_name == 'schedule' || !inputs.dry_run }}
+          MONITOR_LOOKBACK: ${{ inputs.lookback_hours || 48 }}
+        run: |
+          args=(--repository "$GITHUB_REPOSITORY" --source-ref "$GITHUB_SHA" --lookback-hours "$MONITOR_LOOKBACK")
+          if [ "$MONITOR_PUBLISH" = true ]; then
+            args+=(--publish)
+          fi
+          uv run python scripts/ci_duration_monitor.py "${args[@]}"
+      - name: Upload monitor evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-duration-monitor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-duration-monitor-output/
+          retention-days: 14
+          if-no-files-found: warn

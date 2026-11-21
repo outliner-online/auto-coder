@@ -253,3 +253,6 @@ pyright_results.json
 
 node_modules/
 .vscode/launch.json
+
+# Daily CI duration monitoring evidence
+/ci-duration-monitor-output/
