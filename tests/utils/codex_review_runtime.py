@@ -38,7 +38,8 @@ def main() -> None:
     git("commit", "-am", "head")
     head = git("rev-parse", "HEAD")
     git("update-ref", "refs/pull/2387/head", head)
-    git("remote", "add", "origin", str(repository))
+    git("remote", "add", "origin", "https://github.com/local/review.git")
+    git("config", f"url.{repository}.insteadOf", "https://github.com/local/review.git")
     # A separate real diagnostic establishes why nested sandboxing is unusable
     # under the same worker credentials and invocation-private write policy.
     diagnostic_runtime = root / "runtime" / "diagnostic"
