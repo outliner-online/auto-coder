@@ -19,7 +19,10 @@ current Issue state alone is not a reason to discard PR ownership.
 Before a fresh autonomous draft reservation, the controller checks whether a
 local repair backend is configured. With none configured it reads current
 strict GitHub PR metadata and the existing cloud-origin resolver, constrained
-to lifecycle-validated Issue ownership rather than broad review-context prose. A confirmed
+to lifecycle-validated Issue ownership and independently recorded sessions
+matched by explicit PR session markers, rather than broad review-context prose.
+Missing-slot Jules/Claude session recovery remains eligible; conflicting
+recorded session associations defer admission. A confirmed
 draft without a usable provider origin is deferred before execution admission,
 so it cannot consume capacity as either an Issue or standalone PR owner merely
 to return a backend refusal. Unavailable or ambiguous evidence also defers

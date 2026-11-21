@@ -178,3 +178,39 @@ def test_draft_provider_preflight_does_not_promote_narrative_to_provider_ownersh
         assert (blocker is None) is (issue_owner is not None)
         if issue_owner is None:
             provider.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "provider,stored,marker",
+    [
+        ("jules", "known-task", "https://jules.google.com/session/known-task"),
+        ("claude-routine", "cse_known", "https://claude.ai/code/session_known"),
+    ],
+)
+def test_recorded_provider_session_survives_missing_slot_draft_preflight(provider, stored, marker):
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.pr_processor import draft_pr_implementation_blocker
+
+    assert CloudManager("owner/repo").add_session(5459, stored, provider=provider)
+    github = MagicMock()
+    github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": True, "body": NARRATIVE + "\n" + marker}
+    with patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory:
+        factory.return_value.get_client_for_provider.return_value = MagicMock()
+        assert draft_pr_implementation_blocker("owner/repo", 5940, github) is None
+        factory.return_value.get_client_for_provider.assert_called_once()
+
+
+@pytest.mark.parametrize("shared_session", [False, True])
+def test_conflicting_recorded_provider_sessions_do_not_admit_draft(shared_session):
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.pr_processor import draft_pr_implementation_blocker
+
+    manager = CloudManager("owner/repo")
+    assert manager.add_session(5459, "first-task", provider="jules")
+    assert manager.add_session(5460, "first-task" if shared_session else "second-task", provider="jules")
+    github = MagicMock()
+    github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": True, "body": "https://jules.google.com/session/first-task\nhttps://jules.google.com/task/second-task"}
+    with patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory:
+        blocker = draft_pr_implementation_blocker("owner/repo", 5940, github)
+    assert "multiple conflicting" in blocker
+    factory.assert_not_called()
