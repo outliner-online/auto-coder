@@ -10304,7 +10304,7 @@ def _resolve_cloud_task_origin(
             session_matches = [(number, binding) for number, binding in manager.read_bindings_strict().items() if binding.provider != "codex-cloud" and binding.task_id in session_ids]
             if len(session_matches) > 1:
                 return CloudTaskOriginResolution(reason="multiple conflicting recorded session associations were found")
-            for number, binding in session_matches:
+            for number, session_binding in session_matches:
                 if number.isdecimal() and int(number) > 0 and int(number) not in issue_numbers:
                     issue_numbers.append(int(number))
         for issue_number in issue_numbers:
