@@ -33,7 +33,8 @@ def _repositories(root):
         (checkout / "identity.txt").write_text(identity, encoding="utf-8")
         _git(checkout, "add", ".")
         _git(checkout, "commit", "-m", identity)
-    _git(service, "remote", "add", "origin", str(remote))
+    _git(service, "remote", "add", "origin", "https://github.com/owner/repo.git")
+    _git(service, "config", f"url.{remote}.insteadOf", "https://github.com/owner/repo.git")
     heads = {}
     for number, identity in ((101, "alpha"), (202, "beta")):
         (service / "identity.txt").write_text(identity, encoding="utf-8")

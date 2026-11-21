@@ -26,6 +26,9 @@ def _git(cwd: Path, *args: str) -> str:
 
 def _prepare_pull_fetch_head(checkout: Path, head: str) -> None:
     # Clone does not guarantee FETCH_HEAD; establish the PR-fetch sentinel explicitly.
+    local_origin = _git(checkout, "remote", "get-url", "origin")
+    _git(checkout, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+    _git(checkout, "config", f"url.{local_origin}.insteadOf", "https://github.com/owner/repo.git")
     _git(checkout, "fetch", "--no-tags", "origin", "pull/18/head")
     assert _git(checkout, "rev-parse", "FETCH_HEAD") == head
 
