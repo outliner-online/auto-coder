@@ -1,0 +1,127 @@
+{
+  "workflows": [
+    {
+      "path": ".github/workflows/pr-tests.yml",
+      "families": [
+        {
+          "key": "pytest",
+          "name": "Tests with Coverage",
+          "job_pattern": "Tests with Coverage \\(\\d+/\\d+\\)",
+          "test_step_pattern": "^Run tests with coverage \\(shard ",
+          "source_paths": [
+            ".github/workflows/pr-tests.yml",
+            "scripts/run_pr_test_shard.py",
+            "tests/data/pr-test-durations.json",
+            "tests/test_pr_test_duration_weights.py"
+          ],
+          "guidance": "The ordinary PR path fixes four groups in both the workflow matrix and scripts/run_pr_test_shard.py (including its argument choices and pytest --splits value). Change those coupled entry points together if the reviewed plan changes the shard count; use the existing duration-based complete selection rather than dropping tests. Inspect pr-test-diagnostics artifacts because the test-command step can contain a timeout-only second attempt. Preserve the stable Tests with Coverage aggregate and its lint/shard failure propagation. Extend tests/test_pr_test_duration_weights.py or a focused orchestration regression, and run bash scripts/test.sh with only the affected test files."
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/test-source-for-runtime.yml",
+      "families": [
+        {
+          "key": "complete-source",
+          "name": "Complete source tests",
+          "job_pattern": "Complete source tests \\(\\d+/\\d+\\)",
+          "test_step_pattern": "^Run complete required source selection$",
+          "source_paths": [
+            ".github/workflows/test-source-for-runtime.yml",
+            "scripts/plan_ci_shards.py",
+            "scripts/source_ci_runtime.py",
+            "src/auto_coder/ci_shard_plan.py",
+            "src/auto_coder/source_ci_metrics.py",
+            "tests/test_source_ci_orchestration.py"
+          ],
+          "guidance": "Source CI already creates immutable complete plans with a 420-second estimated-work target and a 12-shard cap. Inspect the source-duration and source-test-plan artifacts before increasing parallelism: queue/setup/aggregation can dominate workflow latency even when every shard is short. Preserve exact selected inventory, plan digest, same-attempt receipts, and the Complete source tests with Chromium aggregate. Reuse the planner and current native duration history rather than introducing another splitter. Verify with bash scripts/test.sh tests/test_source_ci_orchestration.py tests/test_ci_shard_plan.py; measure actual job/step timings separately from native pytest phase estimates."
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/browser-tests.yml",
+      "families": [
+        {
+          "key": "browser",
+          "name": "Browser Tests",
+          "job_pattern": "Browser Tests",
+          "test_step_pattern": "^Run browser-marked tests$",
+          "source_paths": [
+            ".github/workflows/browser-tests.yml",
+            "scripts/browser_preflight.py",
+            "tests/support/browser_launch.py"
+          ],
+          "guidance": "Separate Chromium download/apt/preflight costs from the browser-marked pytest step. Keep all browser-marked tests, real browser preflight, and hard failure when required Chromium cannot launch. A partition must preserve browser marker selection and native failures. Use bash scripts/test.sh with the affected browser orchestration/regression selection; do not turn browser prerequisites into skips."
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/opencode-live-tests.yml",
+      "families": [
+        {
+          "key": "opencode-live",
+          "name": "OpenCode Live Tests",
+          "job_pattern": "OpenCode Live Tests",
+          "test_step_pattern": "^Run opencode_live-marked tests$",
+          "source_paths": [
+            ".github/workflows/opencode-live-tests.yml",
+            "scripts/prepare_opencode_image.py",
+            "tests/test_opencode_container_runtime.py"
+          ],
+          "guidance": "Distinguish pinned CLI installation and runtime image preparation from the live-test step, which already runs pytest with two workers. Preserve all opencode_live-marked tests and exact checked-out runtime image preparation. Additional shards duplicate image setup and may be slower; inspect the job steps and existing diagnostics before choosing partitions. Run the affected live regressions through bash scripts/test.sh with required Docker/OpenCode prerequisites available."
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/muse-live-tests.yml",
+      "families": [
+        {
+          "key": "muse-live",
+          "name": "Muse Live Tests",
+          "job_pattern": "Muse Live Tests",
+          "test_step_pattern": "^Run real-host conformance$",
+          "source_paths": [
+            ".github/workflows/muse-live-tests.yml",
+            "tests/test_muse_background_live.py"
+          ],
+          "guidance": "Inspect pinned real-host installation separately from muse_live conformance execution. Keep the pinned executable checksum and all real-host cases; do not replace native assertions with mocked success to reduce time. Run bash scripts/test.sh tests/test_muse_background_live.py -m muse_live with its declared real-host prerequisite."
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/supervisor-integration-tests.yml",
+      "families": [
+        {
+          "key": "worker-bridge",
+          "name": "Worker processes and bridge",
+          "job_pattern": "Worker processes and bridge",
+          "test_step_pattern": "^Test real worker processes and management bridge$",
+          "source_paths": [
+            ".github/workflows/supervisor-integration-tests.yml",
+            "scripts/supervisor_ci_results.py",
+            "tests/test_worker_supervisor.py",
+            "tests/test_worker_management_bridge.py"
+          ],
+          "guidance": "The retained worker-bridge job runs separate worker-bridge and worker-daemon invocations and emits native result/timing artifacts. If splitting these invocations, preserve both complete explicit test lists, invocation identities, result receipts, and the Supervisor Integration Tests aggregate. Keep real-process cleanup and failure propagation; do not substitute helper-only tests. Verify selected real-process cases with bash scripts/test.sh and inspect resulting artifacts."
+        }
+      ]
+    },
+    {
+      "path": ".github/workflows/python-314-compatibility.yml",
+      "families": [
+        {
+          "key": "python314",
+          "name": "Python 3.14 compatibility",
+          "job_pattern": "Python 3\\.14 source quality and non-live tests \\(advisory\\)",
+          "test_step_pattern": "^Run complete non-live test selection$",
+          "source_paths": [
+            ".github/workflows/python-314-compatibility.yml",
+            "tests/test_ci_uv_lock_policy.py",
+            "scripts/browser_preflight.py"
+          ],
+          "guidance": "This advisory workflow checks Python 3.14 using locked dependencies and a complete non-live test selection. Keep the interpreter/lock assertions, real Chromium preflight, and complete not-opencode_live selection. Inspect setup and collection costs before choosing balanced test partitions; preserve advisory status rather than making unrelated merge gates stricter. Run affected lock/workflow regressions through bash scripts/test.sh tests/test_ci_uv_lock_policy.py."
+        }
+      ]
+    }
+  ]
+}
