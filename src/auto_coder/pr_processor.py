@@ -10396,18 +10396,10 @@ def _resolve_cloud_task_origin_from_sources(
         # Intake supplies only lifecycle-validated Issue ownership. Review
         # context's broader prose references cannot authorize a new draft slot.
         issue_numbers = list(source_issue_numbers) if source_issue_numbers is not None else _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
-        if source_issue_numbers is not None:
-            # A recorded session matched by an explicit PR session marker is
-            # independent provider evidence, even during missing-slot recovery.
-            # Codex continues to require publication attribution above.
-            session_ids = {session_id for _, session_id in _extract_session_id_candidates(str(pr_data.get("body") or ""))}
-            session_ids.update(alias for session_id in tuple(session_ids) if (alias := claude_session_alias(session_id)) is not None)
-            session_matches = [(number, binding) for number, binding in manager.read_bindings_strict().items() if binding.provider != "codex-cloud" and binding.task_id in session_ids]
-            if len(session_matches) > 1:
-                return CloudTaskOriginResolution(reason="multiple conflicting recorded session associations were found")
-            for number, session_binding in session_matches:
-                if number.isdecimal() and int(number) > 0 and int(number) not in issue_numbers:
-                    issue_numbers.append(int(number))
+        # An editable session marker can identify a task, but cannot prove that
+        # an unrelated Issue's durable task belongs to this PR. Restricted
+        # callers use only independently validated lifecycle owners; direct
+        # durable PR bindings and Codex publication attribution are handled above.
         for issue_number in issue_numbers:
             binding = manager.get_binding(issue_number)
             if binding:

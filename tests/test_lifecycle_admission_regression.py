@@ -185,21 +185,45 @@ def test_draft_provider_preflight_does_not_promote_narrative_to_provider_ownersh
         ("claude-routine", "cse_known", "https://claude.ai/code/session_known"),
     ],
 )
-def test_recorded_provider_session_survives_missing_slot_draft_preflight(provider, stored, marker):
-    from auto_coder.cloud_manager import CloudManager
-    from auto_coder.pr_processor import draft_pr_implementation_blocker
+@pytest.mark.parametrize("provenance", ["missing", "direct-pr", "lifecycle-issue"])
+def test_recorded_provider_session_requires_independent_draft_association(provider, stored, marker, provenance):
+    from auto_coder.cloud_manager import CloudTaskBinding
+    from auto_coder.pr_processor import DraftPRAdmissionEvidence, DraftPRRepairAuthority, _resolve_cloud_task_origin, _revalidate_cloud_origin, draft_pr_implementation_blocker, draft_pr_repair_authority_scope
 
-    assert CloudManager("owner/repo").add_session(5459, stored, provider=provider)
+    binding = CloudTaskBinding(provider=provider, task_id=stored)
+    manager = MagicMock()
+    manager.get_binding.side_effect = lambda number: binding if number == (5940 if provenance == "direct-pr" else 5459) else None
+    manager.read_bindings_strict.return_value = {"5459": binding}
     github = MagicMock()
-    github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": True, "body": NARRATIVE + "\n" + marker}
-    with patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory:
+    github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": True, "body": NARRATIVE + "\n" + marker, "head": {"ref": "grid-cleanup", "sha": "h1"}}
+    owner = 5459 if provenance == "lifecycle-issue" else None
+    evidence = DraftPRAdmissionEvidence()
+    with (
+        patch("auto_coder.pr_processor.CloudManager", return_value=manager),
+        patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""),
+        patch("auto_coder.codex_pr_attribution.resolve_codex_pr_origin") as attribution,
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory,
+    ):
+        attribution.return_value.origin = None
         factory.return_value.get_client_for_provider.return_value = MagicMock()
-        assert draft_pr_implementation_blocker("owner/repo", 5940, github) is None
-        factory.return_value.get_client_for_provider.assert_called_once()
+        blocker = draft_pr_implementation_blocker("owner/repo", 5940, github, owner, expected_head=("grid-cleanup", "h1"), evidence=evidence)
+        assert (blocker is None) is (provenance != "missing")
+        authority = evidence.authority or DraftPRRepairAuthority("owner/repo", 5940, "grid-cleanup", "h1")
+        with draft_pr_repair_authority_scope(authority):
+            resolution = _resolve_cloud_task_origin("owner/repo", github.get_pull_request_metadata_strict.return_value, github)
+            if provenance == "missing":
+                assert resolution.origin is None
+                assert "no provider-owned" in resolution.reason
+                factory.assert_not_called()
+            else:
+                assert (resolution.origin.provider, resolution.origin.task_id) == (provider, stored)
+                assert _revalidate_cloud_origin("owner/repo", 5940, resolution.origin, github_client=github) is None
+                manager.get_binding.side_effect = lambda number: None
+                assert "no provider-owned" in _revalidate_cloud_origin("owner/repo", 5940, resolution.origin, github_client=github)
 
 
 @pytest.mark.parametrize("shared_session", [False, True])
-def test_conflicting_recorded_provider_sessions_do_not_admit_draft(shared_session):
+def test_unassociated_recorded_provider_sessions_do_not_admit_draft(shared_session):
     from auto_coder.cloud_manager import CloudManager
     from auto_coder.pr_processor import draft_pr_implementation_blocker
 
@@ -210,7 +234,7 @@ def test_conflicting_recorded_provider_sessions_do_not_admit_draft(shared_sessio
     github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": True, "body": "https://jules.google.com/session/first-task\nhttps://jules.google.com/task/second-task"}
     with patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory:
         blocker = draft_pr_implementation_blocker("owner/repo", 5940, github)
-    assert "multiple conflicting" in blocker
+    assert "no provider-owned" in blocker
     factory.assert_not_called()
 
 

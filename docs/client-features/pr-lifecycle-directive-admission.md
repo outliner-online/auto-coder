@@ -44,10 +44,12 @@ after retirement. Retained live execution keeps its normal duplicate guard.
 With no local backend configured, preparation reads current strict GitHub PR
 metadata matching the observed head reference and SHA, and uses the cloud-origin
 resolver, constrained
-to lifecycle-validated Issue ownership and independently recorded sessions
-matched by explicit PR session markers, rather than broad review-context prose.
-Missing-slot Jules/Claude session recovery remains eligible; conflicting
-recorded session associations defer admission. A confirmed
+to lifecycle-validated Issue ownership or direct durable PR associations,
+rather than broad review-context prose. An editable PR session marker matching
+a stored task on another Issue does not independently establish that association.
+Missing-slot Jules/Claude recovery requires a direct PR binding or a validated
+lifecycle Issue owner; missing provenance defers admission. Codex publication
+attribution remains required through its existing authority path. A confirmed
 draft without a usable provider origin is deferred before execution admission,
 so it cannot consume capacity as either an Issue or standalone PR owner merely
 to return a backend refusal. Unavailable or ambiguous evidence also defers
