@@ -3767,3 +3767,22 @@ tests/test_pr_worker_observation_status.py` exercises real SQLite/controller/wor
 processing, canonical CI reads and the existing skip-to-dashboard contract.
 The deterministic 0/1/1.5-second burst reduces two evaluations to one; it does not
 prove progress or authorize a merge in a live worker.
+
+## Fresh autonomous draft implementation refusal
+
+A draft with no configured local repair backend and no usable existing cloud
+origin is refused before a new durable implementation reservation. Production
+emits the existing `pr.implementation-admission` stage with `deferred`, resolved
+owner and reason, and returns the same deferred worker outcome. An uncertain
+strict GitHub/provider read also defers without inventing free/occupied state.
+The existing detail projection displays this reason; the read-only slot panel
+continues to display only actual durable owners. Retained reservations are
+never removed by this preflight or by reparsing current PR text.
+
+Run `bash scripts/test.sh tests/test_lifecycle_admission_regression.py
+ tests/test_issue_context.py tests/test_implementation_slots.py` for the exact
+production narrative, startup reconciliation/restart, backend refusal before
+admission, next eligible Issue admission with duplicate suppression, historical
+membership retention and existing branch/native/provider/active-work cases.
+The directive parser changes only evidence feeding existing ownership decisions;
+no trace schema, origin, or renderer changes are needed.

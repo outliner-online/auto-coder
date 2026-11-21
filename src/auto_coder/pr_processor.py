@@ -2137,6 +2137,30 @@ def _selected_local_backend_name(repo_name: Optional[str] = None) -> str:
     return candidates[0] if candidates else ""
 
 
+def draft_pr_implementation_blocker(repo_name: str, pr_number: int, github_client: Any, issue_owner_number: Optional[int] = None) -> Optional[str]:
+    """Refuse a fresh autonomous draft reservation with no executable route.
+
+    Existing reservations and explicit manual processing are handled by the
+    caller. This is admission only: uncertainty cannot release retained work.
+    """
+    try:
+        if _selected_local_backend_name(repo_name):
+            return None
+        current = github_client.get_pull_request_metadata_strict(repo_name, pr_number)
+        if not isinstance(current, dict) or current.get("number") != pr_number or not isinstance(current.get("draft"), bool):
+            return "Draft implementation admission deferred: current GitHub draft evidence is unavailable"
+        if current.get("state") != "open":
+            return "Draft implementation admission deferred: PR is no longer open"
+        if current["draft"] is False:
+            return None
+        origin = _resolve_cloud_task_origin(repo_name, current, github_client, source_issue_numbers=(issue_owner_number,) if issue_owner_number is not None else ())
+        if origin.origin is not None:
+            return None
+        return f"No implementation backend for autonomous draft PR: no local PR repair backend is configured; {origin.reason}"
+    except Exception as exc:
+        return f"Draft implementation admission deferred: backend or provider evidence is unavailable ({type(exc).__name__}: {exc})"
+
+
 def _local_pr_repair_operation_identity(
     store: LocalJobStore,
     repo_name: str,
@@ -10201,6 +10225,8 @@ def _resolve_cloud_task_origin(
     repo_name: str,
     pr_data: Dict[str, Any],
     github_client: Optional[Any] = None,
+    *,
+    source_issue_numbers: Optional[Sequence[int]] = None,
 ) -> CloudTaskOriginResolution:
     """Resolve exactly one durable provider/session association for a PR."""
     pr_number = int(pr_data["number"])
@@ -10266,7 +10292,10 @@ def _resolve_cloud_task_origin(
     if direct_binding:
         bindings.append(direct_binding)
     else:
-        for issue_number in _resolve_pr_issue_numbers(repo_name, pr_data, github_client):
+        # Intake supplies only lifecycle-validated Issue ownership. Review
+        # context's broader prose references cannot authorize a new draft slot.
+        issue_numbers = source_issue_numbers if source_issue_numbers is not None else _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
+        for issue_number in issue_numbers:
             binding = manager.get_binding(issue_number)
             if binding:
                 bindings.append(binding)

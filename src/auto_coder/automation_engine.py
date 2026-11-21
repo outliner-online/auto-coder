@@ -7755,6 +7755,18 @@ class AutomationEngine:
             result.error = str(exc)
             return result
 
+        if candidate.type == "pr" and candidate.data.get("draft") is True and not explicit_only and not continue_execution and owner not in slots.active_owners():
+            from .pr_processor import draft_pr_implementation_blocker
+
+            blocker = draft_pr_implementation_blocker(repo_name, item_number, self.github, owner.number if owner.kind == "issue" else None)
+            if blocker is not None:
+                result.outcome = PRProcessingOutcome.DEFERRED
+                result.target_outcome = ExplicitTargetOutcome.DEFERRED
+                result.target_reason = blocker
+                result.actions = [blocker]
+                _record_pr_stage_result(item_number, "pr.implementation-admission", f"pr#{item_number} implementation admission", Outcome.DEFERRED, {"owner": owner.key, "reason": blocker})
+                return result
+
         implementation_pr = item_number if candidate.type == "pr" and owner.kind != "pr" else None
         labels = candidate.data.get("labels", [])
         urgent_issue = candidate.type == "issue" and isinstance(labels, list) and any(label == "urgent" or (isinstance(label, dict) and label.get("name") == "urgent") for label in labels)
