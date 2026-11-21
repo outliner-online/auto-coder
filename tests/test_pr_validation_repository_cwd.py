@@ -86,9 +86,17 @@ def _snapshot(repo):
     )
 
 
-@pytest.mark.parametrize("start", ["non-git", "unrelated-git", "bound-context"])
+@pytest.mark.parametrize("start", ["non-git", "unrelated-git", "bound-context", "linked-shared-origin", "linked-worktree-origin"])
 def test_real_pr_validation_uses_selected_repository_and_ci_head(scenario, monkeypatch, start):
     repo, head, newer, ambient, outside, client, data, config, seen, merge, publication = scenario
+    if start.startswith("linked-"):
+        linked = repo.parent / "linked-source"
+        _git(repo, "worktree", "add", "--detach", str(linked), newer)
+        if start == "linked-worktree-origin":
+            _git(repo, "config", "--local", "extensions.worktreeConfig", "true")
+            _git(repo, "config", "--local", "--unset-all", "remote.origin.url")
+            _git(linked, "config", "--worktree", "remote.origin.url", "https://github.com/owner/repo.git")
+        monkeypatch.setenv("AUTO_CODER_WORKSPACE_ROOT", str(linked))
     monkeypatch.chdir(ambient if start == "unrelated-git" else outside)
     if start == "bound-context":
         monkeypatch.delenv("AUTO_CODER_WORKSPACE_ROOT")
@@ -108,7 +116,36 @@ def test_real_pr_validation_uses_selected_repository_and_ci_head(scenario, monke
     merge.assert_called_once()
 
 
-@pytest.mark.parametrize("invalid", ["wrong-repository", "non-git", "relative", "missing"])
+@pytest.mark.parametrize("configuration", ["global-only", "include-only", "effective-conflict"])
+def test_pr_review_requires_checkout_owned_origin(scenario, monkeypatch, configuration):
+    """Ordinary inherited Git configuration cannot identify the selected repository."""
+    repo, head, newer, ambient, outside, client, data, config, seen, merge, publication = scenario
+    inherited = repo.parent / "inherited.gitconfig"
+    url = "https://github.com/other/repo.git" if configuration == "effective-conflict" else "https://github.com/owner/repo.git"
+    inherited.write_text(f'[remote "origin"]\n    url = {url}\n')
+    if configuration != "effective-conflict":
+        _git(repo, "config", "--local", "--unset-all", "remote.origin.url")
+    if configuration == "include-only":
+        _git(repo, "config", "--local", "include.path", str(inherited))
+    else:
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(inherited))
+    # The historical effective-only check sees a matching origin in both
+    # inherited-only cases, without needing a network or credential boundary.
+    effective = _git(repo, "config", "--includes", "--get-all", "remote.origin.url").splitlines()
+    assert effective == (["https://github.com/other/repo.git", "https://github.com/owner/repo.git"] if configuration == "effective-conflict" else ["https://github.com/owner/repo.git"])
+    monkeypatch.chdir(outside)
+    before = _snapshot(repo), _snapshot(ambient)
+    actions = pr_processor._handle_pr_merge(client, REPO_NAME, data, config, {})
+    assert seen == [], actions
+    merge.assert_not_called()
+    publication.assert_called_once()
+    diagnostic = publication.call_args.args[3]
+    assert diagnostic.result == "ERROR"
+    assert diagnostic.diagnostic_category == "validation_execution_error"
+    assert before == (_snapshot(repo), _snapshot(ambient))
+
+
+@pytest.mark.parametrize("invalid", ["wrong-repository", "non-git", "relative", "missing", "config-override"])
 def test_invalid_selected_repository_never_falls_back_or_merges(scenario, monkeypatch, invalid):
     repo, head, newer, ambient, outside, client, data, config, seen, merge, publication = scenario
     _git(ambient, "remote", "add", "origin", "https://github.com/other/repo.git")
@@ -116,8 +153,10 @@ def test_invalid_selected_repository_never_falls_back_or_merges(scenario, monkey
     # than an accidental missing object or unreachable network, must reject it.
     _git(ambient, "config", f"url.{repo.parent / 'remote.git'}.insteadOf", "https://github.com/other/repo.git")
     monkeypatch.chdir(repo)
-    selected = {"wrong-repository": str(ambient), "non-git": str(outside), "relative": ".", "missing": str(outside / "missing")}[invalid]
+    selected = {"wrong-repository": str(ambient), "non-git": str(outside), "relative": ".", "missing": str(outside / "missing"), "config-override": str(repo)}[invalid]
     monkeypatch.setenv("AUTO_CODER_WORKSPACE_ROOT", selected)
+    if invalid == "config-override":
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
     before = _snapshot(repo), _snapshot(ambient)
     actions = pr_processor._handle_pr_merge(client, REPO_NAME, data, config, {})
     assert seen == [], actions

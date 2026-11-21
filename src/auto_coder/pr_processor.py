@@ -5393,14 +5393,30 @@ def _pr_validation_repository_cwd(repo_name: str) -> str:
         raise RuntimeError("AUTO_CODER_WORKSPACE_ROOT must name an absolute repository checkout")
     if any(name in os.environ for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")):
         raise RuntimeError("Git directory overrides make the PR validation repository ambiguous")
+    if any(name in os.environ for name in ("GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")) or any(name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for name in os.environ):
+        raise RuntimeError("Git configuration overrides make the PR validation repository ambiguous")
     root = cmd.run_command(["git", "rev-parse", "--show-toplevel"], cwd=selected)
     if not root.success or not root.stdout.strip():
         raise RuntimeError("Cannot identify the target repository checkout for PR validation")
     repository_cwd = str(Path(root.stdout.strip()).resolve())
-    origin = cmd.run_command(["git", "config", "--get-all", "remote.origin.url"], cwd=repository_cwd)
-    remote = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/\s]+/[^/\s]+?)(?:\.git)?/?", origin.stdout.strip()) if origin.success else None
+
+    # A matching inherited origin is not evidence owned by this checkout.
+    # Linked worktrees share local config and can additionally own worktree config.
+    def owned_config(*arguments: str) -> str:
+        result = cmd.run_command(["git", "config", *arguments], cwd=repository_cwd)
+        if not result.success and result.returncode != 1:
+            raise RuntimeError("Cannot read checkout-owned PR validation Git configuration")
+        return result.stdout.strip() if result.success else ""
+
+    origins = owned_config("--local", "--no-includes", "--get-all", "remote.origin.url").splitlines()
+    if owned_config("--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig") == "true":
+        origins.extend(owned_config("--worktree", "--no-includes", "--get-all", "remote.origin.url").splitlines())
+    remote = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/\s]+/[^/\s]+?)(?:\.git)?/?", origins[0]) if len(origins) == 1 else None
     if remote is None or remote.group(1).casefold() != repo_name.casefold():
         raise RuntimeError("PR validation checkout origin does not uniquely match the target repository")
+    effective_origin = cmd.run_command(["git", "config", "--includes", "--get-all", "remote.origin.url"], cwd=repository_cwd)
+    if not effective_origin.success or effective_origin.stdout.strip().splitlines() != origins:
+        raise RuntimeError("Effective Git origin conflicts with the checkout-owned PR validation origin")
     return repository_cwd
 
 
