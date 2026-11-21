@@ -82,6 +82,7 @@ from .implementation_reclamation_scheduler import (
 )
 from .implementation_skip_diagnostic import duplicate_suppression_guidance, explain_already_owned
 from .implementation_slots import (
+    ImplementationAdmissionRefused,
     ImplementationHierarchyConflict,
     ImplementationHierarchyUnavailable,
     ImplementationOwner,
@@ -7755,17 +7756,14 @@ class AutomationEngine:
             result.error = str(exc)
             return result
 
-        if candidate.type == "pr" and candidate.data.get("draft") is True and not explicit_only and not continue_execution and owner not in slots.active_owners():
+        def check_fresh_pr_admission() -> Optional[str]:
             from .pr_processor import draft_pr_implementation_blocker
 
-            blocker = draft_pr_implementation_blocker(repo_name, item_number, self.github, owner.number if owner.kind == "issue" else None)
-            if blocker is not None:
-                result.outcome = PRProcessingOutcome.DEFERRED
-                result.target_outcome = ExplicitTargetOutcome.DEFERRED
-                result.target_reason = blocker
-                result.actions = [blocker]
-                _record_pr_stage_result(item_number, "pr.implementation-admission", f"pr#{item_number} implementation admission", Outcome.DEFERRED, {"owner": owner.key, "reason": blocker})
-                return result
+            head = candidate.data.get("head") or {}
+            expected_head = (str(head.get("ref") or ""), str(head.get("sha") or ""))
+            return draft_pr_implementation_blocker(repo_name, item_number, self.github, owner.number if owner.kind == "issue" else None, expected_head=expected_head)
+
+        fresh_pr_admission = {"fresh_admission_check": check_fresh_pr_admission} if candidate.type == "pr" and candidate.data.get("draft") is True and not explicit_only else {}
 
         implementation_pr = item_number if candidate.type == "pr" and owner.kind != "pr" else None
         labels = candidate.data.get("labels", [])
@@ -8087,6 +8085,7 @@ class AutomationEngine:
                                 owner,
                                 implementation_key,
                                 implementation_pr=implementation_pr,
+                                **fresh_pr_admission,
                                 bypass_capacity=explicit_only,
                                 bypass_active_execution=explicit_only and force and candidate.type == "pr",
                                 allow_urgent_emergency=urgent_issue,
@@ -8114,9 +8113,17 @@ class AutomationEngine:
                         owner,
                         implementation_key,
                         implementation_pr=implementation_pr,
+                        **fresh_pr_admission,
                         allow_urgent_emergency=urgent_issue,
                         github_client=self.github if owner.kind == "issue" and isinstance(self.github, GitHubClient) else None,
                     )
+            except ImplementationAdmissionRefused as exc:
+                result.outcome = PRProcessingOutcome.DEFERRED
+                result.target_outcome = ExplicitTargetOutcome.DEFERRED
+                result.target_reason = str(exc)
+                result.actions = [str(exc)]
+                _record_pr_stage_result(item_number, "pr.implementation-admission", f"pr#{item_number} implementation admission", Outcome.DEFERRED, {"owner": owner.key, "reason": str(exc)})
+                return result
             except ImplementationHierarchyConflict as exc:
                 result.target_outcome = ExplicitTargetOutcome.DEFERRED
                 result.actions = [f"Deferred - direct parent/child implementation conflict ({exc})"]

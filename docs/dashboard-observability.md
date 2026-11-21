@@ -3786,3 +3786,17 @@ admission, next eligible Issue admission with duplicate suppression, historical
 membership retention and existing branch/native/provider/active-work cases.
 The directive parser changes only evidence feeding existing ownership decisions;
 no trace schema, origin, or renderer changes are needed.
+
+
+The fresh-draft policy is evaluated atomically with owner absence and creation
+under the slot-store lock, including admission retried after reconciliation.
+A retirement racing an earlier owner snapshot still yields the existing
+`pr.implementation-admission` deferred event and creates no fresh slot or
+execution. A current head-reference/SHA mismatch also defers. The event schema,
+owner/reason fields and renderer remain unchanged. The barrier regression
+`tests/test_lifecycle_admission_regression.py::test_reconciliation_after_active_sample_cannot_recreate_unsupported_draft`
+and capacity-retry case exercise actual reconciliation and admission; the
+retained-execution case verifies that this refusal does not erase active work.
+The Markdown-region extraction shares existing structural filtering without
+changing role-assessment decisions; run `tests/test_role_structural_assessment.py`
+alongside the lifecycle admission regressions.

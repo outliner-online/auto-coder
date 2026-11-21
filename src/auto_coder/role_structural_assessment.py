@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterator, List, Optional, Tuple, cast
+from typing import List, Optional, Tuple, cast
 
+from .markdown_regions import authored_markdown_lines
 from .requirement_contract import NormativeIssueManifest
 
 ROLE_STRUCTURAL_ASSESSMENT_VERSION = "v1"
@@ -24,9 +25,6 @@ REASON_PARENT_REQUIREMENTS_FORBIDDEN = "parent_requirements_forbidden"
 REASON_PARENT_OBJECTIVE_REQUIRED = "parent_objective_required"
 REASON_CHILD_REQUIREMENTS_INVALID = "child_requirements_invalid"
 
-_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-_BLOCKQUOTE = re.compile(r"^ {0,3}>")
-_INDENTED_CODE = re.compile(r"^ {4,}\S")
 _HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 _DECLARATION_PREFIX = re.compile(r"^(?:(?:[-*+][ \t]+(?:\[[ xX]\][ \t]+)?)|(?:\d+[.)][ \t]+))?")
 _DECLARATION = re.compile(r"^(?:`(REQ-\d{3})(?::)?`(?::)?|(REQ-\d{3}):)[ \t]*(.*)$")
@@ -68,48 +66,9 @@ def _error(message: str) -> RoleStructuralAssessment:
     return RoleStructuralAssessment(status="ERROR", error=message)
 
 
-def _authored_lines(body: str) -> Iterator[Tuple[int, str]]:
-    """Yield (1-based line number, raw line) pairs outside excluded regions.
-
-    Fenced code blocks, indented code blocks, blockquote lines, and HTML
-    comments are non-authored examples: they are skipped entirely rather than
-    being inspected for headings or declarations, and text after they end is
-    inspected normally again.
-    """
-    lines = body.replace("\r\n", "\n").split("\n")
-    fence_char: Optional[str] = None
-    fence_len = 0
-    in_comment = False
-    for index, line in enumerate(lines, start=1):
-        if in_comment:
-            if "-->" in line:
-                in_comment = False
-            continue
-        comment_start = line.find("<!--")
-        if comment_start != -1:
-            if "-->" not in line[comment_start:]:
-                in_comment = True
-            continue
-        fence_match = _FENCE_OPEN.match(line)
-        if fence_match:
-            marker = fence_match.group(1)
-            if fence_char is None:
-                fence_char, fence_len = marker[0], len(marker)
-            elif marker[0] == fence_char and len(marker) >= fence_len:
-                fence_char = None
-            continue
-        if fence_char is not None:
-            continue
-        if _BLOCKQUOTE.match(line):
-            continue
-        if _INDENTED_CODE.match(line):
-            continue
-        yield index, line
-
-
 def _find_requirements_defect(body: str) -> Optional[StructuralDefect]:
     locations: List[StructuralLocation] = []
-    for index, line in _authored_lines(body):
+    for index, line in authored_markdown_lines(body):
         heading_match = _HEADING.match(line)
         if heading_match:
             if heading_match.group(2).strip().casefold() == "requirements":
@@ -143,7 +102,7 @@ def _find_objective_defect(body: str) -> Optional[StructuralDefect]:
         sections.append((current_start, current_heading_text, "\n".join(current).strip()))
         current, current_level, current_start = None, None, None
 
-    for index, line in _authored_lines(body):
+    for index, line in authored_markdown_lines(body):
         heading_match = _HEADING.match(line)
         if heading_match:
             level = len(heading_match.group(1))

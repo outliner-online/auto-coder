@@ -6,7 +6,12 @@ closing verb forms remain supported, including past-tense forms, optional
 colon and same-repository qualifiers. `This PR fixes #123` and successive
 `Fixes #123, closes #456` clauses remain directives. Narrative such as
 `Grid: existing closed #5459/REQ-007–008 ... No Issue Requirements or ownership
-were rewritten` supplies context, not implementation ownership. Broad review
+were rewritten` supplies context, not implementation ownership. Requirement
+citations such as `Closed #5459/REQ-007–008` are not plain Issue directives.
+Quoted Markdown, fenced/indented code, inline code and HTML comments are
+excluded from directive extraction; excluded regions cannot bridge a closing
+keyword to an Issue token elsewhere. Genuine directives following those
+regions remain eligible, including every supported closing verb. Broad review
 context extraction is unchanged. Issue-bearing branches, native connections,
 and recorded provider or PR memberships retain their existing authority.
 
@@ -16,9 +21,14 @@ association and then use that association to block terminal reconciliation.
 Closed Issues can still retain legitimately live implementation siblings;
 current Issue state alone is not a reason to discard PR ownership.
 
-Before a fresh autonomous draft reservation, the controller checks whether a
-local repair backend is configured. With none configured it reads current
-strict GitHub PR metadata and the existing cloud-origin resolver, constrained
+At the serialized creation of a fresh autonomous draft reservation, the
+controller checks whether a local repair backend is configured. The store
+checks owner absence and applies this policy under the same lock used by
+reconciliation, including a second admission after capacity reconciliation.
+An earlier active-owner snapshot cannot waive fresh admission after retirement.
+Retained live execution remains protected by the normal duplicate guard. With none configured it reads current
+strict GitHub PR metadata matching the observed head reference and SHA, and
+the existing cloud-origin resolver, constrained
 to lifecycle-validated Issue ownership and independently recorded sessions
 matched by explicit PR session markers, rather than broad review-context prose.
 Missing-slot Jules/Claude session recovery remains eligible; conflicting

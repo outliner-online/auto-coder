@@ -14,7 +14,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterator, NoReturn, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, NoReturn, Optional, cast
 
 from .cloud_manager import claude_session_alias
 from .issue_context import extract_lifecycle_branch_issue_number, extract_lifecycle_directive_issue_references
@@ -43,6 +43,10 @@ class ImplementationOwner:
 
 class ImplementationSlotUnavailable(RuntimeError):
     """Raised when an independent implementation cannot reserve a slot."""
+
+
+class ImplementationAdmissionRefused(ImplementationSlotUnavailable):
+    """A fresh reservation was refused before ownership or execution existed."""
 
 
 class ImplementationSlotLockTimeout(ImplementationSlotUnavailable):
@@ -652,8 +656,13 @@ class ImplementationSlotRepository:
         generation: Optional[str] = None,
         retry_request_id: Optional[str] = None,
         implementation_attempt_id: Optional[str] = None,
+        fresh_admission_check: Optional[Callable[[], Optional[str]]] = None,
     ) -> Optional[str]:
         """Atomically admit and durably identify one mutating execution.
+
+        ``fresh_admission_check`` runs only for an absent owner, under the
+        same store lock that serializes reconciliation and owner creation. A
+        refusal raises before creating ownership or attaching a PR/execution.
 
         Capacity and duplicate-execution admission are deliberately independent:
         explicit ``--only`` work may bypass the former, while only the additional
@@ -712,6 +721,13 @@ class ImplementationSlotRepository:
                     if not allow_urgent_emergency or emergency_in_use:
                         return None
                     use_emergency = True
+                # Reconciliation uses this same store lock. The owner-absence
+                # predicate and its fresh-admission policy must be atomic with
+                # creating the owner, including a retry after reconciliation.
+                if fresh_admission_check is not None:
+                    refusal = fresh_admission_check()
+                    if refusal is not None:
+                        raise ImplementationAdmissionRefused(refusal)
                 record = {
                     "kind": owner.kind,
                     "number": owner.number,

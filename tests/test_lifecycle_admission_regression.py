@@ -57,14 +57,12 @@ def test_unowned_draft_without_backend_defers_before_reservation(tmp_path, monke
         patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""),
         patch.object(engine, "refresh_review_adjudications"),
         patch("auto_coder.automation_engine.process_pull_request") as process,
-        patch.object(slots, "start_execution", wraps=slots.start_execution) as start,
     ):
         process.return_value = ProcessedPRResult(pr, outcome=PRProcessingOutcome.DEFERRED, target_reason="No local PR repair backend is configured")
         for _ in range(2):
             result = engine._process_single_candidate_unified("owner/repo", Candidate(type="pr", data=pr, priority=0), config)
             assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
             assert "backend" in result.target_reason.lower()
-        start.assert_not_called()
         process.assert_not_called()
     from auto_coder.execution_trace import get_trace_collector
 
@@ -214,3 +212,184 @@ def test_conflicting_recorded_provider_sessions_do_not_admit_draft(shared_sessio
         blocker = draft_pr_implementation_blocker("owner/repo", 5940, github)
     assert "multiple conflicting" in blocker
     factory.assert_not_called()
+
+
+NON_DIRECTIVES = [
+    "- Closed #5459/REQ-007–008 (prior Grid requirement)",
+    "- Closed owner/repo#5459/REQ-007–008 (prior Grid requirement)",
+    "> Example: Closes #5459",
+    "```markdown\nCloses #5459\n```",
+    "~~~~\nCloses #5459\n~~~~",
+    "    Closes #5459",
+    "Example: `Closes #5459`",
+    "Example: ``Closes #5459``",
+]
+
+
+@pytest.mark.parametrize("body", NON_DIRECTIVES)
+def test_documentary_directives_never_enter_intake_or_startup(tmp_path, body):
+    from tests.test_implementation_slots import GitHubState
+
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    owner = ImplementationOwner("issue", 5459)
+    assert slots.reserve(owner, implementation_pr=5488)
+    pr = {"number": 5940, "body": body, "head": {"ref": "grid-cleanup"}}
+    github = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}, 5940: {"state": "open"}}, open_prs=[pr])
+    assert extract_lifecycle_directive_issue_references(body) == []
+    assert slots.resolve_owner("pr", pr, github) == ImplementationOwner("pr", 5940)
+    slots.reconcile(github, discover_open_prs=True)
+    assert slots.active_owners() == ()
+
+
+@pytest.mark.parametrize("verb", ["close", "closes", "closed", "closing", "fix", "fixes", "fixed", "resolve", "resolves", "resolved", "resolving"])
+def test_plain_directives_survive_documentary_regions_in_intake_and_startup(tmp_path, verb):
+    from tests.test_implementation_slots import GitHubState
+
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    owner = ImplementationOwner("issue", 5459)
+    assert slots.reserve(owner, implementation_pr=5488)
+    body = f"> Closes #9999\n\n```\nCloses #9999\n```\n\n- {verb}: owner/repo#5459\n"
+    pr = {"number": 5940, "body": body, "head": {"ref": "grid-cleanup"}}
+    github = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}, 5940: {"state": "open"}}, open_prs=[pr])
+    assert extract_lifecycle_directive_issue_references(body) == [("owner/repo", 5459)]
+    assert slots.resolve_owner("pr", pr, github) == owner
+    slots.reconcile(github, discover_open_prs=True)
+    assert slots.snapshot().owners[0].implementation_prs == (5488, 5940)
+
+
+def test_reconciliation_after_active_sample_cannot_recreate_unsupported_draft(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tests.test_implementation_slots import GitHubState
+    from tests.test_issue_discovery_admission import _issue
+
+    config = AutomationConfig()
+    old = ImplementationOwner("issue", 5459)
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    assert slots.reserve(old, implementation_pr=5488)
+    state = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}, 5940: {"state": "open", "draft": True}})
+    github = MagicMock()
+    for name in ("get_issue", "get_issue_details", "get_pull_request", "get_pr_details", "get_connected_prs"):
+        getattr(github, name).side_effect = getattr(state, name)
+    pr = {"number": 5940, "title": "New draft", "body": "", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "labels": []}
+    github.get_pull_request_metadata_strict.return_value = pr
+    engine = AutomationEngine(github, config=config)
+    engine.implementation_slots = slots
+    sampled = threading.Event()
+    reconciled = threading.Event()
+    real_active_owners = slots.active_owners
+    armed = True
+
+    def active_owners_barrier():
+        nonlocal armed
+        owners = real_active_owners()
+        if armed and old in owners:
+            armed = False
+            sampled.set()
+            assert reconciled.wait(5)
+        return owners
+
+    monkeypatch.setattr(slots, "active_owners", active_owners_barrier)
+    with (
+        patch.object(engine, "refresh_review_adjudications"),
+        patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""),
+        patch.object(engine, "_process_single_candidate_reserved", return_value=CandidateProcessingResult(type="pr", number=5940, success=False, target_outcome=ExplicitTargetOutcome.DEFERRED)) as process,
+    ):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(engine._process_single_candidate_unified, "owner/repo", Candidate(type="pr", data=pr, priority=0), config)
+            try:
+                assert sampled.wait(5)
+                slots.reconcile(github)
+                assert real_active_owners() == ()
+            finally:
+                reconciled.set()
+            result = future.result(timeout=5)
+        assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
+        assert real_active_owners() == ()
+        process.assert_not_called()
+    assert real_active_owners() == ()
+    issue = {**_issue(5949), "labels": [{"name": "implementation-ready"}]}
+    github.get_issue_dispatch_snapshot_strict.return_value = issue
+    with patch.object(engine, "_process_single_candidate_reserved", return_value=CandidateProcessingResult(type="issue", number=5949, success=True)) as dispatch:
+        admitted = engine._process_single_candidate_unified("owner/repo", Candidate(type="issue", data=issue, priority=0), config)
+        engine._process_single_candidate_unified("owner/repo", Candidate(type="issue", data=issue, priority=0), config)
+    assert admitted.success is True
+    dispatch.assert_called_once()
+
+
+@pytest.mark.parametrize("head", [{"ref": "grid-cleanup", "sha": "b" * 40}, {"ref": "different-branch", "sha": "a" * 40}])
+def test_fresh_draft_preflight_requires_exact_observed_head(head):
+    from auto_coder.pr_processor import draft_pr_implementation_blocker
+
+    github = MagicMock()
+    github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": False, "head": head}
+    with patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""):
+        blocker = draft_pr_implementation_blocker("owner/repo", 5940, github, expected_head=("grid-cleanup", "a" * 40))
+    assert "head changed" in blocker
+
+
+def test_capacity_retry_rechecks_fresh_draft_admission(tmp_path):
+    from tests.test_implementation_slots import GitHubState
+
+    config = AutomationConfig()
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    assert slots.reserve(ImplementationOwner("issue", 5459), implementation_pr=5488)
+    state = GitHubState(issues={5459: {"number": 5459, "state": "closed"}, 6000: {"number": 6000, "state": "open"}}, prs={5488: {"state": "closed", "merged": True}})
+    github = MagicMock()
+    for name in ("get_issue", "get_pull_request", "get_pr_details", "get_connected_prs"):
+        getattr(github, name).side_effect = getattr(state, name)
+    reconciled = False
+
+    def issue_details(issue):
+        nonlocal reconciled
+        reconciled = True
+        return issue
+
+    github.get_issue_details.side_effect = issue_details
+    pr = {"number": 5940, "title": "Draft", "body": "", "state": "open", "draft": True, "head": {"ref": "issue-6000-grid", "sha": "a" * 40}, "labels": []}
+    github.get_pull_request_metadata_strict.side_effect = lambda *_: {**pr, "draft": reconciled}
+    engine = AutomationEngine(github, config=config)
+    engine.implementation_slots = slots
+    with (
+        patch.object(engine, "refresh_review_adjudications"),
+        patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""),
+        patch.object(engine, "_process_single_candidate_reserved", return_value=CandidateProcessingResult(type="pr", number=5940, success=False, target_outcome=ExplicitTargetOutcome.DEFERRED)) as dispatch,
+    ):
+        result = engine._process_single_candidate_unified("owner/repo", Candidate(type="pr", data=pr, priority=0), config)
+    assert reconciled is True
+    assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
+    assert slots.active_owners() == ()
+    dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize("body", ["Fixes:\n```\nexample\n```\n#5459", "Fixes:\n> example\n#5459", "Fixes `#5459`"])
+def test_directive_cannot_bridge_documentary_region(body):
+    assert extract_lifecycle_directive_issue_references(body) == []
+
+
+def test_trailing_comment_does_not_hide_genuine_directive():
+    assert extract_lifecycle_directive_issue_references("Closes #5459 <!-- controller note -->") == [(None, 5459)]
+
+
+def test_retained_active_execution_survives_draft_admission_guard(tmp_path):
+    from tests.test_implementation_slots import GitHubState
+
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    owner = ImplementationOwner("issue", 5459)
+    execution = slots.start_execution(owner, implementation_pr=5488)
+    state = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}})
+    github = MagicMock()
+    for name in ("get_issue", "get_issue_details", "get_pull_request", "get_pr_details", "get_connected_prs"):
+        getattr(github, name).side_effect = getattr(state, name)
+    config = AutomationConfig()
+    engine = AutomationEngine(github, config=config)
+    engine.implementation_slots = slots
+    pr = {"number": 5940, "title": "Draft", "body": "", "draft": True, "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "labels": []}
+    with patch.object(engine, "refresh_review_adjudications"), patch("auto_coder.pr_processor.draft_pr_implementation_blocker") as policy, patch.object(engine, "_process_single_candidate_reserved") as dispatch:
+        result = engine._process_single_candidate_unified("owner/repo", Candidate(type="pr", data=pr, priority=0), config)
+    assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
+    assert slots.active_execution_ids(owner) == (execution,)
+    assert slots.snapshot().owners[0].implementation_prs == (5488,)
+    policy.assert_not_called()
+    dispatch.assert_not_called()

@@ -2137,7 +2137,7 @@ def _selected_local_backend_name(repo_name: Optional[str] = None) -> str:
     return candidates[0] if candidates else ""
 
 
-def draft_pr_implementation_blocker(repo_name: str, pr_number: int, github_client: Any, issue_owner_number: Optional[int] = None) -> Optional[str]:
+def draft_pr_implementation_blocker(repo_name: str, pr_number: int, github_client: Any, issue_owner_number: Optional[int] = None, *, expected_head: Optional[tuple[str, str]] = None) -> Optional[str]:
     """Refuse a fresh autonomous draft reservation with no executable route.
 
     Existing reservations and explicit manual processing are handled by the
@@ -2149,6 +2149,10 @@ def draft_pr_implementation_blocker(repo_name: str, pr_number: int, github_clien
         current = github_client.get_pull_request_metadata_strict(repo_name, pr_number)
         if not isinstance(current, dict) or current.get("number") != pr_number or not isinstance(current.get("draft"), bool):
             return "Draft implementation admission deferred: current GitHub draft evidence is unavailable"
+        if expected_head is not None:
+            head = current.get("head") or {}
+            if not all(expected_head) or (head.get("ref"), head.get("sha")) != expected_head:
+                return "Draft implementation admission deferred: PR head changed or its version evidence is unavailable"
         if current.get("state") != "open":
             return "Draft implementation admission deferred: PR is no longer open"
         if current["draft"] is False:
