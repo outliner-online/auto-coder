@@ -8,6 +8,9 @@ colon and same-repository qualifiers. `This PR fixes #123` and successive
 `Grid: existing closed #5459/REQ-007–008 ... No Issue Requirements or ownership
 were rewritten` supplies context, not implementation ownership. Requirement
 citations such as `Closed #5459/REQ-007–008` are not plain Issue directives.
+Issue numbers must be complete tokens: `Closes #5459example` and
+`Closes owner/repo#5459example` do not establish ownership. Whitespace,
+end of text and punctuation remain valid delimiters.
 CommonMark block and inline tokens exclude quoted Markdown, fenced/indented
 code and HTML from directive extraction. This includes tab indentation,
 list-contained fences and fence-like content with a non-whitespace suffix;

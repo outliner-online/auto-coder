@@ -226,6 +226,30 @@ NON_DIRECTIVES = [
 ]
 
 
+@pytest.mark.parametrize("qualified", [False, True])
+@pytest.mark.parametrize("path", ["intake", "startup"])
+@pytest.mark.parametrize("suffix,valid", [("example", False), ("_example", False), ("例", False), ("", True), (" ", True), ("\n", True), (".", True), (",", True), (";", True), (":", True), ("!", True), ("?", True), (")", True), ("]", True), ("–", True), ("-", True)])
+def test_lifecycle_issue_reference_requires_exact_token(tmp_path, qualified, path, suffix, valid):
+    from tests.test_implementation_slots import GitHubState
+
+    qualifier = "owner/repo" if qualified else ""
+    body = f"Closes {qualifier}#5459{suffix}"
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    owner = ImplementationOwner("issue", 5459)
+    assert slots.reserve(owner, implementation_pr=5488)
+    pr = {"number": 5940, "body": body, "head": {"ref": "grid-cleanup"}}
+    github = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}, 5940: {"state": "open"}}, open_prs=[pr])
+    if path == "intake":
+        assert slots.resolve_owner("pr", pr, github) == (owner if valid else ImplementationOwner("pr", 5940))
+    else:
+        slots.reconcile(github, discover_open_prs=True)
+        if valid:
+            assert slots.snapshot().owners[0].implementation_prs == (5488, 5940)
+        else:
+            assert slots.active_owners() == ()
+    assert extract_lifecycle_directive_issue_references(body) == ([(qualifier or None, 5459)] if valid else [])
+
+
 @pytest.mark.parametrize("body", NON_DIRECTIVES)
 def test_documentary_directives_never_enter_intake_or_startup(tmp_path, body):
     from tests.test_implementation_slots import GitHubState
