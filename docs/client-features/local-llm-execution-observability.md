@@ -7,12 +7,15 @@ explicit continuation calls, including implementation and read-only review.
 Cloud backend calls do not produce this local stage. Preparation or admission
 failures do not claim that a local call started.
 
-Muse individual Issue review additionally verifies its explicit repository-scoped
+Muse individual Issue and decomposition review additionally verify their explicit repository-scoped
 `issue_review.checkout` before private-workspace preparation. A local setup
-failure returns a retryable specification `ERROR` without a
+failure returns a retryable review `ERROR` without a
 `llm.local-execution` start, model verdict, or implementation handoff.
 `tests/test_issue_review_checkout.py` exercises this boundary through ordinary
-intake and the real scheduler; existing generic mounted-view tests continue to
+intake and the real scheduler. `tests/test_decomposition_review_checkout.py`
+exercises scheduled parent-set analysis and stops before provider launch;
+invalid checkout selections assert absence of a local dispatch event.
+Existing generic mounted-view tests continue to
 cover dispatched local calls. No event schema, projection, or provider routing
 changes are introduced.
 
