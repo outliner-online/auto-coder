@@ -3767,3 +3767,64 @@ tests/test_pr_worker_observation_status.py` exercises real SQLite/controller/wor
 processing, canonical CI reads and the existing skip-to-dashboard contract.
 The deterministic 0/1/1.5-second burst reduces two evaluations to one; it does not
 prove progress or authorize a merge in a live worker.
+
+## Fresh autonomous draft implementation refusal
+
+A draft with no configured local repair backend and no usable existing cloud
+origin is refused before a new durable implementation reservation. Production
+emits the existing `pr.implementation-admission` stage with `deferred`, resolved
+owner and reason, and returns the same deferred worker outcome. An uncertain
+strict GitHub/provider read also defers without inventing free/occupied state.
+The existing detail projection displays this reason; the read-only slot panel
+continues to display only actual durable owners. Retained reservations are
+never removed by this preflight or by reparsing current PR text.
+
+Run `bash scripts/test.sh tests/test_lifecycle_admission_regression.py
+ tests/test_issue_context.py tests/test_implementation_slots.py` for the exact
+production narrative, startup reconciliation/restart, backend refusal before
+admission, next eligible Issue admission with duplicate suppression, historical
+membership retention and existing branch/native/provider/active-work cases.
+The directive parser changes only evidence feeding existing ownership decisions;
+no trace schema, origin, or renderer changes are needed.
+
+
+The fresh-draft policy is evaluated atomically with owner absence and creation
+under the slot-store lock, including admission retried after reconciliation.
+A retirement racing an earlier owner snapshot still yields the existing
+`pr.implementation-admission` deferred event and creates no fresh slot or
+execution. A current head-reference/SHA mismatch also defers. The event schema,
+owner/reason fields and renderer remain unchanged. The barrier regression
+`tests/test_lifecycle_admission_regression.py::test_reconciliation_after_active_sample_cannot_recreate_unsupported_draft`
+and capacity-retry case exercise actual reconciliation and admission; the
+retained-execution case verifies that this refusal does not erase active work.
+The Markdown-region extraction shares existing structural filtering without
+changing role-assessment decisions; run `tests/test_role_structural_assessment.py`
+alongside the lifecycle admission regressions.
+
+
+### Draft repair origin continuity and lock scope
+
+Fresh draft preparation now performs strict PR/provider reads outside the
+shared slot-store lock. The atomic creation callback consumes only prepared
+evidence, then rechecks owner absence; it does not hold capacity coordination
+while waiting for GitHub. `test_strict_draft_preflight_does_not_hold_slot_store_lock`
+pauses the strict read and proves an independent real store writer can finish.
+The prior retirement-race, capacity-retry and retained-execution cases remain.
+
+The bound draft's lifecycle Issue, provider/task, attribution token and head
+constrain downstream origin resolution and final send validation. A changed
+or unavailable origin yields the existing deferred repair outcome, never an
+accepted handoff. The joined cases in
+`tests/test_lifecycle_admission_regression.py` drive actual review/conflict
+repair to captured transport, with related-Issue context unchanged, and cover
+wrong-task prevention and binding/head/read failures. These outcomes reuse the
+existing admission and `pr.repair-delegation` projection; no stage, schema or
+renderer additions are required. CommonMark documentary-region filtering is
+pure evidence extraction and emits no invented execution or completion.
+
+Preparation requests also unwind before existing hierarchy reads; the regression
+`test_draft_preparation_does_not_repeat_locked_hierarchy_reads` confirms zero
+hierarchy reads for the preparation request and the normal three after evidence
+is ready. The deployment registry's existing dispatch-authority guard remains
+in place, so the independent-writer proof is specifically about the slot-store
+mutex, not a claim that every admission guard is absent during preparation.

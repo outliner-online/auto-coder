@@ -212,3 +212,31 @@ def test_legacy_parent_with_requirements_and_bare_child_are_not_mutated_or_cross
 def test_non_manifest_or_non_string_body_is_an_assessment_error():
     assert assess_role_structure(None, "body", ROLE_TRACKING_PARENT).status == "ERROR"
     assert assess_role_structure(manifest(1, "T", "body"), None, ROLE_TRACKING_PARENT).status == "ERROR"
+
+
+@pytest.mark.parametrize("example", ["\tREQ-999: Documentary requirement.", "- ~~~\n  REQ-999: Documentary requirement.\n  ~~~", "~~~\n~~~ not a closing fence\nREQ-999: Documentary requirement.\n~~~"])
+def test_commonmark_documentary_regions_do_not_create_parent_requirements(example):
+    body = "## Objective\nCoordinate the implementation children.\n\n## Context\n\n" + example + "\n"
+    result = assess(1951, "Tracking parent", body, ROLE_TRACKING_PARENT)
+    assert result.status == "VALID"
+    assert result.defects == ()
+    changed = body + "\n## Requirements\nREQ-001: Real forbidden parent requirement.\n"
+    rejected = assess(1951, "Tracking parent", changed, ROLE_TRACKING_PARENT)
+    assert rejected.status == "BLOCKED"
+    assert REASON_PARENT_REQUIREMENTS_FORBIDDEN in [defect.reason for defect in rejected.defects]
+
+
+def test_raw_html_objective_prose_keeps_structural_review_policy():
+    body = "## Objective\n<div>\nCoordinate the implementation children.\n</div>\n"
+    assert assess(1951, "Tracking parent", body, ROLE_TRACKING_PARENT).status == "VALID"
+    body += "\n<div>\nREQ-001: Forbidden parent requirement.\n</div>\n"
+    result = assess(1951, "Tracking parent", body, ROLE_TRACKING_PARENT)
+    assert result.status == "BLOCKED"
+    assert any(defect.reason == REASON_PARENT_REQUIREMENTS_FORBIDDEN for defect in result.defects)
+
+
+def test_indented_paragraph_continuation_is_not_a_code_example_for_review():
+    body = "## Objective\nCoordinate the implementation children.\n\n## Context\nBackground.\n    REQ-001: Authored forbidden parent requirement.\n"
+    result = assess(1951, "Tracking parent", body, ROLE_TRACKING_PARENT)
+    assert result.status == "BLOCKED"
+    assert any(defect.reason == REASON_PARENT_REQUIREMENTS_FORBIDDEN for defect in result.defects)
