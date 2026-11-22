@@ -9,6 +9,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
+from .accepted_finding_bridge import SOURCE_ALIAS_TYPE, source_identity_for
+from .canonical_pr_blocker_ledger import BlockerDisposition, CanonicalPRBlockerLedger
 from .cloud_provider_instructions import CloudTaskOperation, prepare_cloud_task
 from .codex_cloud_client import _codex_followup_state_path, _followup_state_lock, _load_pending_followups
 from .codex_work_accounting import CodexWorkPhase
@@ -16,6 +18,8 @@ from .codex_work_fence import production_codex_fence
 from .implementation_slots import ImplementationOwner
 from .pr_no_commit_recovery import pr_correction_lock, review_repair_state_lock
 from .pr_repair import ExistingPrRepairTarget, build_existing_pr_repair_prompt
+from .pr_review_cycle import OPEN, PrReviewCycleRepository
+from .prompt_loader import render_prompt
 from .review_adjudication_orchestrator import UpholdEffect
 
 
@@ -40,6 +44,86 @@ def _write(path: Path, document: dict) -> None:
     os.replace(temporary, path)
 
 
+def _normalized(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _registered_obligation(target: ExistingPrRepairTarget, effect: UpholdEffect) -> dict | None:
+    """Select a single pre-existing normative obligation, never replacement prose."""
+    scoped = effect.scoped_followup
+    if scoped is None:
+        return None
+    requirements = [item for contract in effect.contracts if contract.issue_number == scoped.issue_number for item in contract.requirements if item.id == scoped.requirement_id]
+    if len(requirements) != 1 or not _normalized(requirements[0].text):
+        return None
+    ledger = CanonicalPRBlockerLedger().get_snapshot("https://api.github.com", target.repo_name, target.pr_number, require_retained_state=True)
+    blockers = ledger.get_blockers_for_alias("github_root_comment", str(effect.root_comment_id))
+    if len(blockers) != 1:
+        return None
+    blocker = blockers[0]
+    selected = (scoped.issue_number, scoped.requirement_id)
+    if blocker.disposition is not BlockerDisposition.OPEN or blocker.reconciliation_needs or len(blocker.qualified_requirements) != 1 or (blocker.qualified_requirements[0].issue_number, blocker.qualified_requirements[0].requirement_id) != selected:
+        return None
+    if any(alias.alias_type == "reconciliation_split_scope" for alias in blocker.aliases):
+        return None
+    source_aliases = {alias.alias_value for alias in blocker.aliases if alias.alias_type == SOURCE_ALIAS_TYPE}
+    if len(source_aliases) != 1:
+        return None
+    cycle = PrReviewCycleRepository(target.repo_name).snapshot(target.pr_number)
+    accepted = [(record, finding) for record in cycle.strong_rounds for finding in cycle.findings if finding.origin_round_id == record.claim_id and finding.finding_id in record.finding_ids and source_identity_for(record.round_id, finding.finding_id) in source_aliases]
+    if len(accepted) != 1:
+        return None
+    record, finding = accepted[0]
+    source_identity = source_identity_for(record.round_id, finding.finding_id)
+    owners = ledger.get_blockers_for_alias(SOURCE_ALIAS_TYPE, source_identity)
+    if len(owners) != 1 or owners[0].blocker_id != blocker.blocker_id or record.open_epoch != cycle.open_epoch or record.head_sha != target.head_sha or record.base_sha != effect.base_sha or finding.status != OPEN or finding.is_regression_gap:
+        return None
+    if finding.requirement_ids != (f"#{scoped.issue_number}/{scoped.requirement_id}",) or len(finding.requirement_texts) != 1 or finding.requirement_texts != (requirements[0].text,):
+        return None
+    if not all(_normalized(text) for text in (finding.actual_behavior, finding.expected_behavior, finding.counterexample, finding.affected_boundary)):
+        return None
+    return {
+        "issue_number": scoped.issue_number,
+        "requirement_id": scoped.requirement_id,
+        "requirement_text": requirements[0].text,
+        "round_id": record.round_id,
+        "source_identity": source_identity,
+        "blocker_id": blocker.blocker_id,
+        "contract_identity": record.contract_identity,
+        "base_sha": record.base_sha,
+        "boundary": finding.affected_boundary,
+        "actual_behavior": finding.actual_behavior,
+        "expected_behavior": finding.expected_behavior,
+        "counterexample": finding.counterexample,
+        "regression_scenario": finding.focused_regression_scenario,
+    }
+
+
+def _separate_obligation(old: dict, new: dict) -> bool:
+    """Require distinct declared obligations; normalization only rejects duplicates."""
+    required = set(new)
+    if set(old) != required or any(old[key] != new[key] for key in ("round_id", "contract_identity", "base_sha")):
+        return False
+    if (old["issue_number"], old["requirement_id"]) == (new["issue_number"], new["requirement_id"]) or old["source_identity"] == new["source_identity"] or old["blocker_id"] == new["blocker_id"]:
+        return False
+    return all(_normalized(old[key]) != _normalized(new[key]) for key in ("requirement_text", "actual_behavior", "expected_behavior"))
+
+
+def _settle_not_sent(path: Path, decision_id: str, snapshot: dict, identity: str) -> None:
+    """Release only this invocation's exact pre-wire reservation under the shared guard."""
+    with review_repair_state_lock(path):
+        document = _read(path)
+        record = document.get("scoped_review_followups", {}).get(decision_id)
+        if record is None or record.get("snapshot") != snapshot or record.get("state") != "reserved":
+            raise ValueError("exact pre-wire reservation no longer matches")
+        if identity in document.get("delivered_feedback", []):
+            raise ValueError("a confirmed claim cannot be released as not sent")
+        record["state"] = "not_sent"
+        record["reason"] = "source_refused_before_wire"
+        document["pending_feedback"] = sorted(set(document.get("pending_feedback", [])) - {identity})
+        _write(path, document)
+
+
 def deliver_scoped_followup(
     path: Path,
     target: ExistingPrRepairTarget,
@@ -59,7 +143,14 @@ def deliver_scoped_followup(
     identity = f"{target.repo_name}#{target.pr_number}:codex-cloud:{scoped.task_id}:scoped:{effect.decision_id}"
     comment_identity = f"{target.repo_name}#{target.pr_number}:codex-cloud:{scoped.task_id}:" + hashlib.sha256(f"comment:{effect.source_comment_id}".encode()).hexdigest()
     source_aliases = {identity, comment_identity, effect.decision_id}
-    prompt = build_existing_pr_repair_prompt(target, scoped.payload)
+    try:
+        obligation = _registered_obligation(target, effect)
+    except Exception:
+        return "held_registered_obligation"
+    if obligation is None:
+        return "held_registered_obligation"
+    details = render_prompt("codex_cloud.scoped_registered_correction", include_header=False, **obligation)
+    prompt = build_existing_pr_repair_prompt(target, details)
     prepared = prepare_cloud_task(prompt, recipient="codex-cloud", operation=CloudTaskOperation.CONTINUATION, no_edit=False).prepared_task
     snapshot = {
         "decision_id": effect.decision_id,
@@ -75,7 +166,7 @@ def deliver_scoped_followup(
         "payload": prompt,
         "native_fingerprint": hashlib.sha256(prepared.encode()).hexdigest(),
         "distinct_from": list(map(list, scoped.distinct_from)),
-        "distinction": scoped.distinction,
+        "obligation": obligation,
     }
     with pr_correction_lock(path, target.pr_number):
         if not current_source():
@@ -95,7 +186,11 @@ def deliver_scoped_followup(
             # Complete pre-send membership is required, not a new native key.
             delivered = set(document.get("delivered_feedback", []))
             pending = set(document.get("pending_feedback", [])) - delivered
-            relevant = {key: value for key, value in records.items() if value["snapshot"]["target"]["pr_number"] == target.pr_number and value["state"] != "accepted"}
+            relevant = {key: value for key, value in records.items() if value["snapshot"]["target"]["pr_number"] == target.pr_number and value["state"] not in {"accepted", "not_sent"}}
+            for record in records.values():
+                old_snapshot = record["snapshot"]
+                if old_snapshot["target"]["pr_number"] == target.pr_number and record["state"] != "not_sent" and not _separate_obligation(old_snapshot.get("obligation", {}), obligation):
+                    return "held_obligation_overlap"
             refs = dict(scoped.distinct_from)
             if set(refs) != set(relevant):
                 return "held_old_inventory"
@@ -153,9 +248,13 @@ def deliver_scoped_followup(
             records[effect.decision_id] = {"snapshot": snapshot, "state": "reserved"}
             document["pending_feedback"] = sorted(pending | {identity})
             _write(path, document)
-        if not current_source():
-            # A claimed source is not renewed even after a pre-send race.
-            return "held_source"
+        try:
+            ready = current_source() and _registered_obligation(target, effect) == obligation
+        except Exception:
+            ready = False
+        if not ready:
+            _settle_not_sent(path, effect.decision_id, snapshot, identity)
+            return "held_source_not_sent"
         outcome = send(prompt, identity)
         if outcome in {"accepted", "delivery_unknown"}:
             # Normalize the current operation's native evidence while it is

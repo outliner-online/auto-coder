@@ -57,24 +57,26 @@ class ScopedFollowup:
 
     task_id: str
     owner_incarnation: str
-    payload: str
+    issue_number: int
+    requirement_id: str
     distinct_from: tuple[tuple[str, str], ...]
-    distinction: str
 
 
 def _parse_scoped(value: object) -> ScopedFollowup:
-    if not isinstance(value, dict) or set(value) != {"task_id", "owner_incarnation", "payload", "distinct_from", "distinction"}:
+    if not isinstance(value, dict) or set(value) != {"task_id", "owner_incarnation", "issue_number", "requirement_id", "distinct_from"}:
         raise ValueError("scoped follow-up fields must exactly match v2")
-    if any(not isinstance(value[key], str) or not value[key].strip() for key in ("task_id", "owner_incarnation", "payload", "distinction")):
-        raise ValueError("scoped follow-up requires explicit owner, payload and distinction")
+    if any(not isinstance(value[key], str) or not value[key].strip() for key in ("task_id", "owner_incarnation", "requirement_id")):
+        raise ValueError("scoped follow-up requires explicit owner and requirement selection")
     if re.fullmatch(r"task_e_[A-Za-z0-9]+", value["task_id"]) is None:
         raise ValueError("scoped follow-up requires a native Codex task ID")
+    if type(value["issue_number"]) is not int or value["issue_number"] <= 0 or re.fullmatch(r"REQ-[0-9]{3,}", value["requirement_id"]) is None:
+        raise ValueError("scoped follow-up requires one qualified existing requirement")
     refs = value["distinct_from"]
     if not isinstance(refs, (list, tuple)) or any(not isinstance(ref, (list, tuple)) or len(ref) != 2 or not isinstance(ref[0], str) or not _UUID.fullmatch(ref[0]) or not isinstance(ref[1], str) or not _SHA256.fullmatch(ref[1]) for ref in refs):
         raise ValueError("distinct_from requires exact operation IDs and snapshot digests")
     if len({ref[0] for ref in refs}) != len(refs):
         raise ValueError("distinct_from operation IDs must be unique")
-    return ScopedFollowup(value["task_id"], value["owner_incarnation"], value["payload"], tuple((ref[0], ref[1]) for ref in refs), value["distinction"])
+    return ScopedFollowup(value["task_id"], value["owner_incarnation"], value["issue_number"], value["requirement_id"], tuple((ref[0], ref[1]) for ref in refs))
 
 
 @dataclass(frozen=True)

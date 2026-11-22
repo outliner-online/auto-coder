@@ -65,9 +65,9 @@
       "required": [
         "task_id",
         "owner_incarnation",
-        "payload",
-        "distinct_from",
-        "distinction"
+        "issue_number",
+        "requirement_id",
+        "distinct_from"
       ],
       "properties": {
         "task_id": {
@@ -76,14 +76,6 @@
           "pattern": "^task_e_[A-Za-z0-9]+$"
         },
         "owner_incarnation": {
-          "type": "string",
-          "minLength": 1
-        },
-        "payload": {
-          "type": "string",
-          "minLength": 1
-        },
-        "distinction": {
           "type": "string",
           "minLength": 1
         },
@@ -104,6 +96,14 @@
             "minItems": 2,
             "maxItems": 2
           }
+        },
+        "issue_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "requirement_id": {
+          "type": "string",
+          "pattern": "^REQ-[0-9]{3,}$"
         }
       }
     }

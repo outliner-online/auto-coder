@@ -512,3 +512,9 @@ stage with `SCOPED_FIX`. An accepted handoff confirms assignment only. Held or
 previously accepted claims do not imply another send; native duplicate guards
 remain distinct from positive remote rejection. The v1 operator form is unchanged.
 No automatic conversion of ordinary guidance or legacy uncertain work occurs.
+
+For scoped corrections, `held_source_not_sent` confirms a final pre-wire source
+refusal: the exact attempt's pending claim was released without changing older
+uncertainty. Unknown or crash-after-wire outcomes remain fenced. Instructions
+come from a selected pre-existing registered requirement and finding; free-form
+replacement instructions and digest-only distinctions are not accepted.

@@ -3901,3 +3901,15 @@ actual owner, attribution, native journal, accounting and source persistence are
 used. It asserts old evidence preservation and one new emission across repeated
 reconstruction. The baseline adjudication regressions cover the existing stage
 contract. The scoped fixture also checks the emitted stage outcome/status mapping.
+
+Scoped adjudication pre-wire source refusal now emits `held_source_not_sent`
+through the existing deferred status mapping. Its private exact claim is settled
+as `not_sent`, with its pending identity removed under the shared document lock;
+older and peer claims are preserved. Unknown/crash-after-wire outcomes remain
+reserved. `held_registered_obligation` and `held_obligation_overlap` distinguish
+unsupported or duplicate requirement selections. No free-form replacement payload
+or distinction field is accepted. The registered requirement/finding determines
+the instruction; the same existing facts and public renderer are retained.
+The real-entry scoped regression checks refusal after reservation, no wire call,
+a subsequent authorized source, and restart fences alongside duplicate,
+whitespace-only and unrelated obligation controls.
