@@ -19,6 +19,46 @@ evaluation already decided; a policy refusal is `SKIPPED` with a specific
 reason, while unavailable/incomplete evidence is retryable `DEFERRED`, and
 neither outcome disturbs an already-retained implementation owner.
 
+PRs authored by GitHub's actual `dependabot[bot]` account pass those same
+admission gates but do not reserve, borrow, settle, or reclaim ordinary feature
+implementation slots. The exemption is exact-author based; Renovate, other bot
+accounts, branch names and dependency-themed titles retain ordinary accounting.
+The common path refreshes the authoritative PR identity and repeats dependency
+policy under the existing nonblocking cross-process PR mutation lock. It holds
+that lock through ordinary PR processing, including explicit `--only --force`
+entry. A busy lock or retained implementation/provider/local-repair ownership
+defers processing rather than overlapping another worker. Existing scheduler
+concurrency, graceful drain, exact-head CI, independent approval and merge
+operation receipts remain controlling. The exemption does not migrate or release
+old feature owners.
+
+Temporary slotless admission holds (a busy PR/logical-owner lock, retained local
+execution/repair, or unavailable authoritative metadata/readiness) carry a
+60-second retry deadline into the existing durable PR invalidation scheduler.
+The first event remains unfinished even when no CI watch has been installed;
+the deadline survives restart, respects existing longer bounds, and resumes
+through fresh ordinary admission without another webhook or a free feature
+slot. Confirmed policy refusal and changed author/identity do not create timed
+retry loops.
+
+Stored provider-session membership is ownership evidence, not a liveness signal.
+Membership alone remains an observable deferral with no timed retry or deletion.
+The existing `finish_provider_session` caller settles stopped Jules work for an
+Issue owner; it does not independently settle standalone PR-owned membership.
+Generic PR reconciliation retains an open PR and only retires its owner after
+authoritative terminal evidence. Consequently, old PR provider membership can
+continue blocking admission pending independently authorized lifecycle settlement
+and a later reevaluation. This change neither polls providers nor guesses that
+stored sessions are stale.
+
+This does not enable breaking-dependency repairs. Current dependency-bot policy
+skips CI fixes and conflict resolution even when both dependency configuration
+flags are false. Enabling compatibility implementation requires a separate policy
+change with durable repair authority; a red check alone does not establish that
+the dependency update introduced the failure. Slotless admission is covered through
+the real engine, CI aggregation and merge-operation path with controlled GitHub
+wire responses in `tests/test_dependabot_slotless_admission.py`.
+
 Codex Cloud pull requests whose authoritative remote head is the shared
 ``work`` branch are rejected at the common merge/review boundary before CI,
 adversarial validation, repair delivery, checkout, or merge work. PR metadata

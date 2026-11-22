@@ -1735,6 +1735,26 @@ and is deferred. The `pr.implementation-admission` result reports the resolved
 of this stage means admission passed, not that the PR merged. Both cases assert
 unchanged occupancy independently of the rendered outcome.
 
+Actual `dependabot[bot]` PRs use the same `pr.implementation-admission` stage
+under per-PR serialization, with `capacity_class=slotless-dependabot` and
+`feature_slot_reserved=false` on admission. Contention or retained execution
+ownership emits `deferred` and its reason. Completion means ordinary processing
+was admitted without feature-slot accounting; approval and merge still require
+their own confirmed effect stages. The existing detail renderer and event schema
+need no changes. `tests/test_dependabot_slotless_admission.py::test_slotless_admission_reaches_mounted_detail`
+joins full feature occupancy, production PR/CI/merge processing and the mounted
+detail view, and checks the unchanged feature store independently.
+
+Temporary slotless admission holds include `retry_not_before` in that stage and
+use the existing durable PR processing wake, with the actual hold reason and
+`pr-processing-cycle` origin. Stored provider membership is reported explicitly
+with a null deadline; it does not claim provider liveness or schedule repeated
+polling. The queued-worker/scheduler/SQLite regressions in
+`tests/test_dependabot_slotless_admission.py` cover the first event before a CI
+watch exists, restart, the 59/60-second boundary, released execution/lock,
+transient reads, unchanged feature occupancy, and non-looping policy/identity or
+provider holds. The renderer and event schema remain unchanged.
+
 ## Adversarial CI evidence reuse
 
 Canonical-suite evidence reuse consumes the existing `pr.ci-observation`
