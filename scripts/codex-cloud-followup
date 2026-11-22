@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode=send
+if [[ "${1:-}" == "--if-paused" ]]; then
+  mode=if_paused
+  shift
+fi
+
+if (( $# < 1 )) || { [[ "$mode" == send ]] && (( $# < 2 )); }; then
+  echo 'Usage: codex-cloud-followup [--if-paused] TASK_ID [MESSAGE]' >&2
+  exit 2
+fi
+
+task_id="$1"
+shift
+message="$*"
+
+[[ "$task_id" =~ ^task_e_[[:alnum:]]+$ ]] || {
+  echo 'Invalid task ID' >&2
+  exit 2
+}
+
+if [[ "$mode" == if_paused && -z "$message" ]]; then
+  message='Review the current pull request status and continue working on it. If CI checks are failing, review the latest failure logs, fix the issues, and push fixes to the existing pull request. Also address valid unresolved review comments.'
+fi
+
+# A per-task lock prevents overlapping guarded invocations.
+if [[ "$mode" == if_paused ]]; then
+  state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/codex-cloud-followup"
+  umask 077
+  mkdir -p "$state_dir"
+  exec 9>"$state_dir/$task_id.lock"
+  flock -n 9 || { echo 'Skipped: continuation check already running'; exit 0; }
+
+  # Query task status across CLI pages. PENDING is not PAUSED.
+  cursor=''
+  state=''
+  for ((page=0; page<50; page++)); do
+    args=(cloud list --json --limit 20)
+    [[ -z "$cursor" ]] || args+=(--cursor "$cursor")
+    list_json="$(codex "${args[@]}")"
+    state="$(jq -r --arg id "$task_id" '.tasks[]? | select(.id == $id) | (.status // .state // "")' <<<"$list_json")"
+    [[ -z "$state" ]] || break
+    next_cursor="$(jq -r '.cursor // ""' <<<"$list_json")"
+    [[ -n "$next_cursor" && "$next_cursor" != "$cursor" ]] || break
+    cursor="$next_cursor"
+  done
+  state="${state,,}"
+  case "$state" in
+    paused|waiting_for_input|idle|stopped) echo "Observed paused state: $state" ;;
+    '') echo 'Skipped: task not found in available CLI pages'; exit 0 ;;
+    *) echo "Skipped: task is $state (not paused)"; exit 0 ;;
+  esac
+fi
+
+auth_file="${CODEX_HOME:-$HOME/.codex}/auth.json"
+api='https://chatgpt.com/backend-api/wham/tasks'
+
+# Fail before any request if the Codex-managed credentials are unavailable.
+if [[ ! -r "$auth_file" ]] || ! jq -e '
+  (.tokens.access_token | type == "string" and length > 0)
+  and (.tokens.account_id | type == "string" and length > 0)
+' "$auth_file" >/dev/null 2>&1; then
+  echo 'Missing or invalid Codex ChatGPT credentials; run codex login' >&2
+  exit 1
+fi
+
+# Read OAuth credentials without exposing them in curl arguments.
+headers() {
+  jq -r '
+    "header = \"Authorization: Bearer \(.tokens.access_token)\"",
+    "header = \"ChatGPT-Account-Id: \(.tokens.account_id)\"",
+    "header = \"Accept: application/json\"",
+    "header = \"User-Agent: codex_cli_rs\"",
+    "header = \"originator: codex_cli_rs\""
+  ' "$auth_file"
+}
+
+# Resolve the newest assistant turn and its provider status together.
+turns_json="$(curl -fsS --max-time 20 --config <(headers) "$api/$task_id/turns")"
+turn_info="$(jq -ce --arg task "$task_id" '
+  def rows:
+    if type == "array" then .
+    elif (.turn_mapping | type) == "object" then [.turn_mapping[]]
+    elif (.turns | type) == "array" then .turns
+    elif (.items | type) == "array" then .items
+    else [] end;
+  [rows[] | . as $outer | (.turn // .) as $t | {
+    id: ($t.id // $outer.id // ""),
+    role: (($t.role // $t.type // $t.author.role // $outer.role // "") | ascii_downcase),
+    status: (($t.turn_status // $outer.turn_status // "") | ascii_downcase),
+    created: ($t.created_at // $t.timestamp // $outer.created_at // "")
+  } | select(.id | startswith($task + "~"))] as $turns |
+  ($turns | sort_by(.created)) as $ordered |
+  ($ordered | map(select(.role == "assistant" or (.id | contains("~assttrn_")))) | last) as $assistant |
+  if $assistant == null then error("No assistant turn available") else
+    {turn_id: $assistant.id, assistant_status: $assistant.status,
+     latest_id: ($ordered[-1].id // "")}
+  end
+' <<<"$turns_json")"
+turn_id="$(jq -r '.turn_id' <<<"$turn_info")"
+
+if [[ "$mode" == if_paused ]]; then
+  assistant_status="$(jq -r '.assistant_status' <<<"$turn_info")"
+  latest_id="$(jq -r '.latest_id' <<<"$turn_info")"
+  case "$assistant_status" in
+    completed|finished|success|succeeded|ready|paused|waiting_for_input|idle|stopped) ;;
+    *) echo "Skipped: latest assistant turn is ${assistant_status:-unknown}"; exit 0 ;;
+  esac
+  if [[ "$latest_id" != "$turn_id" ]]; then
+    echo 'Skipped: latest turn is not an assistant turn'
+    exit 0
+  fi
+
+fi
+
+# Construct a complete payload before reserving the non-idempotent send.
+payload="$(printf '%s' "$message" |
+  jq -Rs --arg task "$task_id" --arg turn "$turn_id" '
+    {
+      follow_up: {
+        task_id: $task,
+        turn_id: $turn,
+        run_environment_in_qa_mode: false
+      },
+      input_items: [{
+        type: "message",
+        role: "user",
+        content: [{content_type: "text", text: .}]
+      }]
+    }
+  ')"
+
+if [[ "$mode" == if_paused ]]; then
+  # Reserve once per assistant turn, including ambiguous transport outcomes.
+  turn_key="$(printf '%s' "$turn_id" | sha256sum | cut -d' ' -f1)"
+  marker="$state_dir/$task_id.$turn_key.attempted"
+  if [[ -e "$marker" ]]; then
+    echo 'Skipped: continuation already attempted for this assistant turn'
+    exit 0
+  fi
+  printf '%s\t%s\n' "$(date -u +%FT%TZ)" "$turn_id" >"$marker"
+fi
+
+# POST once. Never automatically retry an ambiguous response.
+printf '%s' "$payload" |
+  curl -fsS --max-time 30 --config <(headers) \
+    -H 'Content-Type: application/json' \
+    --data-binary @- \
+    -w '\nHTTP %{http_code}\n' "$api"

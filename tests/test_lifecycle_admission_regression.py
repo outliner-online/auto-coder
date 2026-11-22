@@ -13,6 +13,73 @@ from auto_coder.pr_processor import CloudTaskOriginResolution
 NARRATIVE = "Grid: existing closed #5459/REQ-007–008 ... No Issue Requirements or ownership were rewritten"
 
 
+@pytest.mark.parametrize("body,issue_read,ready", [(NARRATIVE, False, True), (f"`{NARRATIVE}`", False, True), ("Closes #5459", True, True), ("Closes #5459", True, False)])
+def test_real_startup_owner_discovery_never_fetches_documentary_issue(tmp_path, monkeypatch, body, issue_read, ready):
+    import asyncio
+
+    from auto_coder.implementation_slots import ImplementationOwnerResolutionError
+    from auto_coder.util.gh_cache import OpenGitHubEntities
+
+    strict_read = MagicMock(return_value={"number": 5459, "state": "open"})
+    if not ready or not issue_read:
+        strict_read.side_effect = RuntimeError("local Issue lookup is unavailable")
+
+    class StrictStartupGitHub(MagicMock):
+        def get_issue_strict(self, repository, number):
+            return strict_read(repository, number)
+
+    github = StrictStartupGitHub()
+    github.get_open_pull_requests.return_value = [{"number": 2864, "body": body, "head": {"ref": "fix/lifecycle-slot-intake"}}]
+    github.get_open_entities_strict.return_value = OpenGitHubEntities(pull_requests=[2864])
+    slots = ImplementationSlotRepository("outliner-online/auto-coder", 1, tmp_path / "slots.json")
+    engine = AutomationEngine(github, AutomationConfig())
+    monkeypatch.setattr(engine, "_get_implementation_slots", lambda repository: slots)
+    monkeypatch.setattr("auto_coder.automation_engine.install_asyncio_diagnostics", lambda loop: None)
+    monkeypatch.setattr("auto_coder.automation_engine.get_health_monitor", MagicMock())
+    lanes = []
+
+    async def idle(*args):
+        await engine._shutdown_event.wait()
+
+    async def lane(repository, worker_id, item_type):
+        assert engine.startup_reconciled
+        lanes.append(item_type)
+        await idle()
+
+    for name in ("_producer_loop", "_invalidation_loop", "_capacity_refill_loop", "_claude_followup_recovery_loop"):
+        monkeypatch.setattr(engine, name, idle)
+    monkeypatch.setattr(engine, "_worker_loop", lane)
+
+    async def startup():
+        task = asyncio.create_task(engine.start_automation("outliner-online/auto-coder", concurrency=1))
+        try:
+            if not ready:
+                with pytest.raises(ImplementationOwnerResolutionError, match="local Issue lookup is unavailable"):
+                    await asyncio.wait_for(task, 5)
+                assert not engine.startup_reconciled and lanes == []
+            else:
+                for _ in range(200):
+                    if len(lanes) == 2:
+                        break
+                    if task.done():
+                        await task
+                    await asyncio.sleep(0.01)
+                assert sorted(lanes) == ["issue", "pr"]
+                assert engine.startup_reconciled and engine.daemon_serving
+                github.get_open_entities_strict.assert_called_once_with("outliner-online/auto-coder")
+        finally:
+            engine.request_graceful_shutdown("test complete")
+            if not task.done():
+                await asyncio.wait_for(task, 5)
+
+    asyncio.run(startup())
+    if issue_read:
+        strict_read.assert_called_once_with("outliner-online/auto-coder", 5459)
+    else:
+        strict_read.assert_not_called()
+    assert slots.active_owners() == ()
+
+
 def test_production_narrative_is_not_a_directive():
     assert extract_lifecycle_directive_issue_references(NARRATIVE) == []
 

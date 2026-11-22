@@ -27,6 +27,10 @@ an active owner's durable membership. It must not learn an incidental
 association and then use that association to block terminal reconciliation.
 Closed Issues can still retain legitimately live implementation siblings;
 current Issue state alone is not a reason to discard PR ownership.
+The startup regression uses the real engine startup and slot discovery with an
+unavailable local Issue lookup: documentary Outliner prose makes no strict Issue
+GET and both Issue/PR worker lanes open. A genuine authored closing directive
+still performs the strict lookup; unavailable evidence prevents worker admission.
 
 At the serialized creation of a fresh autonomous draft reservation, the
 controller checks whether a local repair backend is configured. The store
