@@ -31,7 +31,9 @@ argument; retain live provider resolution, CI continuation and the manual CLI.
 Retain original request identity, PR/head/branch/provider/task, acceptance clock,
 ordinal and send reservation alongside review receipts. Atomically promote the
 exact confirmed original identities with the clock; retain all other unknown
-POST reservations. Scope pending-source holds to the same PR. Use one cross-process
+POST reservations. Scope pending-source holds to the same PR. Shared receipt
+writers merge latest confirmed identities under the existing file lock so
+stale snapshots cannot erase or re-pend those accepted sources. Use one cross-process
 file guard for source writes, new acceptance and checkpoints. Persist the exact
 ordinal before sending. Lost responses/crashes retain that reservation. Typed
 pre-send quota refusals retry the same ordinal through existing quota admission.
@@ -55,7 +57,7 @@ for delivered scope and limitations.
 
 ## Focused verification
 
-The final production-boundary selection passed **448 tests in 30.57s**, exit 0:
+The final production-boundary selection passed **449 tests in 30.11s**, exit 0:
 
 ```bash
 env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \

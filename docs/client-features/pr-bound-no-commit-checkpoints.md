@@ -27,7 +27,11 @@ clock, ordinal and reservation live in `no_commit_series` alongside feedback and
 validation receipts in `~/.auto-coder/<owner>/<repo>/cloud_review_repairs.json`.
 No credentials or task text are copied into this record. Reobservations never
 reset its clock or cap. Shared cross-process locking serializes source writes,
-new request admission and checkpoint reservation/dispatch.
+new request admission and checkpoint reservation/dispatch. Confirmed original
+source identities and their clock commit atomically. Later receipt writers merge
+the latest confirmed identities while holding the file guard, then exclude them
+from pending. A stale peer snapshot cannot erase an accepted source or make it
+pending again. Only confirmed delivered identities participate in this merge.
 
 The normal duplicate-correction wait and retained current-correction handoff
 revisit the series. Before another send, current PR metadata and the exact
@@ -85,7 +89,10 @@ regressions interrupt an accepted Claude source before its later receipt update,
 retain an unknown POST on another PR, explicitly refuse Jules enrollment, and
 start the real invalidation/worker loops with zero watches. The latter expires
 only existing durable timer deadlines and reaches all three checkpoints without
-another external event or a candidate scan.
+another external event or a candidate scan. A controlled peer-write regression
+pauses B after loading A's pre-acceptance pending snapshot, accepts A, reconstructs
+A after interruption, then releases B's stale write. A's original is not replayed,
+its checkpoint becomes due normally, and B's unknown source is not promoted.
 
 The `pr.no-commit-recovery` stage reports provider/task, head, ordinal, reason and
 next eligible time. `accepted` confirms assignment only. `delivery_unknown` and

@@ -1046,3 +1046,73 @@ def test_jules_is_not_enrolled_in_no_commit_recovery(tmp_path):
     native.send_followup.assert_called_once()
     assert json.loads(path.read_text()).get("no_commit_series", {}) == {}
     github.get_pull_request_metadata_strict.assert_not_called()
+
+
+def test_stale_peer_write_cannot_erase_accepted_claude_receipt_after_restart(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from auto_coder.pr_no_commit_recovery import NoCommitRecovery
+    from auto_coder.pr_processor import _load_delivered_review_feedback, _load_pending_review_feedback, _record_review_feedback_state
+
+    class Interrupted(BaseException):
+        pass
+
+    path = tmp_path / "repairs.json"
+    clock = [1000.0]
+    other_pending = {"owner/repo#5263:claude-routine:session-B:unknown-post"}
+    _record_review_feedback_state(path, set(), other_pending)
+    entered, peer_loaded, release_peer = Event(), Event(), Event()
+
+    def stale_peer():
+        assert entered.wait(5), "A never entered its original POST"
+        delivered = _load_delivered_review_feedback(path)
+        pending = _load_pending_review_feedback(path)
+        peer_loaded.set()
+        assert release_peer.wait(5), "peer write was never released"
+        _record_review_feedback_state(path, delivered, pending)
+
+    native = MagicMock()
+
+    def accept(_task, _message):
+        if native.send_followup.call_count == 1:
+            entered.set()
+            assert peer_loaded.wait(5), "B never captured the pre-acceptance snapshot"
+        return True
+
+    native.send_followup.side_effect = accept
+    github = _github_client()
+    github.get_pull_request_metadata_strict.return_value = {**_pr_data(), "state": "open"}
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-5262")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+        ThreadPoolExecutor(max_workers=1) as workers,
+    ):
+        peer = workers.submit(stale_peer)
+        try:
+            with patch("auto_coder.pr_processor._record_delivered_review_feedback", side_effect=Interrupted()):
+                with pytest.raises(Interrupted):
+                    _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+            accepted = _load_delivered_review_feedback(path)
+            assert accepted and all(identity.startswith("owner/repo#5262:") for identity in accepted)
+            # Reconstruct A from its durable acceptance before B resumes writing
+            # the snapshot captured while A's original POST was still pending.
+            assert not NoCommitRecovery(path).has_due_request(5262, clock[0])
+        finally:
+            release_peer.set()
+            peer.result(timeout=5)
+        document = json.loads(path.read_text())
+        assert set(document["delivered_feedback"]) == accepted
+        assert set(document["pending_feedback"]) == other_pending
+        assert not other_pending.intersection(document["delivered_feedback"])
+        assert next(iter(document["no_commit_series"].values()))["accepted_at"] == 1000.0
+        clock[0] += 59 * 60
+        _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert native.send_followup.call_count == 1
+        clock[0] += 60
+        _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert native.send_followup.call_count == 2
+        assert "independently" in native.send_followup.call_args.args[1]
+        assert next(iter(json.loads(path.read_text())["no_commit_series"].values()))["ordinal"] == 1

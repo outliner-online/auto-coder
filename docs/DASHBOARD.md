@@ -472,3 +472,8 @@ commit. Unknown delivery stays reserved across restart. Changed baseline/owner,
 closure, explicit addressed outcome or the three-checkpoint limit stops that
 series. Initial/no-PR recovery is outside this stage. See
 [PR-bound checkpoint behavior](client-features/pr-bound-no-commit-checkpoints.md).
+
+Confirmed correction receipts survive stale writes from other PR workers. The
+existing no-commit recovery stage keeps its ordinary eligibility and assignment
+meaning after restart; no new dashboard event or provider-state inference is
+introduced by this receipt-preservation fix.

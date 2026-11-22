@@ -10130,6 +10130,10 @@ def _record_review_feedback_state(
     from .pr_no_commit_recovery import review_repair_state_lock
 
     with review_repair_state_lock(state_path):
+        # A caller's snapshot can predate another PR's confirmed POST. Receipt
+        # identities are monotonic; a stale write cannot erase or re-pend them.
+        delivered = delivered | _load_delivered_review_feedback(state_path)
+        pending = pending - delivered
         state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = state_path.with_suffix(f"{state_path.suffix}.{os.getpid()}.tmp")
         temporary.write_text(

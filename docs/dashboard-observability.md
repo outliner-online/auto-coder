@@ -3800,3 +3800,13 @@ second PR, a Claude acceptance interrupted before later receipt promotion,
 Jules non-enrollment, and the ordinary scheduler/worker loops starting with zero
 watches and reaching all three checkpoints using only existing timer deadlines.
 The mounted-detail checkpoint regression now uses Claude Routine.
+
+`tests/test_codex_cloud_pr_review_flow.py::test_stale_peer_write_cannot_erase_accepted_claude_receipt_after_restart`
+pauses a peer writer across Claude acceptance and restart, then reaches a due
+checkpoint through ordinary review processing. Shared-file writers now merge
+latest confirmed receipts under the existing file lock, preventing that stale
+snapshot from erasing the accepted source or returning it to pending. This is
+observability-neutral receipt preservation: the existing assignment/hold/terminal
+stage facts and mounted timeline remain unchanged, and no unknown POST is
+promoted by the merge. Run the regression with `bash scripts/test.sh
+--ci-tests-only tests/test_codex_cloud_pr_review_flow.py::test_stale_peer_write_cannot_erase_accepted_claude_receipt_after_restart`.
