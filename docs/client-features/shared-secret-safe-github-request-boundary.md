@@ -17,6 +17,15 @@ Every API-origin redirect hop is independently governed. Cross-origin artifact
 downloads preserve their bytes but are excluded from GitHub quota observations,
 and authorization is not forwarded by the redirecting HTTP client.
 
+GraphQL-envelope throttle inference applies only to successful HTTP responses
+(2xx). An ordinary HTTP 404/503 with an `errors` array, Retry-After or zero
+remaining quota remains `remote_error`; those incidental fields cannot turn it
+into a throttle. Actual HTTP 403/429 throttle evidence and successful HTTP
+GraphQL `RATE_LIMITED`, primary-limit and secondary-limit responses retain their
+typed throttle outcomes. Controlled production GhApi responses in
+`tests/test_github_request_outcomes.py` exercise both sides of this boundary;
+the 503/Retry-After/errors startup case also reaches the actual engine lifecycle.
+
 If Hishel cache storage or response-body processing raises after the transport
 recorded response headers, both CachedGhApi and the direct caching adapter
 consume and deliver those known wire observations before propagating the

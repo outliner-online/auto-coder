@@ -31,6 +31,10 @@ retry guidance. Neither a generic wake nor elapsed time starts ordinary workers
 or releases an owner. Real typed throttles retain the existing bounded retry
 schedule. The lifecycle controls and corrected single-obligation recovery are
 covered by `tests/test_startup_pending_remote_errors.py`.
+Restart preserves the same startup block or future deadline instead of silently
+trying again inline. A scheduler-completed startup is not enumerated again if
+its row is retired while the startup reader is in flight. Available fresh startup,
+due recovery and explicit selected retry still reach ordinary serving state.
 
 Run `pytest -q tests/test_open_target_observations.py tests/test_entity_invalidation.py`
 for production reconciliation/strict observation/status/presentation regressions.

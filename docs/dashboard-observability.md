@@ -1513,6 +1513,20 @@ These are repository lifecycle diagnostics, so no entity trace emission, origin,
 stage, outcome or schema changes are needed. Run
 `bash scripts/test.sh tests/test_startup_pending_remote_errors.py tests/test_github_pending_work.py`.
 
+The same lifecycle regression now reopens retained startup rows before boot:
+remote/authentication/forbidden/indeterminate/exhausted blocks and future
+deadlines send no new request merely because the controller restarted. Due,
+interrupted and officially selected work still reaches the registered recovery
+handler without duplicate enumeration, including a barrier-controlled completion
+during the initial pending-row read. The last permitted throttle attempt retains
+the prior count and exhausts without another automatic attempt. Existing status,
+occupied capacity and startup warnings remain the repository-level evidence;
+there is no new entity trace or dashboard schema. Controlled 503 responses with
+ordinary `errors` and Retry-After now stay `remote_error` in the existing request
+diagnostic event rather than claiming secondary throttling. Successful-HTTP
+GraphQL throttle and true HTTP 403/429 controls are in
+`tests/test_github_request_outcomes.py`.
+
 ## Codex quota transport
 
 Codex quota reads use the app-server account API. This transport change does not

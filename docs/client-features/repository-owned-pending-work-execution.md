@@ -133,6 +133,17 @@ barrier until a complete fresh reconciliation succeeds. Correcting the cause and
 using the official single-obligation retry remains the recovery path; polling or
 a generic wake never rearms the block.
 
+Controller restart reads the retained startup identity before deciding whether
+to make an inline attempt. An unfinished cycle remains owned by the existing
+scheduler: future deadlines, operational blocks and exhausted throttle counts
+are preserved even if the remote cause has since disappeared. Due obligations,
+interrupted running claims and explicitly selected retries still recover through
+the registered startup handler. Only absence of an unfinished cycle permits a
+fresh inline scan. If scheduler recovery completes and retires the row during
+that read, its completion event prevents a duplicate inline scan. This implements
+the restart and completed-cycle boundary of #1921/REQ-002, REQ-006 and REQ-008;
+it does not add another retry authority.
+
 The bounded cadence regression observes completion of the actual second
 production handler evaluation before asserting its strict-reader timestamp.
 Thread entry alone is insufficient evidence that the strict read has run.

@@ -3258,7 +3258,9 @@ class AutomationEngine:
     async def _perform_startup_reconciliation(self, repo_name: str) -> None:
         """Complete startup recovery, retrying governed admission failures durably.
 
-        The first attempt runs inline. A ``GitHubRequestError`` -- a local
+        A fresh cycle's first attempt runs inline. A retained cycle resumes only
+        through the scheduler, preserving its deadline and operational block.
+        A ``GitHubRequestError`` -- a local
         admission deferral or a provider failure -- does not terminate the
         daemon: the attempt is retained as a durable pending-work obligation
         with a stable repository-scoped identity (stable across restarts, since it is keyed
@@ -3275,14 +3277,17 @@ class AutomationEngine:
         self.dependency_observations = DependencyObservationCache()
         identity = WorkIdentity(repo_name, "startup", STARTUP_RECONCILIATION_STAGE)
         try:
-            await self._attempt_startup_reconciliation(repo_name)
-            # A prior process may have left this identity retained (waiting on
-            # a not-yet-due retry, or blocked on an operational failure) before
-            # this fresh inline attempt succeeded outright; clear it so the
-            # scheduler never repeats a full enumeration for already-completed
-            # recovery merely because that old obligation's deadline arrives.
-            await asyncio.to_thread(get_pending_work_store(repo_name).supersede, identity)
-            return
+            retained = await asyncio.to_thread(get_pending_work_store(repo_name).get, identity)
+            if retained is not None:
+                logger.warning("Startup reconciliation for {} waits for its retained {} obligation (not_before={}); {}", repo_name, retained.reason.value, retained.not_before, retained.last_error)
+                self._wake_pending_work()
+            elif self._startup_reconciliation_event is None or not self._startup_reconciliation_event.is_set():
+                # Recovery may have completed and retired the row while get()
+                # was in flight. Its success event forbids a duplicate inline
+                # scan; otherwise absence permits the first fresh attempt.
+                await self._attempt_startup_reconciliation(repo_name)
+                await asyncio.to_thread(get_pending_work_store(repo_name).supersede, identity)
+                return
         except GitHubRequestError as exc:
             obligation = await asyncio.to_thread(get_pending_work_store(repo_name).defer, identity, exc, (STARTUP_RECONCILIATION_EFFECT,))
             if obligation.automatically_retryable:
