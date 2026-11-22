@@ -1527,6 +1527,20 @@ diagnostic event rather than claiming secondary throttling. Successful-HTTP
 GraphQL throttle and true HTTP 403/429 controls are in
 `tests/test_github_request_outcomes.py`.
 
+The due and selected-malformed cases in
+`tests/test_startup_pending_remote_errors.py` drive an actual HTTP-200 invalid
+listing through the strict reader, registered startup handler, scheduler and
+durable store. Repeated due scans and generic wakes send no further requests
+after the same obligation becomes `evaluation_failed`; startup remains
+incomplete, worker lanes stay closed and capacity remains owned. The HTTP
+diagnostic correctly remains `success`, while the semantic pending-work block
+keeps the unfinished effect and throttle count with a zero deadline and safe
+operator guidance. Correction plus the official selected retry completes a fresh
+enumeration. Fresh-inline invalid listings still propagate; handler controls in
+`tests/test_worker_startup_failure.py` prove that unrelated implementation,
+storage, transport and governor errors retain their existing paths. No new
+event schema, entity execution or dashboard projection is introduced.
+
 ## Codex quota transport
 
 Codex quota reads use the app-server account API. This transport change does not

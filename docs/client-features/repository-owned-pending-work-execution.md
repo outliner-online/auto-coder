@@ -144,6 +144,17 @@ that read, its completion event prevents a duplicate inline scan. This implement
 the restart and completed-cycle boundary of #1921/REQ-002, REQ-006 and REQ-008;
 it does not add another retry authority.
 
+Strict open-entity enumeration identifies its explicit malformed-page, JSON and
+incomplete-pagination rejections with `InvalidOpenEntitiesObservation` (a
+`RuntimeError` subtype). Only the resumed startup handler converts that type
+into an `evaluation_failed` operational block. It keeps the same identity,
+unfinished effects and throttle count, clears the due deadline, and stores safe
+guidance to correct the observation and retry that single obligation. A 200
+response is not proof of a complete valid enumeration. Elapsed time and generic
+wakes cannot repeat the invalid scan; fresh inline invalid enumeration still
+propagates as a defect. Unrelated implementation defects, storage failures,
+transport failures and governor errors are not caught by this new boundary.
+
 The bounded cadence regression observes completion of the actual second
 production handler evaluation before asserting its strict-reader timestamp.
 Thread entry alone is insufficient evidence that the strict read has run.

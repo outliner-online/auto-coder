@@ -305,6 +305,10 @@ class OpenGitHubEntities:
     pull_requests: List[int] = field(default_factory=list)
 
 
+class InvalidOpenEntitiesObservation(RuntimeError):
+    """Strict enumeration rejected malformed or incomplete GitHub evidence."""
+
+
 # Safety bound for paginated comment listings (100 comments per page).
 COMMENTS_MAX_PAGES = 50
 
@@ -1072,30 +1076,33 @@ class GitHubClient:
             visited_urls: set[str] = set()
             while url:
                 if url in visited_urls or len(visited_urls) >= 1000:
-                    raise RuntimeError(f"GitHub open-{entity_type} pagination did not terminate safely")
+                    raise InvalidOpenEntitiesObservation(f"GitHub open-{entity_type} pagination did not terminate safely")
                 visited_urls.add(url)
                 response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
                 response.raise_for_status()
-                page = response.json()
+                try:
+                    page = response.json()
+                except json.JSONDecodeError as exc:
+                    raise InvalidOpenEntitiesObservation(f"GitHub open-{entity_type} response was not valid JSON") from exc
                 if not isinstance(page, list):
-                    raise RuntimeError(f"GitHub open-{entity_type} response was not a list")
+                    raise InvalidOpenEntitiesObservation(f"GitHub open-{entity_type} response was not a list")
                 for item in page:
                     if not isinstance(item, dict) or not isinstance(item.get("number"), int):
-                        raise RuntimeError(f"GitHub open-{entity_type} response contained an invalid entity")
+                        raise InvalidOpenEntitiesObservation(f"GitHub open-{entity_type} response contained an invalid entity")
                     # GitHub's Issues collection also contains pull requests.
                     if entity_type == "issues" and "pull_request" in item:
                         continue
                     if entity_type == "issues":
                         created_at = item.get("created_at")
                         if created_at is not None and not isinstance(created_at, str):
-                            raise RuntimeError("GitHub open-issues response contained an invalid created_at")
+                            raise InvalidOpenEntitiesObservation("GitHub open-issues response contained an invalid created_at")
                         entities.append(OpenGitHubIssue(number=item["number"], created_at=created_at))
                     else:
                         entities.append(item["number"])
                 next_link = response.links.get("next", {})
                 next_url = next_link.get("url") if isinstance(next_link, dict) else None
                 if next_url is not None and not isinstance(next_url, str):
-                    raise RuntimeError(f"GitHub open-{entity_type} pagination link was invalid")
+                    raise InvalidOpenEntitiesObservation(f"GitHub open-{entity_type} pagination link was invalid")
                 url = next_url
             return entities
 

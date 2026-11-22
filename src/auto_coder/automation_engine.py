@@ -183,7 +183,7 @@ from .test_log_utils import extract_important_errors
 from .test_result import TestResult
 from .trace_logger import get_trace_logger
 from .update_manager import check_for_updates_and_restart
-from .util.gh_cache import IMPLEMENTATION_READY_LABEL, GitHubClient, InvalidSubIssueRelationshipError, get_ghapi_client, is_implementation_ready, parse_parent_issue_number, parse_parent_issue_url_number, resolve_authoritative_item_type
+from .util.gh_cache import IMPLEMENTATION_READY_LABEL, GitHubClient, InvalidOpenEntitiesObservation, InvalidSubIssueRelationshipError, get_ghapi_client, is_implementation_ready, parse_parent_issue_number, parse_parent_issue_url_number, resolve_authoritative_item_type
 from .util.github_action import check_and_handle_closed_state, get_github_actions_logs_from_url, is_item_closed_on_github
 from .util.github_cache import get_github_cache
 from .util.github_request_outcome import DeliveryCertainty, GitHubApiOutcome, GitHubReadCancelled, GitHubRequestError, cancel_github_reads_when, configure_github_request_boundary, is_issue_resource_read
@@ -406,6 +406,11 @@ class _StartupReconciliationHandler:
             asyncio.run_coroutine_threadsafe(engine._attempt_startup_reconciliation(self._repo_name), loop).result()
         except GitHubRequestError as exc:
             return StageOutcome(error=exc)
+        except InvalidOpenEntitiesObservation:
+            # Only explicit enumeration validation failures become this block;
+            # unrelated defects and operational errors keep their own paths.
+            logger.error("Startup GitHub enumeration for {} returned invalid or incomplete observations; retaining an evaluation-failed operational block", self._repo_name)
+            return StageOutcome(blocked_reason=PendingReason.EVALUATION_FAILED, blocked_error="Startup GitHub enumeration returned invalid or incomplete observations; inspect the response, correct the cause, then use pending-work retry for this obligation.")
         assert engine._startup_reconciliation_event is not None
         loop.call_soon_threadsafe(engine._startup_reconciliation_event.set)
         return StageOutcome(completed_effects=(STARTUP_RECONCILIATION_EFFECT,))

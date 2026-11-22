@@ -35,6 +35,11 @@ Restart preserves the same startup block or future deadline instead of silently
 trying again inline. A scheduler-completed startup is not enumerated again if
 its row is retired while the startup reader is in flight. Available fresh startup,
 due recovery and explicit selected retry still reach ordinary serving state.
+Invalid HTTP-200 listings during resumed startup are shown through the existing
+`evaluation_failed` pending block and incomplete/stale enumeration state. They
+neither start ordinary workers nor repeat scans on a timer; after correction the
+official selected retry performs a full fresh enumeration. The retained reason
+contains safe recovery guidance rather than the response body.
 
 Run `pytest -q tests/test_open_target_observations.py tests/test_entity_invalidation.py`
 for production reconciliation/strict observation/status/presentation regressions.

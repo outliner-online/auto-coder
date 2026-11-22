@@ -11,7 +11,7 @@ import pytest
 from auto_coder.adversarial_validator import AdversarialValidationResult
 from auto_coder.github_app_reviewer import GitHubAppReviewer, ReviewerAppConfig
 from auto_coder.logger_config import setup_logger
-from auto_coder.util.gh_cache import ActionsSecretPublisher, GitHubClient, get_ghapi_client
+from auto_coder.util.gh_cache import ActionsSecretPublisher, GitHubClient, InvalidOpenEntitiesObservation, OpenGitHubEntities, get_ghapi_client
 from auto_coder.util.github_request_outcome import (
     DeliveryCertainty,
     DiagnosticTransport,
@@ -34,6 +34,25 @@ class _RaisingStream(httpx.SyncByteStream):
 
     def close(self) -> None:
         pass
+
+
+@pytest.mark.parametrize("response_kind", ["not-list", "entity", "created-at", "json", "pagination-cycle", "available"])
+def test_strict_open_entities_types_only_rejected_observations(monkeypatch, response_kind):
+    def request(method, url, **kwargs):
+        payload = {"not-list": {}, "entity": [{"number": "1"}], "created-at": [{"number": 1, "created_at": 7}]}.get(response_kind, [])
+        headers = {"Link": f'<{url}>; rel="next"'} if response_kind == "pagination-cycle" else {}
+        if response_kind == "json":
+            return httpx.Response(200, content=b"{raw-response-canary", request=httpx.Request(method, url))
+        return httpx.Response(200, json=payload, headers=headers, request=httpx.Request(method, url))
+
+    monkeypatch.setattr("auto_coder.util.gh_cache._strict_request", request)
+    client = GitHubClient("token")
+    if response_kind == "available":
+        assert client.get_open_entities_strict("owner/repo") == OpenGitHubEntities()
+    else:
+        with pytest.raises(InvalidOpenEntitiesObservation) as caught:
+            client.get_open_entities_strict("owner/repo")
+        assert "raw-response-canary" not in str(caught.value)
 
 
 def test_process_boundary_refuses_distinct_production_credentials_without_a_send(tmp_path, monkeypatch):

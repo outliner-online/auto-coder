@@ -26,6 +26,15 @@ typed throttle outcomes. Controlled production GhApi responses in
 `tests/test_github_request_outcomes.py` exercise both sides of this boundary;
 the 503/Retry-After/errors startup case also reaches the actual engine lifecycle.
 
+Successful HTTP completion remains separate from valid semantic enumeration.
+The strict open-Issue/PR reader raises `InvalidOpenEntitiesObservation` only for
+its explicit invalid JSON/page/entity/creation-time or unsafe pagination checks;
+it never returns partial observations as an authoritative empty list. This
+`RuntimeError` subtype leaves the fresh inline failure path intact and lets the
+resumed startup handler retain a durable non-automatic evaluation block without
+catching arbitrary `RuntimeError` defects. It does not alter provider outcome,
+storage, transport or admission classification.
+
 If Hishel cache storage or response-body processing raises after the transport
 recorded response headers, both CachedGhApi and the direct caching adapter
 consume and deliver those known wire observations before propagating the

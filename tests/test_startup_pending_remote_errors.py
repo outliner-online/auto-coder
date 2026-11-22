@@ -38,7 +38,7 @@ async def _until(predicate):
     ("response_kind", "retained_state"),
     [(kind, None) for kind in ("missing", "remote", "remote-errors-retry-after", "throttle", "secondary", "available", "invalid")]
     + [("available", state) for state in ("remote", "authentication", "forbidden", "indeterminate", "exhausted", "future", "due", "selected", "interrupted", "read-race")]
-    + [("throttle", "last-retry")],
+    + [("throttle", "last-retry"), ("invalid", "malformed-due"), ("invalid", "malformed-selected")],
 )
 def test_start_automation_preserves_provider_authority_and_selected_recovery(tmp_path, monkeypatch, response_kind, retained_state):
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -50,7 +50,7 @@ def test_start_automation_preserves_provider_authority_and_selected_recovery(tmp
     requests = []
     warnings = []
     monkeypatch.setattr("auto_coder.automation_engine.logger.warning", lambda message, *args: warnings.append(message.format(*args)))
-    state = {"corrected": response_kind in {"available", "invalid"}}
+    state = {"corrected": response_kind in {"available", "invalid"}, "malformed": response_kind == "invalid"}
 
     def respond(request):
         requests.append(request.url.path)
@@ -66,7 +66,7 @@ def test_start_automation_preserves_provider_authority_and_selected_recovery(tmp
                 return httpx.Response(status, headers=headers, json=body)
             return httpx.Response(200, json={"number": 100, "state": "closed"})
         assert request.url.path.endswith(("/issues", "/pulls"))
-        return httpx.Response(200, json={"bad": "page"} if response_kind == "invalid" else [])
+        return httpx.Response(200, json={"bad": "raw-response-canary"} if state["malformed"] else [])
 
     def observe(outcome):
         observations.append(outcome)
@@ -127,6 +127,7 @@ def test_start_automation_preserves_provider_authority_and_selected_recovery(tmp
             "forbidden": GitHubApiOutcome.FORBIDDEN,
             "indeterminate": GitHubApiOutcome.TRANSPORT_FAILURE,
             "selected": GitHubApiOutcome.AUTHENTICATION_FAILURE,
+            "malformed-selected": GitHubApiOutcome.AUTHENTICATION_FAILURE,
         }.get(retained_state, GitHubApiOutcome.SECONDARY_THROTTLED)
         error = _github_error(classification, delivery=DeliveryCertainty.INDETERMINATE if retained_state == "indeterminate" else DeliveryCertainty.HTTP_RESPONSE_RECEIVED, retry_after=600 if retained_state == "future" else 0)
         attempts = MAX_THROTTLED_RETRIES + 1 if retained_state == "exhausted" else MAX_THROTTLED_RETRIES if retained_state == "last-retry" else 1
@@ -139,7 +140,7 @@ def test_start_automation_preserves_provider_authority_and_selected_recovery(tmp
         github_pending_work._READY_STORES.clear()
         store = get_pending_work_store("owner/repo")
         assert store.get(identity).throttle_attempts == seeded.throttle_attempts
-        if retained_state == "selected":
+        if retained_state in {"selected", "malformed-selected"}:
             result = CliRunner().invoke(pending_work_group, ["retry", "--repository", "owner/repo", "--entity", "startup", "--stage", STARTUP_RECONCILIATION_STAGE])
             assert result.exit_code == 0, result.output
 
@@ -172,7 +173,39 @@ def test_start_automation_preserves_provider_authority_and_selected_recovery(tmp
         task = asyncio.create_task(engine.start_automation("owner/repo", concurrency=1))
         try:
             if retained_state is not None:
-                if retained_state == "read-race":
+                if retained_state in {"malformed-due", "malformed-selected"}:
+                    await _until(lambda: engine.pending_work_scheduler is not None)
+                    scheduler = engine.pending_work_scheduler
+                    now[0] = max(now[0], store.get(identity).not_before)
+                    scheduler._clock = lambda: now[0]
+                    await _until(lambda: requests.count("/repos/owner/repo/issues") == 1)
+                    await _until(lambda: not scheduler._tasks and store.get(identity).status == "waiting")
+                    retained = store.get(identity)
+                    observed_requests = list(requests)
+                    for _ in range(MAX_THROTTLED_RETRIES + 2):
+                        now[0] += 3600
+                        scheduler.wake()
+                        await scheduler._dispatch_due()
+                        await asyncio.gather(*tuple(scheduler._tasks))
+                    assert requests == observed_requests
+                    assert retained.reason is PendingReason.EVALUATION_FAILED and retained.not_before == 0
+                    assert retained.throttle_attempts == (0 if retained_state == "malformed-selected" else seeded.throttle_attempts)
+                    assert retained.unfinished_effects == (STARTUP_RECONCILIATION_EFFECT,)
+                    assert store.get(identity) == retained
+                    assert "invalid or incomplete observations" in retained.last_error and "pending-work retry" in retained.last_error
+                    assert "raw-" not in retained.last_error
+                    assert observations[-1].classification is GitHubApiOutcome.SUCCESS and observations[-1].status == 200
+                    assert not task.done() and not engine.startup_reconciled and not engine.daemon_serving
+                    assert not engine._startup_reconciliation_event.is_set()
+                    assert not any(len(args) == 3 for args in entered)
+                    assert slots.active_owners() == (owner,)
+                    assert engine.get_status()["open_target_observation"]["availability"] == "unavailable"
+                    state["malformed"] = False
+                    result = await asyncio.to_thread(CliRunner().invoke, pending_work_group, ["retry", "--repository", "owner/repo", "--entity", "startup", "--stage", STARTUP_RECONCILIATION_STAGE])
+                    assert result.exit_code == 0, result.output
+                    assert store.get(other) == unrelated
+                    scheduler.wake()
+                elif retained_state == "read-race":
                     await _until(read_entered.is_set)
                     await _until(lambda: engine._startup_reconciliation_event.is_set() and original_get(identity) is None)
                     release_read.set()
@@ -204,7 +237,7 @@ def test_start_automation_preserves_provider_authority_and_selected_recovery(tmp
                         result = await asyncio.to_thread(CliRunner().invoke, pending_work_group, ["retry", "--repository", "owner/repo", "--entity", "startup", "--stage", STARTUP_RECONCILIATION_STAGE])
                         assert result.exit_code == 0, result.output
                     scheduler.wake()
-            if response_kind == "invalid":
+            if response_kind == "invalid" and retained_state is None:
                 with pytest.raises(RuntimeError, match="response was not a list"):
                     await asyncio.wait_for(task, 5)
                 assert not engine.startup_reconciled and not engine.daemon_serving
@@ -280,7 +313,7 @@ def test_start_automation_preserves_provider_authority_and_selected_recovery(tmp
             assert store.get(identity) is None
             assert slots.active_owners() == (owner,)
             assert slots.snapshot().owners[0].implementation_prs == (108,)
-            assert requests.count("/repos/owner/repo/issues") == 1
+            assert requests.count("/repos/owner/repo/issues") == (2 if retained_state in {"malformed-due", "malformed-selected"} else 1)
             assert requests.count("/repos/owner/repo/pulls") == 1
             if response_kind != "available" or retained_state is not None:
                 assert store.get(other) == unrelated
