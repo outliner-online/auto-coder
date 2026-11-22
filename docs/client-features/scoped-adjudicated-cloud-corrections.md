@@ -1,10 +1,11 @@
 # Scoped adjudicated cloud corrections
 
 Current transport eligibility is conservative: the common owner fence treats
-all current send records as wildcard scope. An older reserved/unknown operation
+this v2 route's send records as wildcard scope. An older reserved/unknown operation
 therefore holds this route too, regardless of the v2 journal checks below. The
-former v2-to-v2 mixed positive is disabled until an exhaustive authoritative
-ordinary obligation producer exists. See [Before-wire continuation provenance](durable-codex-work-accounting.md#before-wire-continuation-provenance-milestone).
+former v2-to-v2 mixed positive remains disabled. The separate optional
+[accepted Strong scope](accepted-strong-correction-scopes.md) producer can now
+register exhaustive future scopes; this v2 reader cannot manufacture or adopt them. See [Before-wire continuation provenance](durable-codex-work-accounting.md#before-wire-continuation-provenance-milestone).
 
 An already authorized numeric review adjudicator may submit an explicit v2
 `UPHOLD/FIX` correction through the same native GitHub reply reader as v1.

@@ -136,6 +136,12 @@ class CodexWorkFence:
             raise ImplementationSlotUnavailable("Codex work belongs to a different repository")
         owner = ImplementationOwner("issue", identity.issue_number)
         with self.accounting.slots.serialize(owner):
+            if send_provenance is not None and send_provenance.strong_source:
+                from .strong_correction_scope import validate_request
+
+                if final_authority_check is None:
+                    raise CodexWorkAuthorityRefused("Accepted Strong correction requires final authority recheck")
+                validate_request(self.accounting, identity, send_provenance)
             if identity.operation_kind in {"follow-up", "publication", "repair"}:
                 snapshot = self.accounting.snapshot(owner, identity.incarnation)
                 if snapshot.accounting_status is not WorkAccountingStatus.COMPLETE:
@@ -150,6 +156,15 @@ class CodexWorkFence:
                     old_identity = CodexWorkIdentity(identity.repository, identity.issue_number, identity.incarnation, operation.logical_operation_id, operation.kind, operation.source_request_id, operation.task_id, operation.causal_baseline)
                     old_subject = self._subject(old_identity, operation.send_provenance)
                     if subject is None or old_subject is None or not subject.separate_from(old_subject):
+                        if send_provenance is not None and send_provenance.strong_source:
+                            from .strong_correction_scope import validate_send
+
+                            try:
+                                validate_send(self.accounting, identity, send_provenance, old_operation=operation)
+                            except ValueError:
+                                pass
+                            else:
+                                continue
                         raise CodexWorkOverlap("Ambiguous wildcard Codex work overlaps this request; duplicate send refused before transport")
             if final_authority_check is not None:
                 try:

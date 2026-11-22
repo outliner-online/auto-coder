@@ -548,3 +548,22 @@ reservation or POST for that exact claim, not provider rejection. Ambiguous
 bookkeeping outcomes stay fenced. Distinct PR numbers sharing a head, even with
 different bases, remain overlapping. These use existing diagnostics and add no
 public fact fields. Publication-route remote freshness remains unchanged.
+
+
+The optional [accepted Strong correction scope](client-features/accepted-strong-correction-scopes.md)
+path now returns the existing ordinary `CloudReviewRepairResult`: actual acceptance
+uses delivered/assigned projection, while unconfirmed or refused authority uses
+`unconfirmed_delivery_receipt` and deferred diagnostics. A local guard is not a
+remote rejection. No new public event fields, dashboard action or permission is
+added. Producer births, owner snapshots and sealed/native accounting evidence stay
+private. The optional attestation belongs to the exact existing accepted review
+payload; absent attestation is omitted from its canonical JSON so legacy payload
+identities and renderers are unchanged. Existing per-PR pending/merge blockers and
+#2889 confirmed-delivery clocks retain their contracts.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_strong_correction_scope.py
+tests/test_pr_review_effects.py tests/test_codex_cloud_pr_review_flow.py
+tests/test_codex_send_provenance.py tests/test_codex_subject_separation.py` for the
+actual Strong acceptance/canonical/ordinary/native path, delivery/deferred outcomes,
+legacy identities, wildcard holds and unchanged unrelated-subject behavior. These
+controlled transport fixtures do not contact production.

@@ -122,8 +122,9 @@ before native journal reservation and WHAM. It binds the prepared-payload
 fingerprint, complete sorted native membership and available exact PR/head/base
 branches to that operation's existing task, source, owner and incarnation.
 This is wire provenance, not an approved-obligation or source-birth certificate.
-There is no new external envelope, setting or enablement flag. Its only supported
-scope is `wildcard`; no exhaustive bounded scope is accepted by this milestone.
+There is no new external envelope, setting or enablement flag. Broad/legacy scope remains `wildcard`. The later optional
+[accepted Strong scope](accepted-strong-correction-scopes.md) producer additionally
+binds its sealed birth revision and complete native membership here.
 
 Reserved, interrupted and unknown wildcard work overlaps another follow-up,
 repair or publication operation for the same verified subject. The original
@@ -153,10 +154,11 @@ match; no new provider getter or polling is introduced. It cannot create legacy
 provenance or settle lifecycle responsibility. Existing checkpoint clocks and
 acceptance timestamps are unchanged.
 
-Mixed-send eligibility remains disabled. The next boundary is actual trusted
-accepted-source birth plus exhaustively approved obligation membership shared by
-ordinary, adversarial and adjudicated producers; broad requests must remain
-wildcard when they cannot enumerate that membership. Separately actionable scope
+Mixed-send eligibility remains disabled for broad and legacy records. The optional
+accepted Strong producer now supplies exhaustive future source birth and approved
+membership through the ordinary canonical path; all native correction lanes claim
+possibly overlapping births atomically at this boundary. Unsupported broad lanes
+remain wildcard. Separately actionable scope
 must come from trusted exhaustive records, never UUIDs, strings or digests.
 Legacy #6009 is neither backfilled nor qualified.
 
@@ -164,7 +166,7 @@ Legacy #6009 is neither backfilled nor qualified.
 pre-wire state, restart, broad continuation with/without force, legacy records,
 pre-/post-wire crashes, exact positive receipt reconciliation and rejection with
 bookkeeping failure. Scoped regressions now prove that the v2 journal cannot
-bypass an old wildcard. No positive mixed eligibility fixture is supplied.
+bypass an old wildcard. The later accepted Strong scope tests supply the bounded future mixed positive.
 
 ## Verified PR subject separation
 
@@ -191,8 +193,8 @@ verified PR association, that numeric PR dominates the prospective branch subjec
 multiple/unverified associations remain broader uncertainty.
 
 This is subject separation only. Wildcards on one PR still overlap across heads
-and force cannot bypass them. Exhaustive accepted-obligation membership and mixed
-sends within a PR remain disabled. `tests/test_codex_subject_separation.py` starts
+and force cannot bypass them. Same-PR mixed sends remain disabled unless both operations carry exhaustive
+accepted Strong scope evidence described above. `tests/test_codex_subject_separation.py` starts
 with a real ordinary unknown request and drives native continuation, the real CI
 producer and initial-publication monitor. It covers independent PR/publication
 positives, same-subject and evidence-deficient negatives, close/reopen activity,
@@ -219,7 +221,8 @@ This final check is limited to the scoped correction path. Ordinary, CI, conflic
 checkpoint and initial-publication routes retain their current authority checks.
 In particular, the initial-publication monitor still obtains its fresh remote
 observation before owner-lock acquisition; its remote lock-wait freshness gap is
-not fixed by this increment. Same-PR mixed-send eligibility remains disabled.
+not fixed by this increment. The v2 scoped path still cannot enable same-PR mixed delivery; the later accepted
+Strong source path reuses this final authority boundary for its qualified exception.
 `tests/test_scoped_final_authority.py` uses an actual competing process/file lock,
 observes a real failed flock attempt, changes only the remote fixture's head or
 decision after outer checks and proves zero POSTs, plus exact positive and

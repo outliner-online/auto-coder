@@ -144,8 +144,10 @@ that reservation. Only sources positively born under that contract, or sources
 with independent exact no-effect proof, can establish no prior attempt; legacy
 `NONE` records cannot be backfilled as unsent. Recovering an old scope additionally
 requires exact immutable payload/native fingerprint and complete held-operation
-membership, with overlapping or unverifiable obligations held. This boundary
-adds no authority or automatic semantic classifier and is not implemented here.
+membership, with overlapping or unverifiable obligations held. The legacy boundary adds no authority or automatic semantic classifier. A later
+optional [accepted Strong scope](accepted-strong-correction-scopes.md) protocol
+provides future explicit semantic authority and birth provenance without adopting
+legacy records.
 
 If native transport proves definite rejection and later bookkeeping raises,
 ordinary intake consumes only the current exact task/full-identity proof under
@@ -154,5 +156,5 @@ are discarded before admission; absent, mismatched and ambiguous proof remain
 fenced. This does not settle or rewrite other accounting/uncertain operations.
 
 The common Codex owner fence now also holds the v2 prototype behind any ambiguous
-wildcard. Current wire provenance does not yet provide exhaustive registered
-obligation eligibility; see [Durable Codex work accounting](durable-codex-work-accounting.md#before-wire-continuation-provenance-milestone).
+wildcard. Broad wire provenance alone provides no exhaustive registered
+obligation eligibility; the optional accepted Strong source protocol is required; see [Durable Codex work accounting](durable-codex-work-accounting.md#before-wire-continuation-provenance-milestone).

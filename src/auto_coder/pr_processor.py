@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from string import Template
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, TypedDict, cast
 
 from auto_coder.backend_manager import BackendManager, get_llm_backend_manager, run_llm_prompt
 from auto_coder.cli_helpers import create_high_score_backend_manager
@@ -475,6 +475,8 @@ def _execute_pending_strong_audit(
                 if not evidence.success:
                     diagnostic = redact_string(evidence.stderr.strip() or evidence.stdout.strip() or "no Git diagnostic")[:2000]
                     raise RuntimeError(f"required {evidence_name} evidence is unavailable (exit={evidence.returncode}): {diagnostic}")
+            from .strong_correction_scope import review_context
+
             review_input = ReviewExecutionInput(
                 mode=ReviewMode.STRONG_AUDIT,
                 round_id=claim.claim_id,
@@ -484,6 +486,7 @@ def _execute_pending_strong_audit(
                 contract=inputs.contract,
                 policy=inputs.policy,
                 repository_evidence="Pinned read-only snapshot. Tracked paths:\n" + tracked.stdout,
+                correction_scope_context=review_context(repo_name, pr_number),
                 diff_evidence=diff.stdout,
             )
             result = execute_review(review_input, availability.backend_manager, worktree)
@@ -2503,25 +2506,64 @@ def _retire_closed_cloud_checkpoint(repository: str, pr_number: int) -> None:
         NoCommitRecovery(path).end_series(pr_number, "closed")
 
 
+class _NativeFollowupAuthority(TypedDict, total=False):
+    final_authority_check: Callable[[], bool]
+    strong_source: Optional[str]
+    strong_revision: Optional[str]
+
+
 def _send_followup_with_quota_admission(
-    client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, recovery_provider: str = "", checkpoint: bool = False, final_authority_check: Optional[Callable[[], bool]] = None
+    client: Any,
+    repository: str,
+    task_id: str,
+    message: str,
+    identities: tuple[str, ...] = (),
+    *,
+    repair_target: Optional[ExistingPrRepairTarget] = None,
+    recovery_provider: str = "",
+    checkpoint: bool = False,
+    final_authority_check: Optional[Callable[[], bool]] = None,
+    strong_source: Optional[str] = None,
+    strong_revision: Optional[str] = None,
 ) -> bool:
     """Keep accepted PR correction checkpoints on the normal authenticated sender."""
     from .pr_no_commit_recovery import SUPPORTED_PROVIDERS
 
+    authority: _NativeFollowupAuthority = {}
+    if final_authority_check is not None:
+        authority["final_authority_check"] = final_authority_check
+    if strong_source is not None:
+        authority["strong_source"], authority["strong_revision"] = strong_source, strong_revision
+
     if repair_target is None or checkpoint:
-        return _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}))
+        return _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target, **authority)
     if recovery_provider not in SUPPORTED_PROVIDERS:
         with _new_pr_correction_request(repository, repair_target.pr_number):
             native_identities = identities if not recovery_provider else ()
-            return _send_followup_with_quota_admission_impl(client, repository, task_id, message, native_identities, repair_target=repair_target, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}))
+            return _send_followup_with_quota_admission_impl(
+                client,
+                repository,
+                task_id,
+                message,
+                native_identities,
+                repair_target=repair_target,
+                **authority,
+            )
     from .pr_no_commit_recovery import NoCommitRecovery, pr_correction_lock
 
     path = _cloud_review_repair_state_path(repository)
     with pr_correction_lock(path, repair_target.pr_number):
         recovery = NoCommitRecovery(path)
         recovery.supersede_prior_request(recovery_provider, task_id, repair_target, identities, message)
-        accepted = _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities if recovery_provider == "codex-cloud" else (), repair_target=repair_target, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}))
+        accepted = _send_followup_with_quota_admission_impl(
+            client,
+            repository,
+            task_id,
+            message,
+            identities if recovery_provider == "codex-cloud" else (),
+            repair_target=repair_target,
+            **authority,
+        )
         if accepted:
             try:
                 recovery.record_acceptance(recovery_provider, task_id, repair_target, identities, message, time.time())
@@ -2532,13 +2574,15 @@ def _send_followup_with_quota_admission(
         return accepted
 
 
-def _send_followup_with_quota_admission_impl(client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None) -> bool:
+def _send_followup_with_quota_admission_impl(
+    client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None
+) -> bool:
     """Serialize Claude usage rechecks and fence final provider assignment."""
     context = getattr(type(client), "followup_quota_context", None)
     if not callable(context):
         bounded_sender = getattr(type(client), "send_existing_pr_followup", None)
         if repair_target is not None and callable(bounded_sender):
-            return bounded_sender(client, task_id, message, repair_target, identities, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}))
+            return bounded_sender(client, task_id, message, repair_target, identities, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}), **({"strong_source": strong_source, "strong_revision": strong_revision} if strong_source is not None else {}))
         if final_authority_check is not None:
             raise ValueError("Scoped final authority requires the bounded native sender")
         return client.send_followup(task_id, message, identities) if identities else client.send_followup(task_id, message)
@@ -10785,6 +10829,12 @@ def _delegate_cloud_review_thread_repair(
     pending = [(thread, comment, identity) for thread, comment, identity in pending if identity not in indeterminate]
     if not pending:
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: a prior follow-up has unconfirmed durable receipt status; duplicate delivery was suppressed"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
+
+    from .strong_correction_scope import deliver_ordinary
+
+    strong_delivery = deliver_ordinary(repo_name, pr_data, github_client, selected_origin, pending, state_path, delivered)
+    if strong_delivery is not None:
+        return strong_delivery
 
     if provider == "codex-cloud" and any(identity.startswith(prefix) for identity in indeterminate):
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: local duplicate guard held mixed feedback for independent scope resolution; no provider request was made"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")

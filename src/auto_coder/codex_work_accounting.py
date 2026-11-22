@@ -88,6 +88,8 @@ class CodexSendProvenance:
     publication_launch_identity: Optional[str] = None
     publication_head_repository: Optional[str] = None
     publication_head_ref: Optional[str] = None
+    strong_source: Optional[str] = None
+    strong_revision: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.scope != "wildcard" or self.outcome not in {"reserved", "unknown", "accepted", "not_delivered"}:
@@ -103,6 +105,8 @@ class CodexSendProvenance:
         ):
             raise ValueError("Incomplete Codex send provenance target")
 
+        if (self.strong_source is None) != (self.strong_revision is None) or (self.strong_revision is not None and (not isinstance(self.strong_source, str) or not self.strong_source or re.fullmatch(r"[0-9a-f]{64}", self.strong_revision) is None)):
+            raise ValueError("Incomplete accepted Strong source revision")
         publication = (self.publication_launch_identity, self.publication_head_repository, self.publication_head_ref)
         if any(value is not None for value in publication) and (any(not isinstance(value, str) or not value for value in publication) or any(value is not None for value in target)):
             raise ValueError("Incomplete or conflicting Codex publication subject")
@@ -339,6 +343,9 @@ class CodexWorkAccounting:
                     if previous is None or replace(CodexSendProvenance.from_record(previous), outcome="reserved") != send_provenance:
                         raise ValueError("Codex send provenance collision; legacy work cannot be backfilled")
                 return CodexWorkRegistration(self._snapshot_from_record(owner, incarnation, record), False, False)
+            from .strong_correction_scope import claim_sources
+
+            claim_sources(accounting, self.slots, owner, incarnation, logical_operation_id, send_provenance, task_id)
             operations[logical_operation_id] = proposed
             self._advance_revision(record)
             self.slots._write(owners)

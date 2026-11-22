@@ -659,10 +659,10 @@ class CodexCloudClient(CloudTaskClientBase):
         latest = max(accepted, key=lambda record: record.accepted_at)
         return latest.completed_turn_id
 
-    def send_existing_pr_followup(self, task_id: str, message: str, target: ExistingPrRepairTarget, logical_identities: tuple[str, ...] = (), *, final_authority_check: Optional[Callable[[], bool]] = None) -> bool:
+    def send_existing_pr_followup(self, task_id: str, message: str, target: ExistingPrRepairTarget, logical_identities: tuple[str, ...] = (), *, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None) -> bool:
         """Carry the existing-PR producer contract into the durable sender journal."""
         if final_authority_check is not None:
-            return self.send_followup(task_id, message, logical_identities, repair_target=target, final_authority_check=final_authority_check)
+            return self.send_followup(task_id, message, logical_identities, repair_target=target, final_authority_check=final_authority_check, strong_source=strong_source, strong_revision=strong_revision)
         return self.send_followup(task_id, message, logical_identities, repair_target=target)
 
     def consume_followup_duplicate_guard(self, task_id: str, logical_identities: tuple[str, ...]) -> bool:
@@ -680,7 +680,9 @@ class CodexCloudClient(CloudTaskClientBase):
         self._followup_rejection = None
         return rejection == (task_id, tuple(sorted(logical_identities)))
 
-    def send_followup(self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None) -> bool:
+    def send_followup(
+        self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None
+    ) -> bool:
         """Send work once, reconciling any prior ambiguous POST before retrying."""
         self._followup_rejection = None
         self._followup_duplicate_guard = None
@@ -744,6 +746,15 @@ class CodexCloudClient(CloudTaskClientBase):
                 turn_id,
             )
         except CodexWorkOutsideScope:
+            from .strong_correction_scope import has_registered_task
+
+            try:
+                adopted = has_registered_task(self.repo_name or "", task_id)
+            except Exception:
+                adopted = True
+            if adopted:
+                logger.warning("Registered Strong task has missing owner evidence; no untracked fallback send")
+                return False
             fence = None
             work_identity = None
         except Exception as exc:
@@ -792,6 +803,8 @@ class CodexCloudClient(CloudTaskClientBase):
                 repair_target.head_sha if repair_target is not None else None,
                 repair_target.head_branch if repair_target is not None else None,
                 repair_target.base_branch if repair_target is not None else None,
+                strong_source=strong_source,
+                strong_revision=strong_revision,
             )
             if fence is not None and work_identity is not None:
                 if final_authority_check is not None:

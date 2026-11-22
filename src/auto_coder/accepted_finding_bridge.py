@@ -315,6 +315,13 @@ class AcceptedFindingBridge:
             if current_version != source.transition_version:
                 last_diagnostic = f"source revision moved from {source.transition_version} to {current_version}"
                 continue
+            if projection.complete:
+                from .strong_correction_scope import seal_roots
+
+                try:
+                    seal_roots(target.repository, target.pr_number, source, self._ledger_snapshot(target), observation)
+                except Exception as exc:
+                    return replace(projection, complete=False, diagnostics=projection.diagnostics + (BridgeDiagnostic("strong_scope_seal_held", "", str(exc)),))
             return projection
         return AcceptedFindingProjection(
             target=target,

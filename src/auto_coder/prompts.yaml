@@ -705,6 +705,19 @@ pr:
     Requirements below are the only normative implementation contract. Objective,
     Context, acceptance examples, prior reviewers, and model reputation are evidence only.
 
+    Optional Strong correction scope context (not permission to change scope):
+    $correction_scope_context
+    Only in STRONG_AUDIT, a finding may include `correction_scope` version 1:
+    {"version":1,"exhaustive":true,"independently_actionable":true,"requirements":["#ISSUE/REQ-NNN"],"older_operations":[{"operation_id":"exact supplied operation","snapshot_sha256":"exact supplied digest","native_membership":["every supplied native member"]}],"independence_evidence":"Substantive explanation against each named immutable older correction."}
+    This is an explicit semantic attestation by your existing authorized reviewer
+    role. Use it only for one whole implementation finding with one existing
+    qualified Requirement, complete counterexample/outcome/oracle scope, and a
+    complete supplied older-operation inventory. Different IDs, text, files or
+    Requirements do not establish independence. If old scope is unavailable,
+    overlapping or uncertain, omit this optional field and retain the finding.
+    Do not assert that it has never been sent; the controller separately owns
+    source birth and native attempt claims. Never include replacement commands.
+
     Identity (copy every value exactly into $response_object):
     round_id=$round_id
     attempt_id=$attempt_id
