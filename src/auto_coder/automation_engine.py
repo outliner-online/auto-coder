@@ -5065,25 +5065,25 @@ class AutomationEngine:
                         self._record_pr_capacity_wait(invalidation_claim.identity, Outcome.DEFERRED, "implementation_capacity_unavailable")
 
                     if invalidation_claim is not None and not deferral_committed and candidate.type == "pr" and result.outcome is PRProcessingOutcome.DEFERRED and result.retry_not_before is not None:
-                        # Pending review is never completion, even if persisting
-                        # its wake fails. Retain this claim rather than allowing
+                        # Timed PR processing waits are never completion, even if
+                        # persisting their wake fails. Retain this claim rather than allowing
                         # the generic finalizer to acknowledge or release it.
                         decision_completed = False
                         try:
                             retained = await asyncio.to_thread(
                                 self.invalidations.defer,
                                 invalidation_claim,
-                                "two-tier review work remains pending",
+                                result.target_reason or "two-tier review work remains pending",
                                 result.retry_not_before,
-                                "pr-review-cycle",
+                                "pr-processing-cycle" if result.target_reason else "pr-review-cycle",
                             )
                         except Exception as persistence_error:
                             stop_after_persistence_failure = True
                             self._record_worker_failure_backoff(invalidation_claim, Outcome.FAILED, None)
-                            raise RuntimeError("Pending PR review retry persistence failed") from persistence_error
+                            raise RuntimeError("Pending PR processing retry persistence failed") from persistence_error
                         deferral_committed = True
                         logger.info(
-                            "Retained two-tier PR review wake repository={} pr={} retry_at={}",
+                            "Retained PR processing wake repository={} pr={} retry_at={}",
                             repo_name,
                             item_number,
                             retained.retry_not_before,
@@ -6887,7 +6887,7 @@ class AutomationEngine:
             # implementation reservation, execution, or admission-related PR
             # membership is created, so a startup/webhook-discovered candidate
             # cannot bypass the policy that `_get_candidates()` also applies.
-            from .pr_processor import evaluate_dependency_bot_admission
+            from .pr_processor import _is_feature_slotless_dependabot_pr, evaluate_dependency_bot_admission
 
             dependency_bot_decision = evaluate_dependency_bot_admission(self.github, repo_name, candidate.data, config)
             if not dependency_bot_decision.allowed:
@@ -6903,6 +6903,9 @@ class AutomationEngine:
                 )
                 if dependency_bot_decision.outcome is ExplicitTargetOutcome.DEFERRED:
                     result.refill_retry_required = True
+                    if _is_feature_slotless_dependabot_pr(candidate.data):
+                        result.outcome = PRProcessingOutcome.DEFERRED
+                        result.retry_not_before = time.time() + 60
                 return result
         if candidate.type == "issue":
             collected_candidate = candidate
@@ -8295,10 +8298,11 @@ class AutomationEngine:
         # on the first evaluation in a newly configured repository.
         slots.active_execution_ids(pr_owner)
 
-        def defer(reason: str) -> CandidateProcessingResult:
+        def defer(reason: str, *, retryable: bool = True) -> CandidateProcessingResult:
             result.target_reason = reason
             result.actions = [f"Deferred - {reason}"]
-            _record_pr_stage_result(number, "pr.implementation-admission", f"pr#{number} implementation admission", Outcome.DEFERRED, {"owner": pr_owner.key, "capacity_class": "slotless-dependabot", "reason": reason})
+            result.retry_not_before = time.time() + 60 if retryable else None
+            _record_pr_stage_result(number, "pr.implementation-admission", f"pr#{number} implementation admission", Outcome.DEFERRED, {"owner": pr_owner.key, "capacity_class": "slotless-dependabot", "reason": reason, "retry_not_before": result.retry_not_before})
             return result
 
         with ExitStack() as locks:
@@ -8309,14 +8313,15 @@ class AutomationEngine:
                 result.refill_retry_required = True
                 return defer(f"Cannot refresh slotless Dependabot identity: {error}")
             if refreshed.get("number") != number or not _is_feature_slotless_dependabot_pr(refreshed):
-                return defer("Slotless Dependabot author or PR identity changed")
+                return defer("Slotless Dependabot author or PR identity changed", retryable=False)
             candidate.data = refreshed
             if not self._is_pr_author_allowed(refreshed):
-                return defer("PR author is not in the allowlist")
+                return defer("PR author is not in the allowlist", retryable=False)
             decision = evaluate_dependency_bot_admission(self.github, repo_name, refreshed, config)
             if not decision.allowed:
                 result.target_outcome = decision.outcome
                 result.refill_retry_required = decision.outcome is ExplicitTargetOutcome.DEFERRED
+                result.retry_not_before = time.time() + 60 if result.refill_retry_required else None
                 result.target_reason = decision.reason
                 result.actions = [decision.reason]
                 _record_pr_stage_result(number, "pr.dependency-bot-admission", f"pr#{number} dependency-bot admission", Outcome(decision.outcome.value) if decision.outcome else Outcome.SKIPPED, {"reason": decision.reason})
@@ -8324,8 +8329,15 @@ class AutomationEngine:
             owner = slots.resolve_owner("pr", refreshed, self.github)
             if owner != pr_owner and not locks.enter_context(slots.try_serialize(owner)):
                 return defer("Dependabot logical owner is already being processed")
-            if any(slots.active_execution_ids(retained_owner) or slots.has_provider_sessions(retained_owner) for retained_owner in {owner, pr_owner}) or self._get_local_job_store().unsettled_pr_repair(repo_name, number) is not None:
-                return defer("Dependabot PR has retained implementation or repair ownership")
+            if any(slots.active_execution_ids(retained_owner) for retained_owner in {owner, pr_owner}):
+                return defer("Dependabot PR has retained implementation execution ownership")
+            if any(slots.has_provider_sessions(retained_owner) for retained_owner in {owner, pr_owner}):
+                # Membership is not a provider liveness observation. In particular,
+                # standalone PR membership has no independent cleanup scanner;
+                # retain it visibly without introducing provider-status polling.
+                return defer("Dependabot PR has retained provider membership; independent lifecycle settlement is required", retryable=False)
+            if self._get_local_job_store().unsettled_pr_repair(repo_name, number) is not None:
+                return defer("Dependabot PR has retained local repair ownership")
             _record_pr_stage_result(number, "pr.implementation-admission", f"pr#{number} implementation admission", Outcome.COMPLETED, {"owner": pr_owner.key, "capacity_class": "slotless-dependabot", "feature_slot_reserved": False})
             return self._process_single_candidate_reserved(repo_name, candidate, config, jules_mode, force_adversarial_validation=explicit_only and force, advance_issue_attempt=advance_issue_attempt)
 

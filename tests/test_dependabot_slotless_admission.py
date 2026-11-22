@@ -7,6 +7,7 @@ admission, slot persistence, CI aggregation and merge receipts are production co
 import asyncio
 import copy
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from threading import Event
@@ -20,6 +21,7 @@ from fastapi import FastAPI
 from auto_coder.automation_config import AutomationConfig, Candidate, ExplicitTargetOutcome, PRProcessingOutcome
 from auto_coder.automation_engine import AutomationEngine
 from auto_coder.dashboard import init_dashboard
+from auto_coder.entity_invalidation import DurableInvalidationQueue, EntityIdentity
 from auto_coder.execution_trace import EventKind, TraceCollector
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.merge_operation_state import EffectName, EffectState, MergeOperationIdentity, MergeOperationStore
@@ -255,6 +257,151 @@ def test_durable_queued_worker_refreshes_and_processes_dependabot_at_full_capaci
     assert operation is not None
     assert operation.effect(EffectName.MERGE).state is EffectState.CONFIRMED_COMPLETE
     assert flow.slots.storage_path.read_bytes() == flow.before
+
+
+async def _wait_for_worker(predicate):
+    for _ in range(400):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("Durable PR worker did not reach the expected state")
+
+
+def test_active_execution_retries_but_provider_membership_alone_does_not(flow):
+    owner = ImplementationOwner("pr", NUMBER)
+    execution = flow.slots.start_execution(owner, bypass_capacity=True)
+    assert flow.slots.record_provider_session(owner, "retained-session")
+    before = flow.slots.storage_path.read_bytes()
+    active = flow.run()
+    assert active.retry_not_before is not None
+    assert flow.slots.storage_path.read_bytes() == before
+    flow.slots.finish_execution(owner, execution)
+    before = flow.slots.storage_path.read_bytes()
+    membership_only = flow.run()
+    assert membership_only.retry_not_before is None
+    assert "retained provider membership" in membership_only.target_reason
+    assert flow.slots.storage_path.read_bytes() == before
+    assert flow.slots.has_provider_sessions(owner)
+    assert not any(request.method != "GET" for request in flow.requests)
+
+
+@pytest.mark.parametrize("hold", ["execution", "lock", "initial-refresh", "serialized-refresh", "serialized-policy-refresh"])
+def test_first_green_event_retries_durably_after_temporary_hold_without_webhook(flow, tmp_path, monkeypatch, hold):
+    clock = [time.time()]
+    monkeypatch.setattr("auto_coder.automation_engine.time.time", lambda: clock[0])
+    path = tmp_path / "retry.db"
+    engine = flow.engine
+    engine.invalidations = DurableInvalidationQueue(path)
+    identity = EntityIdentity(REPOSITORY, "pr", NUMBER)
+    owner = ImplementationOwner("pr", NUMBER)
+    execution = flow.slots.start_execution(owner, bypass_capacity=True) if hold == "execution" else None
+    lock = ExitStack()
+    if hold == "lock":
+        lock.enter_context(flow.slots.serialize(owner))
+    reads = []
+    fail_at = {"initial-refresh": 2, "serialized-refresh": 4, "serialized-policy-refresh": 5}.get(hold)
+
+    def metadata(*_):
+        reads.append(clock[0])
+        if len(reads) == fail_at:
+            raise RuntimeError("temporarily unavailable authoritative metadata")
+        return copy.deepcopy(flow.pr)
+
+    monkeypatch.setattr(engine.github, "get_pull_request_metadata_strict", metadata)
+
+    async def scenario():
+        await engine.invalidate_entity(REPOSITORY, "pr", NUMBER)
+        worker = asyncio.create_task(engine._worker_loop(REPOSITORY, 0, "pr"))
+        scheduler = asyncio.create_task(engine._invalidation_loop(REPOSITORY))
+        try:
+            await _wait_for_worker(lambda: engine.invalidations.get_deferred(identity) is not None and engine.active_workers.get(0) is None)
+            deferred = engine.invalidations.get_deferred(identity)
+            assert deferred.retry_not_before == clock[0] + 60
+            assert deferred.api_origin == "pr-processing-cycle"
+            assert engine.invalidations.pending_count(REPOSITORY) == 1
+            assert engine.invalidations._connection.execute("SELECT capacity_waiting FROM entity_invalidations").fetchone() == (0,)
+            assert flow.store.get(flow.identity) is None
+            assert not any(request.method != "GET" for request in flow.requests)
+            assert engine.invalidations._connection.execute("SELECT COUNT(*) FROM ci_watches").fetchone() == (0,)
+            before_reads = len(reads)
+            for _ in range(3):
+                await engine._enqueue_pending_invalidations(REPOSITORY)
+            assert len(reads) == before_reads
+            if execution is not None:
+                flow.slots.finish_execution(owner, execution)
+            lock.close()
+            after_release = flow.slots.storage_path.read_bytes()
+            # Reopen persisted work; neither another webhook nor a capacity
+            # wake is needed, and restarting must not erase the retry bound.
+            engine.invalidations = DurableInvalidationQueue(path)
+            engine.invalidations.recover(REPOSITORY)
+            clock[0] += 59
+            assert engine._invalidation_wake_event is not None
+            engine._invalidation_wake_event.set()
+            await asyncio.sleep(0.02)
+            assert len(reads) == before_reads
+            assert engine.queue.qsize() == 0
+            clock[0] += 1
+            engine._invalidation_wake_event.set()
+            await _wait_for_worker(lambda: engine.invalidations.pending_count(REPOSITORY) == 0)
+            assert len(reads) > before_reads
+            assert flow.store.get(flow.identity).effect(EffectName.MERGE).state is EffectState.CONFIRMED_COMPLETE
+            assert flow.slots.storage_path.read_bytes() == after_release
+        finally:
+            lock.close()
+            worker.cancel()
+            scheduler.cancel()
+            await asyncio.gather(worker, scheduler, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("hold", ["provider-membership", "policy", "identity"])
+def test_non_timed_slotless_holds_are_observable_without_retry_loop(flow, tmp_path, monkeypatch, hold):
+    engine = flow.engine
+    engine.invalidations = DurableInvalidationQueue(tmp_path / "no-retry.db")
+    identity = EntityIdentity(REPOSITORY, "pr", NUMBER)
+    if hold == "provider-membership":
+        owner = ImplementationOwner("pr", NUMBER)
+        execution = flow.slots.start_execution(owner, bypass_capacity=True)
+        flow.slots.finish_execution(owner, execution)
+        assert flow.slots.record_provider_session(owner, "retained-session")
+    elif hold == "policy":
+        flow.config.IGNORE_DEPENDABOT_PRS = True
+    reads = []
+
+    def metadata(*_):
+        reads.append(True)
+        pr = copy.deepcopy(flow.pr)
+        if hold == "identity" and len(reads) >= 4:
+            pr["user"]["login"] = "human"
+        return pr
+
+    monkeypatch.setattr(engine.github, "get_pull_request_metadata_strict", metadata)
+    before = flow.slots.storage_path.read_bytes()
+
+    async def scenario():
+        await engine.invalidate_entity(REPOSITORY, "pr", NUMBER)
+        worker = asyncio.create_task(engine._worker_loop(REPOSITORY, 0, "pr"))
+        try:
+            await _wait_for_worker(lambda: engine.invalidations.pending_count(REPOSITORY) == 0)
+            assert engine.invalidations.get_deferred(identity) is None
+            read_count = len(reads)
+            await engine._enqueue_pending_invalidations(REPOSITORY)
+            assert len(reads) == read_count
+            assert engine.queue.qsize() == 0
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert flow.slots.storage_path.read_bytes() == before
+    assert not any(request.method != "GET" for request in flow.requests)
+    if hold == "provider-membership":
+        events = TraceCollector().get_snapshot(repository=REPOSITORY, item_type="pr", item_number=NUMBER).events
+        admission = [event for event in events if event.kind == EventKind.STAGE_RESULT.value and event.stage_id == "pr.implementation-admission"]
+        assert admission[-1].facts["retry_not_before"] is None
+        assert "retained provider membership" in admission[-1].facts["reason"]
 
 
 @patch("auto_coder.dashboard.ui")
