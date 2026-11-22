@@ -59,13 +59,14 @@ for delivered scope and limitations.
 
 ## Focused verification
 
-The final production-boundary selection passed **528 tests in 30.94s**, exit 0:
+The final production-boundary selection passed **561 tests in 37.39s**, exit 0:
 
 ```bash
 env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
   AUTO_CODER_LOG_FILE=/workspace/auto-coder-runtime/logs/auto-coder.log \
   AUTO_CODER_DISABLE_AUTO_UPDATE=1 PATH=/workspace/auto-coder/.venv/bin:$PATH \
   bash scripts/test.sh --ci-tests-only \
+  tests/test_dependabot_slotless_admission.py \
   tests/test_codex_cloud_client.py \
   tests/test_pr_no_commit_recovery.py \
   tests/test_codex_cloud_pr_review_flow.py \
@@ -88,7 +89,7 @@ env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
 ```
 
 `.venv/bin/mypy --config-file pyproject.toml -p auto_coder` passed across **376
-source files**. Black check, isort check, flake8 on all eleven changed Python
+source files**. Black check, isort check, flake8 on all twelve integration-relevant Python
 files, and `git diff --check`, passed. Test transports were local controlled
 boundaries; no live provider follow-up was run. The test collector could not
 save its redundant JSON log under the read-only home directory; test execution
@@ -107,3 +108,10 @@ exact shared source claim. Missing keys, a simulated peer whole-file overwrite,
 malformed exact entries and mixed confirmed/unknown identities stay fenced.
 Native delivery queries distinguish an absent key from a malformed exact entry;
 neither query is used as positive current-send rejection evidence.
+
+Latest main `b89c31f7ec3c124907a4cc7ffbad21d87950848d` (#2900) was
+merged normally into the existing feature branch without conflicts. The bounded
+selection includes its slotless Dependabot admission and durable retry tests
+alongside checkpoint/native journal and ordinary worker scheduling regressions.
+The unrelated hosted `/proc` observation test remains unchanged. Publication uses
+a normal fast-forward push; the checkpoint PR itself is not merged.

@@ -3550,6 +3550,15 @@ def _process_pull_request_impl(
         )
 
 
+def _is_feature_slotless_dependabot_pr(pr_obj: Any) -> bool:
+    """Only the actual GitHub Dependabot author is exempt from feature slots."""
+    if (get_pr_author_login(pr_obj) or "").lower() != "dependabot[bot]":
+        return False
+    if isinstance(pr_obj, dict) and isinstance(pr_obj.get("user"), dict):
+        return str(pr_obj["user"].get("login") or "").lower() == "dependabot[bot]"
+    return True
+
+
 def _is_dependabot_pr(pr_obj: Any) -> bool:
     """Return True if the PR is authored by a dependency bot.
 
