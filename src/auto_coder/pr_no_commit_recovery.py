@@ -83,7 +83,7 @@ class ContinuationAdapter(Protocol):
 
 
 class NoCommitRecovery:
-    """Use one existing delivery file and lock for admission and send receipts."""
+    """Use the existing delivery document for guarded admission and send receipts."""
 
     def __init__(self, path: Path):
         self.path = path
@@ -174,14 +174,14 @@ class NoCommitRecovery:
         with review_repair_state_lock(self.path):
             return any(record.pr_number == pr_number and record.status == "accepted" and record.ordinal < MAX_CONTINUATIONS and now >= record.accepted_at + INTERVAL_SECONDS for record in self._records().values())
 
-    def end_for_new_request(self, pr_number: int) -> None:
-        """Other PR repair producers invalidate recovery without becoming producers."""
+    def end_series(self, pr_number: int, outcome: str = "superseded_request") -> None:
+        """Retire known terminal/superseded work without allocating a budget."""
         with pr_correction_lock(self.path, pr_number):
             records = self._records()
             changed = False
             for record in records.values():
                 if record.pr_number == pr_number and record.status != "ended":
-                    record.status, record.outcome = "ended", "superseded_request"
+                    record.status, record.outcome = "ended", outcome
                     changed = True
             if changed:
                 self._save(records, pr_number)

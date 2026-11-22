@@ -197,3 +197,21 @@ def test_missing_observed_baseline_does_not_poison_delivery_state(series):
     with pytest.raises(ValueError, match="observed PR baseline"):
         series.record_acceptance("jules", "session-89", replace(TARGET, head_sha=""), ("new",), "fix", 1000.0)
     assert snapshot(series)[0]["status"] == "accepted"
+
+
+def test_known_terminal_pr_callback_prevents_reopen_from_reviving_old_series(series):
+    from unittest.mock import MagicMock, patch
+
+    from auto_coder.automation_config import AutomationConfig
+    from auto_coder.automation_engine import AutomationEngine
+
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=series.path),
+        patch("auto_coder.automation_engine.schedule_reevaluation_for_pr_owner") as reclamation,
+    ):
+        engine._schedule_pr_owner_reclamation("owner/repo", {"number": 88, "state": "closed"})
+    reclamation.assert_called_once()
+    assert (snapshot(series)[0]["status"], snapshot(series)[0]["outcome"]) == ("ended", "closed")
+    # Reopen with the same task/head does not erase the known terminal outcome.
+    assert series.checkpoint("jules", "session-88", TARGET, lambda: 50000.0, lambda: "eligible", lambda *_: pytest.fail("revived")).reason == "no_accepted_request"

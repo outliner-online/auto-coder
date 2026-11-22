@@ -39,7 +39,8 @@ when 3600 seconds have passed since confirmed acceptance, at most three addition
 sends. New review requests and other existing PR corrective sends invalidate the
 old series under the same guard. Other origins do not become registration
 producers. Closure, changed owner/baseline, an explicit addressed outcome or the
-cap stops recovery. A head change invalidates the baseline; it does not classify
+cap stops recovery. Known terminal PR callbacks persist closure so reopening
+does not revive that old series. A head change invalidates the baseline; it does not classify
 an empty, bot, base-merge or unrelated commit as implementation progress.
 
 No new engine, DB, slot model, provider execution reader or live selection/timeout
@@ -50,7 +51,7 @@ for delivered scope and limitations.
 
 ## Focused verification
 
-The final production-boundary selection passed **328 tests in 21.75s**, exit 0:
+The final production-boundary selection passed **329 tests in 19.92s**, exit 0:
 
 ```bash
 env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
@@ -71,7 +72,7 @@ env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
 ```
 
 `.venv/bin/mypy --config-file pyproject.toml -p auto_coder` passed across **376
-source files**. Black check, isort check, flake8 on all seven changed Python
+source files**. Black check, isort check, flake8 on all eight changed Python
 files, and `git diff --check`, passed. Test transports were local controlled
 boundaries; no live provider follow-up was run. The test collector could not
 save its redundant JSON log under the read-only home directory; test execution

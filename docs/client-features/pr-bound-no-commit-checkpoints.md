@@ -35,7 +35,9 @@ whose delivery is unknown also prevents the old policy from sending more work.
 Any observed head/branch/base change invalidates the old series. This is not a
 claim that an arbitrary bot, merge, empty or unrelated commit implemented the
 correction; new work requires ordinary admission against current evidence.
-Closure or changed ownership ends the series. The existing addressed marker on
+Closure or changed ownership ends the series. Existing authoritative terminal-PR
+callbacks persist closure even outside review processing, so reopening cannot
+revive the old series. The existing addressed marker on
 the final implementer reply ends ordinary thread recovery with
 `acknowledged_outcome`, leaving independent validation responsible for the
 finding. Natural-language completion claims and provider READY/PAUSED names are
@@ -67,7 +69,7 @@ policy remain intact. The unused CloudTaskEngine restart sweep is removed.
 `tests/test_pr_no_commit_recovery.py` covers 59/60 minutes, acceptance-relative
 repeats, the three-cap across restart/concurrency, unknown sends, quota refusal,
 supersession, baseline changes, terminal outcomes, unsupported providers and
-preservation of source receipts. `tests/test_codex_cloud_pr_review_flow.py`
+preservation of source receipts, plus the terminal-PR callback and reopen fence. `tests/test_codex_cloud_pr_review_flow.py`
 exercises accepted production handoff and duplicate processing with all three
 native signatures, current-scope refresh, explicit addressed outcome and the cap.
 `tests/test_dashboard_observability.py::test_pr_no_commit_checkpoint_reaches_mounted_detail`

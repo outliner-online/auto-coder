@@ -8685,6 +8685,15 @@ class AutomationEngine:
         for the caller's own (already-authorized) completion.
         """
         try:
+            from .pr_processor import _retire_closed_cloud_checkpoint
+
+            number = pr_data["number"]
+            if type(number) is not int or number <= 0:
+                raise ValueError("Terminal PR checkpoint retirement requires a positive PR number")
+            _retire_closed_cloud_checkpoint(repo_name, number)
+        except Exception as exc:
+            logger.warning(f"Could not retire closed-PR checkpoint series in {repo_name}: {exc}")
+        try:
             slots = self._get_implementation_slots(repo_name)
             schedule_reevaluation_for_pr_owner(pr_data, slots, self.github, reason=reason)
         except Exception as exc:

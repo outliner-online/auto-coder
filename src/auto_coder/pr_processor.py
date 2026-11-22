@@ -2490,8 +2490,17 @@ def _new_pr_correction_request(repository: str, pr_number: int):
     path = _cloud_review_repair_state_path(repository)
     with pr_correction_lock(path, pr_number):
         if path.exists():
-            NoCommitRecovery(path).end_for_new_request(pr_number)
+            NoCommitRecovery(path).end_series(pr_number)
         yield
+
+
+def _retire_closed_cloud_checkpoint(repository: str, pr_number: int) -> None:
+    """Known closure must not revive the old series if the PR is reopened."""
+    from .pr_no_commit_recovery import NoCommitRecovery
+
+    path = _cloud_review_repair_state_path(repository)
+    if path.exists():
+        NoCommitRecovery(path).end_series(pr_number, "closed")
 
 
 def _send_followup_with_quota_admission(client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, recovery_provider: str = "", checkpoint: bool = False) -> bool:
