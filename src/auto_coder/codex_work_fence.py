@@ -91,8 +91,12 @@ def stable_codex_operation_id(kind: str, source_request_id: str) -> str:
     return f"{kind}:{digest}"
 
 
-def production_codex_fence(repository: str, task_id: str, kind: str, source_request_id: str, causal_baseline: Optional[str] = None) -> tuple[CodexWorkFence, CodexWorkIdentity]:
-    """Resolve a task through durable CloudRun and current slot evidence."""
+def production_codex_fence(repository: str, task_id: str, kind: str, source_request_id: str, causal_baseline: Optional[str] = None, *, reconcile: bool = True) -> tuple[CodexWorkFence, CodexWorkIdentity]:
+    """Resolve a task through durable CloudRun and current slot evidence.
+
+    Scoped admission may read existing accounting without enriching old records.
+    Actual transport keeps the default reconciliation and registration guards.
+    """
     from .cloud_run import CloudRunRepository
     from .codex_work_reconstruction import production_codex_reconstructor
     from .implementation_slots import ImplementationSlotRepository
@@ -112,7 +116,8 @@ def production_codex_fence(repository: str, task_id: str, kind: str, source_requ
         raise ImplementationSlotUnavailable("Codex task owner has no active incarnation")
     reconstructor = production_codex_reconstructor(repository, run.issue_number)
     accounting = CodexWorkAccounting(slots, reconstructor.consistency_ids)
-    accounting.reconcile_from_receipt(owner, incarnation, reconstructor.reconstruct())
+    if reconcile:
+        accounting.reconcile_from_receipt(owner, incarnation, reconstructor.reconstruct())
     identity = CodexWorkIdentity(
         repository,
         run.issue_number,

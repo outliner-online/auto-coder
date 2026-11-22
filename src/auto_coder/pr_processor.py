@@ -10148,11 +10148,13 @@ def _record_review_feedback_state(
         # receipts or an explicit release by the owning sender may clear an ID.
         pending = (pending_additions | _load_pending_review_feedback(state_path)) - delivered - (remove_pending or set())
         state_path.parent.mkdir(parents=True, exist_ok=True)
+        previous_document = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
         temporary = state_path.with_suffix(f"{state_path.suffix}.{os.getpid()}.tmp")
         temporary.write_text(
             json.dumps(
                 {
-                    "no_commit_series": json.loads(state_path.read_text(encoding="utf-8")).get("no_commit_series", {}) if state_path.exists() else {},
+                    **({"scoped_review_followups": previous_document["scoped_review_followups"]} if "scoped_review_followups" in previous_document else {}),
+                    "no_commit_series": previous_document.get("no_commit_series", {}),
                     "delivered_feedback": sorted(delivered),
                     "pending_feedback": sorted(pending),
                     "validation_generations": validation_generations if validation_generations is not None else _load_review_validation_generations(state_path),
@@ -10232,47 +10234,6 @@ def _reconcile_codex_review_feedback(client: Any, provider: str, task_id: str, f
         elif outcome is not FollowUpDeliveryOutcome.NOT_DELIVERED and uncertain is not None:
             uncertain.add(identity)
     return delivered
-
-
-def _independent_unsent_review_feedback(repo_name: str, pr_number: int, head_sha: str, findings: Sequence[tuple[ReviewThread, ReviewThreadComment, str]], uncertain: set[str]) -> set[str]:
-    """Read existing identity resolutions; never infer independence from a new ID.
-
-    This only partitions a mixed Codex batch. Ordinary unmixed admission keeps
-    its existing policy. Missing/edited/ambiguous scope evidence holds the entry
-    for independent resolution, without modifying either delivery journal.
-    """
-    try:
-        snapshot = CanonicalPRBlockerLedger().get_snapshot("https://api.github.com", repo_name, pr_number, require_retained_state=True)
-        by_identity = {identity: comment for _thread, comment, identity in findings}
-        if not uncertain.issubset(by_identity):
-            return set()
-        old_blockers: set[str] = set()
-        for identity in uncertain:
-            comment = by_identity[identity]
-            if comment.database_id is None:
-                return set()
-            blockers = snapshot.get_blockers_for_alias("external_review_comment", f"comment:{comment.database_id}")
-            if not blockers:
-                return set()
-            old_blockers.update(blocker.blocker_id for blocker in blockers)
-        eligible: set[str] = set()
-        for _thread, comment, identity in findings:
-            if identity in uncertain or comment.database_id is None:
-                continue
-            anchor = f"comment:{comment.database_id}"
-            blockers = snapshot.get_blockers_for_alias("external_review_comment", anchor)
-            # The resolution must still describe this exact source prose. A
-            # wording edit or an associated/compound scope is not a fresh send.
-            if len(blockers) != 1 or blockers[0].blocker_id in old_blockers or blockers[0].accepted_scope.description != comment.body:
-                continue
-            records = [record for record in snapshot.reconciliation_records if record.observation_identity == anchor]
-            latest = max(records, key=lambda record: record.ledger_revision, default=None)
-            if latest is not None and latest.decision == "DISTINCT_DEFECT" and latest.evidence and latest.reviewed_head_sha == head_sha and old_blockers.issubset(latest.blocker_ids_considered):
-                eligible.add(identity)
-        return eligible
-    except Exception as exc:
-        logger.warning(f"Mixed review feedback independence evidence is unavailable: {exc}")
-        return set()
 
 
 _LOCAL_REPAIR_MARKERS = ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")
@@ -10819,19 +10780,8 @@ def _delegate_cloud_review_thread_repair(
     if not pending:
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: a prior follow-up has unconfirmed durable receipt status; duplicate delivery was suppressed"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
 
-    isolation_head = ""
-    if provider == "codex-cloud" and indeterminate:
-        # Producer claims dominate native absence, including claims whose
-        # sources are no longer in the current selected feedback list.
-        prior = {identity for identity in indeterminate if identity.startswith(prefix)}
-        if prior:
-            isolation_head = str(pr_data.get("head", {}).get("sha") or "")
-            independent = _independent_unsent_review_feedback(repo_name, pr_number, isolation_head, findings, prior)
-            held = [entry for entry in pending if entry[2] not in independent]
-            blocked.extend(held)
-            pending = [entry for entry in pending if entry[2] in independent]
-            if not pending:
-                return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: local duplicate guard held mixed feedback for independent scope resolution; no provider request was made"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
+    if provider == "codex-cloud" and any(identity.startswith(prefix) for identity in indeterminate):
+        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: local duplicate guard held mixed feedback for independent scope resolution; no provider request was made"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
 
     pending_identities = {identity for _thread, _comment, identity in pending}
     work_identity = hashlib.sha256("\n".join(sorted(pending_identities)).encode()).hexdigest()
@@ -10869,11 +10819,6 @@ def _delegate_cloud_review_thread_repair(
         with _cloud_review_delivery_lock:
             _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: current PR head/base branch metadata is unavailable"])
-
-    if isolation_head and target.head_sha != isolation_head:
-        with _cloud_review_delivery_lock:
-            _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
-        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: independent feedback scope belongs to a different head"])
 
     canonical_pending = [(thread, comment, identity) for thread, comment, identity in pending if comment.body.startswith(("### Auto-Coder adversarial finding", "### Auto-Coder material test-oracle gap"))]
     has_canonical_marker = any(_BLOCKER_ID_RE.search(comment.body) for _thread, comment, _identity in canonical_pending)
@@ -11170,7 +11115,10 @@ def _record_adjudication_effect_stage(pr_number: int, effect_kind: str, context_
     facts: Dict[str, Any] = {"effect_kind": effect_kind, "context_id": context_id, "decision_id": decision_id, "status": status}
     if gap_id:
         facts["gap_id"] = gap_id
-    _record_pr_stage(pr_number, "pr.review-adjudication-effect", f"pr#{pr_number} review adjudication effect ({effect_kind})", _ADJUDICATION_EFFECT_OUTCOMES.get(status, Outcome.UNKNOWN), facts)
+    outcome = _ADJUDICATION_EFFECT_OUTCOMES.get(status, Outcome.UNKNOWN)
+    if effect_kind == "SCOPED_FIX":
+        outcome = Outcome.ACCEPTED_HANDOFF if status == "accepted" else Outcome.FAILED if status == "remote_rejected" else Outcome.DEFERRED if status.startswith("held_") or status == "already_accepted" else Outcome.UNKNOWN
+    _record_pr_stage(pr_number, "pr.review-adjudication-effect", f"pr#{pr_number} review adjudication effect ({effect_kind})", outcome, facts)
 
 
 def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: Dict[str, Any], github_client: Any) -> Tuple[PRActionList, bool]:
@@ -11218,7 +11166,69 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
             effect_store.finish(reopen.context_id, "reconciliation-required", gap_id=reopen.gap_id)
             _record_adjudication_effect_stage(pr_number, "REOPEN", reopen.context_id, reopen.decision_id, "reconciliation-required", gap_id=reopen.gap_id)
 
+    scoped_pass = any(item.scoped_followup is not None for item in plan.upholds)
     for upheld in plan.upholds:
+        if scoped_pass and upheld.scoped_followup is None:
+            actions.append(f"Unscoped adjudicated correction remains held during scoped admission for PR #{pr_number}")
+            continue
+        if upheld.scoped_followup is not None:
+            status = "held_source"
+            try:
+                from .scoped_review_followup import deliver_scoped_followup
+
+                origin = _resolve_cloud_task_origin(repo_name, pr_data, github_client).origin
+                scoped = upheld.scoped_followup
+                metadata = github_client.get_pull_request_repair_metadata_strict(repo_name, pr_number)
+                target = resolve_existing_pr_repair_target(repo_name, {**pr_data, "head": {"sha": metadata.head_sha, "ref": metadata.head_ref}, "base": {"ref": metadata.base_ref}})
+
+                def current_source() -> bool:
+                    if origin is None or origin.provider != "codex-cloud" or not origin.attribution_token or origin.task_id != scoped.task_id or _revalidate_cloud_origin(repo_name, pr_number, origin):
+                        return False
+                    live = github_client.get_pull_request_metadata_strict(repo_name, pr_number)
+                    if not isinstance(live, dict) or live.get("number") != pr_number or live.get("state") != "open" or live.get("merged") is True:
+                        return False
+                    fresh = github_client.get_pull_request_repair_metadata_strict(repo_name, pr_number)
+                    if fresh != metadata or fresh.head_sha != upheld.head_sha or not new_work_allowed():
+                        return False
+                    if effect_store.force_revalidation_needed(repo_name, pr_number):
+                        return False
+                    exhaustion = check_pr_repair_exhaustion(repo_name, pr_number)
+                    if exhaustion and exhaustion.is_exhausted:
+                        return False
+                    latest = _current_adjudication_ledger_snapshots(repo_name, pr_number, github_client)
+                    return any(item.context is not None and item.context.context_id == upheld.context_id and item.result.status is AdjudicationStatus.APPLICABLE and item.result.decision_id == upheld.decision_id and item.source_comment_id == upheld.source_comment_id for item in latest)
+
+                def send_scoped(prompt: str, identity: str) -> str:
+                    if origin is None:
+                        return "held_owner"
+                    try:
+                        accepted = _send_followup_with_quota_admission(origin.client, repo_name, scoped.task_id, prompt, (identity,), repair_target=target)
+                    except Exception:
+                        if origin.client.consume_followup_rejection(scoped.task_id, (identity,)):
+                            return "remote_rejected"
+                        raise
+                    if accepted:
+                        return "accepted"
+                    if origin.client.consume_followup_duplicate_guard(scoped.task_id, (identity,)):
+                        return "held_native_duplicate"
+                    if origin.client.consume_followup_rejection(scoped.task_id, (identity,)):
+                        return "remote_rejected"
+                    return "delivery_unknown"
+
+                if target is not None and origin is not None:
+                    status = deliver_scoped_followup(
+                        _cloud_review_repair_state_path(repo_name),
+                        target,
+                        upheld,
+                        current_source,
+                        send_scoped,
+                    )
+            except Exception as exc:
+                logger.warning(f"Scoped adjudicated correction remains fenced for PR #{pr_number}: {exc}")
+                status = "delivery_unknown"
+            actions.append(f"Scoped adjudicated correction for PR #{pr_number}: {status}")
+            _record_adjudication_effect_stage(pr_number, "SCOPED_FIX", upheld.context_id, upheld.decision_id, status)
+            continue
         try:
             effect_store.begin(upheld.context_id, repo_name, pr_number, upheld.decision_id, upheld.head_sha, upheld.contract_digest, "UPHOLD")
         except Exception as exc:

@@ -504,5 +504,11 @@ For mixed Codex review feedback, `unconfirmed_delivery_receipt` can also mean
 that intake held uncertain native identities or feedback whose independence is
 unresolved. Local duplicate suppression explicitly reports that no provider
 request was made. A remote rejection requires positive sender evidence. One new
-independently resolved request may be accepted while older uncertain requests
+explicitly scoped adjudicated request may be accepted while older uncertain requests
 remain fenced; acceptance does not resolve those threads or permit merging.
+
+Scoped v2 adjudicated corrections use the existing review-adjudication-effect
+stage with `SCOPED_FIX`. An accepted handoff confirms assignment only. Held or
+previously accepted claims do not imply another send; native duplicate guards
+remain distinct from positive remote rejection. The v1 operator form is unchanged.
+No automatic conversion of ordinary guidance or legacy uncertain work occurs.

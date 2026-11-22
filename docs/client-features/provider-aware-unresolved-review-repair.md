@@ -94,61 +94,21 @@ review/publication evidence remains the separate scope of #2753.
 
 ## Mixed native Codex delivery evidence
 
-Review intake retains uncertain native Codex journal outcomes as well as shared
-producer reservations before constructing the repair payload. Observed native
-uncertainty is retained additively as a producer claim, so later native key loss
-cannot erase the barrier; native evidence is not rewritten. Old unknown or
-partially delivered identities never enter a new batch. A missing native key
-cannot release a durable producer claim. The sender still checks the complete
-selected identity set immediately before sending.
+Intake fences uncertain native journal identities as well as shared producer
+claims. Observed uncertainty is retained additively as a shared claim, protecting
+against later native key loss. Legacy mixed comment batches stay held: new IDs,
+role declarations and different canonical UUIDs do not establish independent
+operations. No old uncertain request is released or replayed.
 
-When a Codex batch contains prior uncertain work, a new native comment can be
-sent separately only with an existing canonical ledger `DISTINCT_DEFECT`
-resolution covering every uncertain source in that PR/task. The latest decision
-must have evidence, match the evaluated head, and describe the exact current
-comment scope. The final live target must still have that head. This reads
-retained identity evidence; it does not run a new validation, poll the provider,
-or create a resolution. Missing sources/aliases, associated or ambiguous work,
-edited scope and stale-head decisions remain held for independent resolution.
-Different IDs, different prose and new role annotations alone do not prove that
-work is independent. Managed or legacy sources without those native alias
-resolutions also remain held in mixed batches. Ordinary batches without uncertain
-sources retain their existing admission policy.
+Explicit independently scoped corrections can instead use the authenticated v2
+adjudication path documented in [Scoped adjudicated cloud corrections](scoped-adjudicated-cloud-corrections.md).
+Its authority is the existing allowed adjudicator's explicit revision-bound
+correction, not a controller-created distinct-defect decision. The former
+unreachable `DISTINCT_DEFECT`-only predicate and artificially seeded positive
+fixture have been removed. Ordinary unmixed comment delivery is unchanged.
 
-Only independently eligible feedback enters the prompt, bundle and reservation.
-Existing uncertain evidence stays intact. Confirmed new receipts suppress later
-evaluations and reconstructed clients. A local sender duplicate guard has its
-own single-use, exact-task/full-identity diagnostic; it is never reported as a
-remote rejection and cannot release a reservation. Only the existing positive
-remote rejection receipt authorizes that release.
-
-The production-entry controlled-transport regression
-`test_production_mixed_native_feedback_only_sends_resolved_unsent_source` covers
-independently resolved new work, missing native keys with durable old/new claims,
-unknown/malformed new entries, associated/ambiguous and edited scope, a stale or
-changed head, an unresolved entry beside eligible work, a sender-time race and
-repeated evaluations with reconstructed clients. It asserts zero old sends and
-unchanged old journal entries. The unmixed positive control needs no additional
-identity resolution. This is separate from hourly checkpoints for confirmed
-requests; no old request is replayed under a new identity.
-
-### Unresolved production prerequisite
-
-The mixed-batch positive regression above directly seeds its `DISTINCT_DEFECT`
-resolution. Current supported external-comment intake persists native aliases
-through `admit_blocker`, which does not create that decision. The ordinary
-finding reconciler also admits distinct observations through `admit_blocker`;
-its `reconcile_observation` call persists `ASSOCIATE`. No supported producer has
-been established for the exact current-head/native-comment resolution this
-consumer requires. The partition therefore is not demonstrated as a working
-production recovery path for a backlog of distinct native comments.
-
+A local native duplicate guard has a single-use exact-task/full-identity outcome,
+separate from remote rejection. Only positive native rejection evidence can
+support a remote-refusal label. The production ordinary-intake regression
 `test_supported_external_feedback_producer_cannot_supply_mixed_split_resolution`
-starts from ordinary comment input, reaches the real producer and controlled
-native transport, then adds different unsent feedback after the original POST
-becomes uncertain. It verifies that no qualifying decision is produced, new
-feedback remains held, and the old request is not replayed. Supplying a fabricated
-ledger decision is not an operational remedy. A supported source-resolution
-producer and its positive integrated acceptance case remain a concrete blocker.
-A publication-only step within the same correction scope is also unmodelled by
-this predicate; generic same-task follow-up cannot isolate it automatically.
+continues to verify that raw new comments do not acquire this authority.

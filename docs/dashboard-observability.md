@@ -3868,21 +3868,36 @@ processing origin or event schema and leaves Jules unchanged.
 
 ## Mixed Codex review delivery evidence
 
-Native uncertainty now participates in the existing review intake partition,
-alongside shared producer claims. Only an independently resolved unsent source
-can produce `pr.repair-delegation` acceptance beside old uncertain work. A held
-mixed batch and a sender-time local duplicate guard use the existing
-`unconfirmed_delivery_receipt` reason and existing outcome/merge protection. The
-action text explicitly identifies local suppression before a provider request;
-remote rejection remains tied to positive rejection evidence. No stage, public
-fact, renderer field, provider poll or new scheduled verification is introduced.
+Native uncertainty participates in ordinary review intake alongside shared
+producer claims. Mixed ordinary comments remain held with the existing
+`unconfirmed_delivery_receipt` reason; new IDs or different canonical UUIDs do
+not authorize separation. Sender-time local guards remain distinct from remote
+rejection. `test_supported_external_feedback_producer_cannot_supply_mixed_split_resolution`
+exercises this hold through the production merge entry, real source retention,
+native journal and controlled transport, without changing old evidence. The
+existing public projection regression verifies the same reason reaches the view.
+Explicit scoped sources use the separate existing adjudication stage below.
 
-Run `bash scripts/test.sh --ci-tests-only tests/test_codex_cloud_pr_review_flow.py tests/test_codex_cloud_client.py tests/test_pr_no_commit_recovery.py tests/test_pr_repair_bootstrap_policy_no_replay.py tests/test_dashboard_observability.py`.
-`test_production_mixed_native_feedback_only_sends_resolved_unsent_source` enters
-the passing-CI production merge gate, real review intake, canonical ledger and
-native sender/journal with a controlled transport. It checks the existing stage
-reason for holds, one accepted independently resolved request, repeated/restarted
-suppression, prior claims despite native absence, ambiguous/overlapping scope,
-head changes and a sender-time local guard. Old native evidence remains unchanged
-and unresolved threads continue to block merge. The existing public projection
-regression still verifies the same fixed reason reaches dashboard facts.
+## Explicit scoped adjudicated correction
+
+The existing `pr.review-adjudication-effect` stage carries `effect_kind=SCOPED_FIX`
+with its existing context/decision/status facts. `accepted` emits
+`ACCEPTED_HANDOFF` for assignment only; `already_accepted` and `held_*` emit
+`DEFERRED`. `delivery_unknown` emits `UNKNOWN`; `remote_rejected` emits `FAILED`
+only with positive exact-send rejection evidence. Local duplicate suppression is
+`held_native_duplicate`, never a remote refusal. No payload, older snapshot text,
+owner incarnation, new endpoint or public fact field is exposed. The existing
+stage renderer displays these facts without a schema or renderer change.
+
+The native v2 source is consumed through the existing adjudication reader.
+`scoped_review_followups` in the shared review-delivery document is the additional
+durable resumption claim; prior claims never cause another provider send. Ordinary
+v1 sources, receipt writers and #2889 recovery remain under their existing gates.
+See [Scoped adjudicated cloud corrections](client-features/scoped-adjudicated-cloud-corrections.md).
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_scoped_review_followup.py tests/test_review_adjudication.py tests/test_review_adjudication_orchestrator.py tests/test_pr_processor_adjudication_effects.py tests/test_review_feedback_marker.py tests/test_codex_cloud_pr_review_flow.py`.
+The new real-entry regression controls only source/GitHub/transport boundaries;
+actual owner, attribution, native journal, accounting and source persistence are
+used. It asserts old evidence preservation and one new emission across repeated
+reconstruction. The baseline adjudication regressions cover the existing stage
+contract. The scoped fixture also checks the emitted stage outcome/status mapping.
