@@ -10218,13 +10218,61 @@ def _record_pr_delivered_review_feedback(github_client: Optional[Any], repo_name
     return True
 
 
-def _reconcile_codex_review_feedback(client: Any, provider: str, task_id: str, feedback: Sequence[str]) -> set[str]:
+def _reconcile_codex_review_feedback(client: Any, provider: str, task_id: str, feedback: Sequence[str], *, uncertain: Optional[set[str]] = None) -> set[str]:
     """Return stable feedback identities confirmed by Codex reconciliation."""
     if provider != "codex-cloud" or not hasattr(client, "get_followup_delivery"):
         return set()
     from .codex_wham_client import FollowUpDeliveryOutcome
 
-    return {identity for identity in feedback if client.get_followup_delivery(task_id, identity) is FollowUpDeliveryOutcome.DELIVERED}
+    delivered: set[str] = set()
+    for identity in feedback:
+        outcome = client.get_followup_delivery(task_id, identity)
+        if outcome is FollowUpDeliveryOutcome.DELIVERED:
+            delivered.add(identity)
+        elif outcome is not FollowUpDeliveryOutcome.NOT_DELIVERED and uncertain is not None:
+            uncertain.add(identity)
+    return delivered
+
+
+def _independent_unsent_review_feedback(repo_name: str, pr_number: int, head_sha: str, findings: Sequence[tuple[ReviewThread, ReviewThreadComment, str]], uncertain: set[str]) -> set[str]:
+    """Read existing identity resolutions; never infer independence from a new ID.
+
+    This only partitions a mixed Codex batch. Ordinary unmixed admission keeps
+    its existing policy. Missing/edited/ambiguous scope evidence holds the entry
+    for independent resolution, without modifying either delivery journal.
+    """
+    try:
+        snapshot = CanonicalPRBlockerLedger().get_snapshot("https://api.github.com", repo_name, pr_number, require_retained_state=True)
+        by_identity = {identity: comment for _thread, comment, identity in findings}
+        if not uncertain.issubset(by_identity):
+            return set()
+        old_blockers: set[str] = set()
+        for identity in uncertain:
+            comment = by_identity[identity]
+            if comment.database_id is None:
+                return set()
+            blockers = snapshot.get_blockers_for_alias("external_review_comment", f"comment:{comment.database_id}")
+            if not blockers:
+                return set()
+            old_blockers.update(blocker.blocker_id for blocker in blockers)
+        eligible: set[str] = set()
+        for _thread, comment, identity in findings:
+            if identity in uncertain or comment.database_id is None:
+                continue
+            anchor = f"comment:{comment.database_id}"
+            blockers = snapshot.get_blockers_for_alias("external_review_comment", anchor)
+            # The resolution must still describe this exact source prose. A
+            # wording edit or an associated/compound scope is not a fresh send.
+            if len(blockers) != 1 or blockers[0].blocker_id in old_blockers or blockers[0].accepted_scope.description != comment.body:
+                continue
+            records = [record for record in snapshot.reconciliation_records if record.observation_identity == anchor]
+            latest = max(records, key=lambda record: record.ledger_revision, default=None)
+            if latest is not None and latest.decision == "DISTINCT_DEFECT" and latest.evidence and latest.reviewed_head_sha == head_sha and old_blockers.issubset(latest.blocker_ids_considered):
+                eligible.add(identity)
+        return eligible
+    except Exception as exc:
+        logger.warning(f"Mixed review feedback independence evidence is unavailable: {exc}")
+        return set()
 
 
 _LOCAL_REPAIR_MARKERS = ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")
@@ -10739,12 +10787,18 @@ def _delegate_cloud_review_thread_repair(
             # Excluded receipts are diagnostic evidence only: never reconcile
             # or persist these identities through the actionable delivery state.
             delivered.update(remote_delivered & selected_identities)
-            reconciled = _reconcile_codex_review_feedback(client, provider, task_id, [identity for _thread, _comment, identity in findings if identity not in delivered])
+            native_uncertain: set[str] = set()
+            reconciled = _reconcile_codex_review_feedback(client, provider, task_id, [identity for _thread, _comment, identity in findings if identity not in delivered], uncertain=native_uncertain)
             if reconciled:
                 delivered.update(reconciled)
                 _record_delivered_review_feedback(state_path, delivered)
                 _record_pr_delivered_review_feedback(github_client, repo_name, pr_number, sorted(reconciled), f"🤖 Auto-Coder: I reconciled previously submitted review feedback with the existing {provider} task.")
-            indeterminate = _load_pending_review_feedback(state_path) - delivered
+            retained_pending = _load_pending_review_feedback(state_path)
+            if native_uncertain - delivered - retained_pending:
+                # Retain the observed unknown claim before isolating new work.
+                # Later native key loss must not turn it into unsent feedback.
+                _record_review_feedback_state(state_path, delivered, native_uncertain - delivered)
+            indeterminate = (retained_pending | native_uncertain) - delivered
         except (OSError, ValueError) as exc:
             logger.warning(f"Could not read cloud review repair state: {exc}")
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: prior delivery state could not be read: {exc}"])
@@ -10764,6 +10818,20 @@ def _delegate_cloud_review_thread_repair(
     pending = [(thread, comment, identity) for thread, comment, identity in pending if identity not in indeterminate]
     if not pending:
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: a prior follow-up has unconfirmed durable receipt status; duplicate delivery was suppressed"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
+
+    isolation_head = ""
+    if provider == "codex-cloud" and indeterminate:
+        # Producer claims dominate native absence, including claims whose
+        # sources are no longer in the current selected feedback list.
+        prior = {identity for identity in indeterminate if identity.startswith(prefix)}
+        if prior:
+            isolation_head = str(pr_data.get("head", {}).get("sha") or "")
+            independent = _independent_unsent_review_feedback(repo_name, pr_number, isolation_head, findings, prior)
+            held = [entry for entry in pending if entry[2] not in independent]
+            blocked.extend(held)
+            pending = [entry for entry in pending if entry[2] in independent]
+            if not pending:
+                return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: local duplicate guard held mixed feedback for independent scope resolution; no provider request was made"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
 
     pending_identities = {identity for _thread, _comment, identity in pending}
     work_identity = hashlib.sha256("\n".join(sorted(pending_identities)).encode()).hexdigest()
@@ -10801,6 +10869,11 @@ def _delegate_cloud_review_thread_repair(
         with _cloud_review_delivery_lock:
             _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: current PR head/base branch metadata is unavailable"])
+
+    if isolation_head and target.head_sha != isolation_head:
+        with _cloud_review_delivery_lock:
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
+        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: independent feedback scope belongs to a different head"])
 
     canonical_pending = [(thread, comment, identity) for thread, comment, identity in pending if comment.body.startswith(("### Auto-Coder adversarial finding", "### Auto-Coder material test-oracle gap"))]
     has_canonical_marker = any(_BLOCKER_ID_RE.search(comment.body) for _thread, comment, _identity in canonical_pending)
@@ -10905,6 +10978,8 @@ def _delegate_cloud_review_thread_repair(
                 _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if definitely_rejected else None)
             except OSError:
                 pass
+        if provider == "codex-cloud" and client.consume_followup_duplicate_guard(task_id, tuple(sorted(pending_identities))):
+            return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: local duplicate guard suppressed the follow-up before any provider request"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
         detail = "rejected follow-up delivery" if definitely_rejected else "has unconfirmed follow-up delivery"
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' {detail}"])
 

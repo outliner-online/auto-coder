@@ -91,3 +91,43 @@ author login, task identity, receipt content or new API is added. The snapshot
 head is not a new authoritative head lookup, and no reason establishes provider
 liveness, completed repair, safe replay, or permission to merge. Private retained
 review/publication evidence remains the separate scope of #2753.
+
+## Mixed native Codex delivery evidence
+
+Review intake retains uncertain native Codex journal outcomes as well as shared
+producer reservations before constructing the repair payload. Observed native
+uncertainty is retained additively as a producer claim, so later native key loss
+cannot erase the barrier; native evidence is not rewritten. Old unknown or
+partially delivered identities never enter a new batch. A missing native key
+cannot release a durable producer claim. The sender still checks the complete
+selected identity set immediately before sending.
+
+When a Codex batch contains prior uncertain work, a new native comment can be
+sent separately only with an existing canonical ledger `DISTINCT_DEFECT`
+resolution covering every uncertain source in that PR/task. The latest decision
+must have evidence, match the evaluated head, and describe the exact current
+comment scope. The final live target must still have that head. This reads
+retained identity evidence; it does not run a new validation, poll the provider,
+or create a resolution. Missing sources/aliases, associated or ambiguous work,
+edited scope and stale-head decisions remain held for independent resolution.
+Different IDs, different prose and new role annotations alone do not prove that
+work is independent. Managed or legacy sources without those native alias
+resolutions also remain held in mixed batches. Ordinary batches without uncertain
+sources retain their existing admission policy.
+
+Only independently eligible feedback enters the prompt, bundle and reservation.
+Existing uncertain evidence stays intact. Confirmed new receipts suppress later
+evaluations and reconstructed clients. A local sender duplicate guard has its
+own single-use, exact-task/full-identity diagnostic; it is never reported as a
+remote rejection and cannot release a reservation. Only the existing positive
+remote rejection receipt authorizes that release.
+
+The production-entry controlled-transport regression
+`test_production_mixed_native_feedback_only_sends_resolved_unsent_source` covers
+independently resolved new work, missing native keys with durable old/new claims,
+unknown/malformed new entries, associated/ambiguous and edited scope, a stale or
+changed head, an unresolved entry beside eligible work, a sender-time race and
+repeated evaluations with reconstructed clients. It asserts zero old sends and
+unchanged old journal entries. The unmixed positive control needs no additional
+identity resolution. This is separate from hourly checkpoints for confirmed
+requests; no old request is replayed under a new identity.

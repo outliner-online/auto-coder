@@ -123,6 +123,7 @@ class CodexCloudClient(CloudTaskClientBase):
         self.attempts = (self.config_backend and self.config_backend.attempts) or 1
         self.wham_client: Optional[CodexWhamClient] = None
         self._followup_rejection: Optional[tuple[str, tuple[str, ...]]] = None
+        self._followup_duplicate_guard: Optional[tuple[str, tuple[str, ...]]] = None
         self.last_continued_at: Dict[str, float] = {}
 
     def _warn_unsupported_model(self, model_name: Optional[str]) -> None:
@@ -662,6 +663,12 @@ class CodexCloudClient(CloudTaskClientBase):
         """Carry the existing-PR producer contract into the durable sender journal."""
         return self.send_followup(task_id, message, logical_identities, repair_target=target)
 
+    def consume_followup_duplicate_guard(self, task_id: str, logical_identities: tuple[str, ...]) -> bool:
+        """Consume a local no-POST outcome separately from remote rejection."""
+        guarded = self._followup_duplicate_guard
+        self._followup_duplicate_guard = None
+        return guarded == (task_id, tuple(sorted(logical_identities)))
+
     def consume_followup_rejection(self, task_id: str, logical_identities: tuple[str, ...]) -> bool:
         """Consume positive rejection evidence from this client's latest send only.
 
@@ -674,6 +681,7 @@ class CodexCloudClient(CloudTaskClientBase):
     def send_followup(self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None) -> bool:
         """Send work once, reconciling any prior ambiguous POST before retrying."""
         self._followup_rejection = None
+        self._followup_duplicate_guard = None
         if not is_valid_codex_cloud_task_id(task_id) or not message:
             logger.warning("Codex Cloud follow-up requires a task ID and message")
             return False
@@ -708,6 +716,7 @@ class CodexCloudClient(CloudTaskClientBase):
             if states and all(state is FollowUpDeliveryOutcome.DELIVERED for state in states):
                 return True
             if any(state is not FollowUpDeliveryOutcome.NOT_DELIVERED for state in states):
+                self._followup_duplicate_guard = (task_id, tuple(sorted(identities)))
                 logger.warning("Codex follow-up contains an indeterminate or partially delivered logical identity; duplicate POST deferred")
                 return False
 

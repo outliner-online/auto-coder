@@ -499,3 +499,10 @@ The native-journal regression exercises definite refusal, indeterminate delivery
 a lost-key peer write, a malformed exact entry and mixed identities through the
 ordinary review producer. This hardens existing outcome reporting; it adds no
 processing origin or event schema and leaves Jules unchanged.
+
+For mixed Codex review feedback, `unconfirmed_delivery_receipt` can also mean
+that intake held uncertain native identities or feedback whose independence is
+unresolved. Local duplicate suppression explicitly reports that no provider
+request was made. A remote rejection requires positive sender evidence. One new
+independently resolved request may be accepted while older uncertain requests
+remain fenced; acceptance does not resolve those threads or permit merging.

@@ -3865,3 +3865,24 @@ The native-journal regression exercises definite refusal, indeterminate delivery
 a lost-key peer write, a malformed exact entry and mixed identities through the
 ordinary review producer. This hardens existing outcome reporting; it adds no
 processing origin or event schema and leaves Jules unchanged.
+
+## Mixed Codex review delivery evidence
+
+Native uncertainty now participates in the existing review intake partition,
+alongside shared producer claims. Only an independently resolved unsent source
+can produce `pr.repair-delegation` acceptance beside old uncertain work. A held
+mixed batch and a sender-time local duplicate guard use the existing
+`unconfirmed_delivery_receipt` reason and existing outcome/merge protection. The
+action text explicitly identifies local suppression before a provider request;
+remote rejection remains tied to positive rejection evidence. No stage, public
+fact, renderer field, provider poll or new scheduled verification is introduced.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_codex_cloud_pr_review_flow.py tests/test_codex_cloud_client.py tests/test_pr_no_commit_recovery.py tests/test_pr_repair_bootstrap_policy_no_replay.py tests/test_dashboard_observability.py`.
+`test_production_mixed_native_feedback_only_sends_resolved_unsent_source` enters
+the passing-CI production merge gate, real review intake, canonical ledger and
+native sender/journal with a controlled transport. It checks the existing stage
+reason for holds, one accepted independently resolved request, repeated/restarted
+suppression, prior claims despite native absence, ambiguous/overlapping scope,
+head changes and a sender-time local guard. Old native evidence remains unchanged
+and unresolved threads continue to block merge. The existing public projection
+regression still verifies the same fixed reason reaches dashboard facts.
