@@ -131,3 +131,24 @@ repeated evaluations with reconstructed clients. It asserts zero old sends and
 unchanged old journal entries. The unmixed positive control needs no additional
 identity resolution. This is separate from hourly checkpoints for confirmed
 requests; no old request is replayed under a new identity.
+
+### Unresolved production prerequisite
+
+The mixed-batch positive regression above directly seeds its `DISTINCT_DEFECT`
+resolution. Current supported external-comment intake persists native aliases
+through `admit_blocker`, which does not create that decision. The ordinary
+finding reconciler also admits distinct observations through `admit_blocker`;
+its `reconcile_observation` call persists `ASSOCIATE`. No supported producer has
+been established for the exact current-head/native-comment resolution this
+consumer requires. The partition therefore is not demonstrated as a working
+production recovery path for a backlog of distinct native comments.
+
+`test_supported_external_feedback_producer_cannot_supply_mixed_split_resolution`
+starts from ordinary comment input, reaches the real producer and controlled
+native transport, then adds different unsent feedback after the original POST
+becomes uncertain. It verifies that no qualifying decision is produced, new
+feedback remains held, and the old request is not replayed. Supplying a fabricated
+ledger decision is not an operational remedy. A supported source-resolution
+producer and its positive integrated acceptance case remain a concrete blocker.
+A publication-only step within the same correction scope is also unmodelled by
+this predicate; generic same-task follow-up cannot isolate it automatically.
