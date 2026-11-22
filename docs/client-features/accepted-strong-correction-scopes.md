@@ -29,6 +29,13 @@ writable-head identity. It does not assign old NONE records a birth. A crash aft
 birth but before acceptance leaves an ineligible orphan and conservatively holds
 later overlapping registration. There is no automatic orphan replay or repair.
 
+The bridge enters the Strong sealing extension only when accepted source findings
+actually carry `correction_scope`. It must not eagerly obtain a ledger snapshot
+for a no-op seal: an ordinary first review with no accepted scope retains its
+empty controller references without initializing a canonical namespace or creating
+an owner. The original ordinary-reference and invented-reference rejection tests
+remain controlling, alongside the real accepted Strong sealing positive.
+
 The actual accepted-finding canonical bridge seals that birth only after observing
 the complete, authenticated root publication. It checks exact rendered body bytes
 and unique source/canonical owner, then freezes all existing ordinary native

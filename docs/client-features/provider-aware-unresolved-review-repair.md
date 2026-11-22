@@ -158,3 +158,12 @@ fenced. This does not settle or rewrite other accounting/uncertain operations.
 The common Codex owner fence now also holds the v2 prototype behind any ambiguous
 wildcard. Broad wire provenance alone provides no exhaustive registered
 obligation eligibility; the optional accepted Strong source protocol is required; see [Durable Codex work accounting](durable-codex-work-accounting.md#before-wire-continuation-provenance-milestone).
+
+The maintained PR-entry receipt contract supplies explicit typed native outcomes:
+a fresh `NOT_DELIVERED` lookup without a shared claim permits the original
+one-time handoff, whose confirmed receipt suppresses replay. `INDETERMINATE` or
+unclassified receipt objects remain pending without a send. A `NOT_DELIVERED`
+lookup with an older shared pending claim also remains held: native absence cannot
+clear that claim. The parametrized lifecycle regression enters `_handle_pr_merge`
+for both fresh delivery and these uncertainty cases, preserving the same cloud
+owner and prohibiting local repair, merge and CI-failure routing.

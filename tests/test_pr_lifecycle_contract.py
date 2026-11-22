@@ -1948,8 +1948,15 @@ def test_durable_cloud_conflict_receipt_governs_replay_without_local_substitute(
     assert state_path.exists()
 
 
-def test_durable_review_repair_receipt_replays_through_pr_entry_without_local_effect(tmp_path, monkeypatch):
-    """REQ-003: supported replay retains its cloud owner and receipt."""
+@pytest.mark.parametrize("prior_delivery", ["unsent", "indeterminate", "untyped", "pending_missing"])
+def test_durable_review_repair_receipt_replays_through_pr_entry_without_local_effect(tmp_path, monkeypatch, prior_delivery):
+    """REQ-003: a fresh handoff replays once; uncertain evidence never authorizes it."""
+    import json
+
+    from auto_coder.codex_wham_client import FollowUpDeliveryOutcome
+    from auto_coder.pr_processor import _record_review_feedback_state, _review_feedback_identity
+
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
     state_path = tmp_path / "review-repairs.json"
     green = _snapshot(ObservationAvailability.KNOWN, CIConclusion.SUCCESS)
@@ -1977,6 +1984,19 @@ def test_durable_review_repair_receipt_replays_through_pr_entry_without_local_ef
     client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(head_ref="cloud/feature", head_sha=H1, base_ref="main")
     provider = MagicMock()
     provider.send_followup.return_value = True
+    # This controlled provider port must supply a real typed receipt. An
+    # invented MagicMock method is unclassified evidence, not proof of unsent.
+    provider.get_followup_delivery.return_value = {
+        "unsent": FollowUpDeliveryOutcome.NOT_DELIVERED,
+        "indeterminate": FollowUpDeliveryOutcome.INDETERMINATE,
+        "untyped": MagicMock(name="unclassified-receipt"),
+        "pending_missing": FollowUpDeliveryOutcome.NOT_DELIVERED,
+    }[prior_delivery]
+    identity = _review_feedback_identity(f"{REPOSITORY}#{PR_NUMBER}:codex-cloud:task-contract:", thread, 0)
+    if prior_delivery == "pending_missing":
+        # Explicit older durable claim plus a missing native lookup: absence
+        # cannot erase the original uncertainty or mint a fresh handoff.
+        _record_review_feedback_state(state_path, set(), {identity})
 
     with (
         patch("auto_coder.util.github_action.get_ghapi_client", return_value=MagicMock()),
@@ -2000,8 +2020,18 @@ def test_durable_review_repair_receipt_replays_through_pr_entry_without_local_ef
 
     assert any("All GitHub Actions checks passed" in action for action in first)
     assert any("All GitHub Actions checks passed" in action for action in replay)
-    provider.send_followup.assert_called_once()
     assert state_path.exists()
+    receipt = json.loads(state_path.read_text())
+    if prior_delivery == "unsent":
+        provider.send_followup.assert_called_once()
+        assert identity in receipt["delivered_feedback"]
+        assert identity not in receipt["pending_feedback"]
+        assert any("Requested Codex Cloud task" in action and "unresolved review threads" in action for action in first)
+    else:
+        provider.send_followup.assert_not_called()
+        assert identity in receipt["pending_feedback"]
+        assert identity not in receipt["delivered_feedback"]
+        assert all(any("unconfirmed durable receipt" in action for action in actions) for actions in (first, replay))
     local_effect.assert_not_called()
     merge.assert_not_called()
     failure_consumer.assert_not_called()

@@ -315,7 +315,7 @@ class AcceptedFindingBridge:
             if current_version != source.transition_version:
                 last_diagnostic = f"source revision moved from {source.transition_version} to {current_version}"
                 continue
-            if projection.complete:
+            if projection.complete and any(finding.correction_scope for finding in source.findings):
                 from .strong_correction_scope import seal_roots
 
                 try:
