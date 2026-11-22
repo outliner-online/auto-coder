@@ -132,9 +132,7 @@ def test_if_paused_posts_exact_followup_when_last_turn_completed(harness, status
         "turn_id": ASSISTANT_ID,
         "run_environment_in_qa_mode": False,
     }
-    assert request["input_items"] == [
-        {"type": "message", "role": "user", "content": [{"content_type": "text", "text": "Continue PR #6021"}]}
-    ]
+    assert request["input_items"] == [{"type": "message", "role": "user", "content": [{"content_type": "text", "text": "Continue PR #6021"}]}]
     assert "test-token" not in result.stdout + result.stderr
 
 
