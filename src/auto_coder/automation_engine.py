@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from functools import partial
@@ -7746,6 +7746,11 @@ class AutomationEngine:
             return result
 
         slots = self._get_implementation_slots(repo_name)
+        if candidate.type == "pr":
+            from .pr_processor import _is_feature_slotless_dependabot_pr
+
+            if _is_feature_slotless_dependabot_pr(candidate.data):
+                return self._process_slotless_dependabot(repo_name, candidate, config, jules_mode, explicit_only, force, advance_issue_attempt)
         try:
             owner = slots.resolve_owner(candidate.type, candidate.data, self.github)
         except ImplementationOwnerResolutionError as exc:
@@ -8265,6 +8270,65 @@ class AutomationEngine:
                 slots.reconcile(self.github)
         return result
 
+    def _process_slotless_dependabot(
+        self,
+        repo_name: str,
+        candidate: Candidate,
+        config: AutomationConfig,
+        jules_mode: bool,
+        explicit_only: bool,
+        force: bool,
+        advance_issue_attempt: bool,
+    ) -> CandidateProcessingResult:
+        """Hold existing per-PR mutation authority without a feature reservation.
+
+        Dependency repairs remain governed by the processor's existing skip
+        policy. No asynchronous implementation execution is created here.
+        """
+        from .pr_processor import _fetch_authoritative_dependency_bot_pr, _is_feature_slotless_dependabot_pr, evaluate_dependency_bot_admission
+
+        number = candidate.data["number"]
+        result = CandidateProcessingResult(type="pr", number=number, title=candidate.data.get("title"), target_outcome=ExplicitTargetOutcome.DEFERRED, outcome=PRProcessingOutcome.DEFERRED)
+        slots = self._get_implementation_slots(repo_name)
+        pr_owner = ImplementationOwner("pr", number)
+        # Prepare/read the shared store without creating a reservation, including
+        # on the first evaluation in a newly configured repository.
+        slots.active_execution_ids(pr_owner)
+
+        def defer(reason: str) -> CandidateProcessingResult:
+            result.target_reason = reason
+            result.actions = [f"Deferred - {reason}"]
+            _record_pr_stage_result(number, "pr.implementation-admission", f"pr#{number} implementation admission", Outcome.DEFERRED, {"owner": pr_owner.key, "capacity_class": "slotless-dependabot", "reason": reason})
+            return result
+
+        with ExitStack() as locks:
+            if not locks.enter_context(slots.try_serialize(pr_owner)):
+                return defer("Dependabot PR is already being processed")
+            refreshed, error = _fetch_authoritative_dependency_bot_pr(self.github, repo_name, candidate.data, number)
+            if error or refreshed is None:
+                result.refill_retry_required = True
+                return defer(f"Cannot refresh slotless Dependabot identity: {error}")
+            if refreshed.get("number") != number or not _is_feature_slotless_dependabot_pr(refreshed):
+                return defer("Slotless Dependabot author or PR identity changed")
+            candidate.data = refreshed
+            if not self._is_pr_author_allowed(refreshed):
+                return defer("PR author is not in the allowlist")
+            decision = evaluate_dependency_bot_admission(self.github, repo_name, refreshed, config)
+            if not decision.allowed:
+                result.target_outcome = decision.outcome
+                result.refill_retry_required = decision.outcome is ExplicitTargetOutcome.DEFERRED
+                result.target_reason = decision.reason
+                result.actions = [decision.reason]
+                _record_pr_stage_result(number, "pr.dependency-bot-admission", f"pr#{number} dependency-bot admission", Outcome(decision.outcome.value) if decision.outcome else Outcome.SKIPPED, {"reason": decision.reason})
+                return result
+            owner = slots.resolve_owner("pr", refreshed, self.github)
+            if owner != pr_owner and not locks.enter_context(slots.try_serialize(owner)):
+                return defer("Dependabot logical owner is already being processed")
+            if any(slots.active_execution_ids(retained_owner) or slots.has_provider_sessions(retained_owner) for retained_owner in {owner, pr_owner}) or self._get_local_job_store().unsettled_pr_repair(repo_name, number) is not None:
+                return defer("Dependabot PR has retained implementation or repair ownership")
+            _record_pr_stage_result(number, "pr.implementation-admission", f"pr#{number} implementation admission", Outcome.COMPLETED, {"owner": pr_owner.key, "capacity_class": "slotless-dependabot", "feature_slot_reserved": False})
+            return self._process_single_candidate_reserved(repo_name, candidate, config, jules_mode, force_adversarial_validation=explicit_only and force, advance_issue_attempt=advance_issue_attempt)
+
     def _process_single_candidate_reserved(
         self,
         repo_name: str,
@@ -8277,7 +8341,7 @@ class AutomationEngine:
         retry_authority: Optional[ImplementationRetryRequest] = None,
         explicit_only: bool = False,
     ) -> CandidateProcessingResult:
-        """Process a candidate after its durable owner slot is reserved."""
+        """Process a candidate under reserved execution or slotless PR serialization."""
         result = CandidateProcessingResult(
             type=candidate.type,
             number=candidate.data.get("number"),

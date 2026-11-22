@@ -19,6 +19,27 @@ evaluation already decided; a policy refusal is `SKIPPED` with a specific
 reason, while unavailable/incomplete evidence is retryable `DEFERRED`, and
 neither outcome disturbs an already-retained implementation owner.
 
+PRs authored by GitHub's actual `dependabot[bot]` account pass those same
+admission gates but do not reserve, borrow, settle, or reclaim ordinary feature
+implementation slots. The exemption is exact-author based; Renovate, other bot
+accounts, branch names and dependency-themed titles retain ordinary accounting.
+The common path refreshes the authoritative PR identity and repeats dependency
+policy under the existing nonblocking cross-process PR mutation lock. It holds
+that lock through ordinary PR processing, including explicit `--only --force`
+entry. A busy lock or retained implementation/provider/local-repair ownership
+defers processing rather than overlapping another worker. Existing scheduler
+concurrency, graceful drain, exact-head CI, independent approval and merge
+operation receipts remain controlling. The exemption does not migrate or release
+old feature owners.
+
+This does not enable breaking-dependency repairs. Current dependency-bot policy
+skips CI fixes and conflict resolution even when both dependency configuration
+flags are false. Enabling compatibility implementation requires a separate policy
+change with durable repair authority; a red check alone does not establish that
+the dependency update introduced the failure. Slotless admission is covered through
+the real engine, CI aggregation and merge-operation path with controlled GitHub
+wire responses in `tests/test_dependabot_slotless_admission.py`.
+
 Codex Cloud pull requests whose authoritative remote head is the shared
 ``work`` branch are rejected at the common merge/review boundary before CI,
 adversarial validation, repair delivery, checkout, or merge work. PR metadata
