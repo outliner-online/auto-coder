@@ -23,6 +23,15 @@ availability. This in-memory view is reset on restart and never drives durable
 invalidation completion, implementation ownership, validation or merge authority.
 The public diagnostics API allowlist is unchanged.
 
+A typed remote failure during startup ownership recovery remains incomplete even
+when the dashboard is reachable. The existing pending-work status shows an
+`evaluation_failed` operational block with a zero deadline; the startup warning
+and `pending-work list` provide a sanitized classification/status and selected
+retry guidance. Neither a generic wake nor elapsed time starts ordinary workers
+or releases an owner. Real typed throttles retain the existing bounded retry
+schedule. The lifecycle controls and corrected single-obligation recovery are
+covered by `tests/test_startup_pending_remote_errors.py`.
+
 Run `pytest -q tests/test_open_target_observations.py tests/test_entity_invalidation.py`
 for production reconciliation/strict observation/status/presentation regressions.
 The initial two regression cases fail against the previous engine: one returns

@@ -158,6 +158,41 @@ def test_auth_and_indeterminate_delivery_are_operational_blocks(tmp_path):
     assert store.due(now=10_000) == []
 
 
+@pytest.mark.parametrize(
+    ("classification", "expected_reason"),
+    [
+        (GitHubApiOutcome.REMOTE_ERROR, PendingReason.EVALUATION_FAILED),
+        (GitHubApiOutcome.TRANSPORT_FAILURE, PendingReason.EVALUATION_FAILED),
+        (GitHubApiOutcome.AUTHENTICATION_FAILURE, PendingReason.AUTHENTICATION),
+        (GitHubApiOutcome.FORBIDDEN, PendingReason.FORBIDDEN),
+    ],
+)
+def test_non_throttle_failure_blocks_without_spending_or_resetting_throttle_budget(tmp_path, classification, expected_reason):
+    path = tmp_path / "pending.db"
+    identity = WorkIdentity("a/b", "startup", "startup-reconciliation")
+    store = PendingWorkStore(path)
+    store.defer(identity, _error(GitHubApiOutcome.THROTTLED), ("already-retained",), now=100)
+    for _ in range(MAX_THROTTLED_RETRIES + 2):
+        retained = PendingWorkStore(path).defer(identity, _error(classification), ("unfinished",), governor_deadline=10_000, now=200)
+        assert retained.reason is expected_reason
+        assert retained.throttle_attempts == 1
+        assert retained.not_before == 0
+        assert retained.automatically_retryable is False
+        assert retained.unfinished_effects == ("already-retained", "unfinished")
+    assert store.due(now=1_000_000) == []
+
+
+@pytest.mark.parametrize("classification", [GitHubApiOutcome.PRIMARY_THROTTLED, GitHubApiOutcome.SECONDARY_THROTTLED, GitHubApiOutcome.THROTTLED])
+def test_only_typed_throttles_spend_retry_budget(tmp_path, classification):
+    store = PendingWorkStore(tmp_path / "pending.db")
+    identity = WorkIdentity("a/b", "startup", "startup-reconciliation")
+    retained = store.defer(identity, _error(classification), ("unfinished",), now=100)
+    assert retained.reason is PendingReason.THROTTLED
+    assert retained.throttle_attempts == 1
+    assert retained.not_before == 105
+    assert store.due(now=105) == [retained]
+
+
 def test_legacy_schema_without_status_column_defaults_to_waiting(tmp_path):
     """A preflight-schema database predates the status column; rows must stay resumable."""
     path = tmp_path / "pending.db"

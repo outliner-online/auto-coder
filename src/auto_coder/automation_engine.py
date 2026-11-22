@@ -3259,12 +3259,13 @@ class AutomationEngine:
         """Complete startup recovery, retrying governed admission failures durably.
 
         The first attempt runs inline. A ``GitHubRequestError`` -- a local
-        admission deferral or an actual GitHub throttle, authentication, or
-        forbidden response -- does not terminate the daemon: the attempt is
-        retained as a durable pending-work obligation with a stable
-        repository-scoped identity (stable across restarts, since it is keyed
-        only by repository and stage) and retried by the already-running
-        pending-work scheduler, independent of the ordinary worker pool. This
+        admission deferral or a provider failure -- does not terminate the
+        daemon: the attempt is retained as a durable pending-work obligation
+        with a stable repository-scoped identity (stable across restarts, since it is keyed
+        only by repository and stage). Only admission deferrals and actual
+        throttles are retried automatically by the already-running pending-work
+        scheduler, independent of the ordinary worker pool. Operational blocks
+        require a selected operator retry after correcting the cause. This
         method then waits for that obligation to resolve -- or for shutdown --
         without blocking the event loop, so webhook receipt, status, and
         graceful shutdown remain responsive while recovery is incomplete. Any
@@ -3284,7 +3285,17 @@ class AutomationEngine:
             return
         except GitHubRequestError as exc:
             obligation = await asyncio.to_thread(get_pending_work_store(repo_name).defer, identity, exc, (STARTUP_RECONCILIATION_EFFECT,))
-            logger.warning(f"Startup GitHub reconciliation for {repo_name} deferred ({obligation.reason.value}); " f"the daemon stays up and the pending-work scheduler will retry automatically " f"(next eligible at {obligation.not_before})")
+            if obligation.automatically_retryable:
+                logger.warning("Startup GitHub reconciliation for {} deferred ({}); the daemon stays up and the pending-work scheduler will retry automatically (next eligible at {})", repo_name, obligation.reason.value, obligation.not_before)
+            else:
+                logger.warning(
+                    "Startup GitHub reconciliation for {} blocked ({}); the daemon stays up with startup incomplete; no automatic retry is scheduled. {} Use pending-work retry --repository {} --entity startup --stage {} after correcting the cause.",
+                    repo_name,
+                    obligation.reason.value,
+                    obligation.last_error,
+                    repo_name,
+                    STARTUP_RECONCILIATION_STAGE,
+                )
             self._wake_pending_work()
         except LocalJobStoreUnavailable as exc:
             await asyncio.to_thread(

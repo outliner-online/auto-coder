@@ -1497,6 +1497,22 @@ handler for both closing directives and branch markers, checking incomplete
 recovery, retained capacity, and successful membership discovery on retry.
 Run `bash scripts/test.sh tests/test_pending_work_resumption.py tests/test_implementation_slots.py`.
 
+The non-throttle startup error regression additionally enters the actual
+`start_automation` lifecycle, production ownership discovery, strict enumeration,
+registered startup handler and durable scheduler using controlled HTTP 404/503,
+429 and secondary-limit 403 responses. Non-throttle observations retain the
+existing `evaluation_failed` operational block without spending throttle retries;
+the startup warning truthfully reports no automatic retry and safe operator
+guidance. `pending-work list` retains the sanitized classification/status in
+`last_error`; the existing dashboard pending-work snapshot reports the blocked
+reason and zero deadline. The reachable dashboard never implies that startup is
+complete or that occupied capacity was released. Available and malformed-page
+controls preserve the success and fail-closed paths, and the official selected
+retry restores startup after correction without altering another obligation.
+These are repository lifecycle diagnostics, so no entity trace emission, origin,
+stage, outcome or schema changes are needed. Run
+`bash scripts/test.sh tests/test_startup_pending_remote_errors.py tests/test_github_pending_work.py`.
+
 ## Codex quota transport
 
 Codex quota reads use the app-server account API. This transport change does not
