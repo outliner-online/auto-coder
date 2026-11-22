@@ -198,12 +198,23 @@ def test_distinct_findings_with_identical_text_are_each_delivered_once(tmp_path)
     assert "Thread `PRRT_thread_1`" not in send_followup.call_args.args[1]
 
 
-def test_unconfirmed_review_feedback_delivery_is_not_blindly_retried(tmp_path) -> None:
+@pytest.mark.parametrize("receipt_unavailable", [False, True])
+def test_unconfirmed_review_feedback_delivery_is_not_blindly_retried(tmp_path, receipt_unavailable) -> None:
+    from auto_coder.codex_wham_client import FollowUpDeliveryOutcome
+
     state_path = tmp_path / "review-repairs.json"
     with (
         patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.get_followup_delivery") as delivery,
         patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", side_effect=[False, True]) as send_followup,
     ):
+
+        def read_receipt(_task_id, _identity):
+            if receipt_unavailable and send_followup.call_count:
+                raise OSError("receipt unavailable after POST")
+            return FollowUpDeliveryOutcome.INDETERMINATE
+
+        delivery.side_effect = read_receipt
         _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=_github_client(), unresolved_threads=(_thread(),))
         _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=_github_client(), unresolved_threads=(_thread(),))
 

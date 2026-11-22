@@ -3830,3 +3830,11 @@ reserved identities while preserving peer claims.
 verifies both cases without a recovery series. Existing ordinary repair-result
 events report failure followed by a normal accepted retry; no new checkpoint
 event, event schema or processing origin is introduced for Jules.
+
+Ordinary Codex review repair preserves the native journal's definite rejection
+outcome: all exact identities must be `NOT_DELIVERED` before their claims are
+released for retry. An unknown or unreadable receipt retains the existing wait.
+The existing repair result distinguishes rejection from unconfirmed delivery;
+this restores transport outcome reporting without a new event schema or stage.
+The bootstrap-policy retry regression and review-flow unknown-receipt regression
+exercise these outcomes; Claude uncertainty and excluded Jules handling are unchanged.

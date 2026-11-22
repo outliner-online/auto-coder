@@ -10886,12 +10886,22 @@ def _delegate_cloud_review_thread_repair(
                 pass
         return CloudReviewRepairResult([f"Review repair was not delivered to {provider} for PR #{pr_number}: {exc}"])
     if not accepted:
+        definitely_rejected = provider not in SUPPORTED_PROVIDERS
+        if provider == "codex-cloud":
+            from .codex_wham_client import FollowUpDeliveryOutcome
+
+            try:
+                # False alone is ambiguous; only the exact native journal can
+                # prove every identity was rejected before any accepted POST.
+                definitely_rejected = all(client.get_followup_delivery(task_id, identity) is FollowUpDeliveryOutcome.NOT_DELIVERED for identity in pending_identities)
+            except Exception as exc:
+                logger.warning(f"Could not confirm rejected review repair delivery for PR #{pr_number}: {exc}")
         with _cloud_review_delivery_lock:
             try:
-                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if provider not in SUPPORTED_PROVIDERS else None)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if definitely_rejected else None)
             except OSError:
                 pass
-        detail = "has unconfirmed follow-up delivery" if provider in SUPPORTED_PROVIDERS else "rejected follow-up delivery"
+        detail = "rejected follow-up delivery" if definitely_rejected else "has unconfirmed follow-up delivery"
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' {detail}"])
 
     get_claude_followup_wait_store().retire(repo_name, task_id, "review-thread-repair", work_identity)

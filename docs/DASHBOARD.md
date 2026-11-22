@@ -484,3 +484,11 @@ restart; confirmed identities and proven pre-send no-effect claims release their
 exact pending identities. Excluded Jules retains its ordinary failure/retry
 cleanup, which releases only its own reservation. The existing indeterminate-
 delivery wait continues to report supported-provider uncertainty.
+
+Ordinary Codex review repair preserves the native journal's definite rejection
+outcome: all exact identities must be `NOT_DELIVERED` before their claims are
+released for retry. An unknown or unreadable receipt retains the existing wait.
+The existing repair result distinguishes rejection from unconfirmed delivery;
+this restores transport outcome reporting without a new event schema or stage.
+The bootstrap-policy retry regression and review-flow unknown-receipt regression
+exercise these outcomes; Claude uncertainty and excluded Jules handling are unchanged.

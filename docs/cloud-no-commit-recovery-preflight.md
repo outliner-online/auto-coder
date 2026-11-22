@@ -59,7 +59,7 @@ for delivered scope and limitations.
 
 ## Focused verification
 
-The final production-boundary selection passed **463 tests in 30.58s**, exit 0:
+The final production-boundary selection passed **484 tests in 31.85s**, exit 0:
 
 ```bash
 env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
@@ -68,6 +68,7 @@ env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
   bash scripts/test.sh --ci-tests-only \
   tests/test_pr_no_commit_recovery.py \
   tests/test_codex_cloud_pr_review_flow.py \
+  tests/test_pr_repair_bootstrap_policy_no_replay.py \
   tests/test_adversarial_validation_pr_flow.py \
   tests/test_cloud_conflict_delegation.py \
   tests/test_claude_followup_admission.py \
@@ -86,9 +87,15 @@ env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
 ```
 
 `.venv/bin/mypy --config-file pyproject.toml -p auto_coder` passed across **376
-source files**. Black check, isort check, flake8 on all eight changed Python
+source files**. Black check, isort check, flake8 on all nine changed Python
 files, and `git diff --check`, passed. Test transports were local controlled
 boundaries; no live provider follow-up was run. The test collector could not
 save its redundant JSON log under the read-only home directory; test execution
 itself completed with exit 0. Unsetting inherited `CODEX_HOME` lets the manual
 CLI tests use their own temporary test credentials; credentials were unchanged.
+
+The separate CI-reported worktree-preparation retry test was inspected without
+changing its implementation or test. Running
+`bash scripts/test.sh --ci-tests-only tests/test_pr_correction_job.py::test_worktree_preparation_failure_retries_same_job_and_invokes_model_once -q --timeout=120`
+with the same environment passed **1 test in 3.57s**. The CI job log download
+returned Forbidden, so that clock failure was not reproduced or fixed here.

@@ -36,7 +36,9 @@ bookkeeping writes carry no pending additions. The writer merges additions with
 the latest pending set under the same lock, so a snapshot taken before another
 PR reserved work cannot erase that unseen reservation. Confirmed receipts remove
 only their exact identities. For Codex Cloud and Claude Routine, generic
-exceptions and bare False transport results retain uncertainty; pre-send
+exceptions and bare False transport results retain uncertainty. A Codex False
+result releases its exact source claim only when every native logical identity
+is authoritatively `NOT_DELIVERED`; unknown or unreadable receipts remain held. Pre-send
 metadata/ownership refusals and typed quota holds release only the sender's own
 reserved identities. Excluded providers retain their legacy failure handling:
 Jules False/exception results release only its own request's reservation and
@@ -118,3 +120,8 @@ reset a reservation merely because another hour passed.
 exercises the excluded Jules route's False and exception retry behavior, preserves
 another PR's unknown claim, and confirms no recovery series is registered. The
 supported-provider crash/restart and stale-writer regressions remain unchanged.
+
+`tests/test_pr_repair_bootstrap_policy_no_replay.py::test_rejected_followup_delivery_remains_retryable_not_terminal`
+verifies a definitively rejected original follow-up can be accepted on its next
+ordinary observation. The review-flow unknown receipt test covers both explicit
+indeterminacy and receipt failure after the attempted send; neither permits replay.
