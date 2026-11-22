@@ -33,7 +33,9 @@ ordinal and send reservation alongside review receipts. Atomically promote the
 exact confirmed original identities with the clock; retain all other unknown
 POST reservations. Scope pending-source holds to the same PR. Shared receipt
 writers merge latest confirmed identities under the existing file lock so
-stale snapshots cannot erase or re-pend those accepted sources. Use one cross-process
+stale snapshots cannot erase or re-pend those accepted sources. Pending writes
+apply explicit additions and exact known-no-effect releases to the latest
+document, preserving reservations absent from an older caller snapshot. Use one cross-process
 file guard for source writes, new acceptance and checkpoints. Persist the exact
 ordinal before sending. Lost responses/crashes retain that reservation. Typed
 pre-send quota refusals retry the same ordinal through existing quota admission.
@@ -57,7 +59,7 @@ for delivered scope and limitations.
 
 ## Focused verification
 
-The final production-boundary selection passed **449 tests in 30.11s**, exit 0:
+The final production-boundary selection passed **461 tests in 30.33s**, exit 0:
 
 ```bash
 env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
@@ -69,6 +71,7 @@ env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
   tests/test_adversarial_validation_pr_flow.py \
   tests/test_cloud_conflict_delegation.py \
   tests/test_claude_followup_admission.py \
+  tests/test_claude_followup_waits.py \
   tests/test_pr_repair_exhaustion.py \
   tests/test_dashboard_observability.py::test_pr_no_commit_checkpoint_reaches_mounted_detail \
   tests/test_cloud_task_engine.py \

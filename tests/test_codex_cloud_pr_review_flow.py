@@ -198,7 +198,7 @@ def test_distinct_findings_with_identical_text_are_each_delivered_once(tmp_path)
     assert "Thread `PRRT_thread_1`" not in send_followup.call_args.args[1]
 
 
-def test_failed_review_feedback_delivery_remains_retryable(tmp_path) -> None:
+def test_unconfirmed_review_feedback_delivery_is_not_blindly_retried(tmp_path) -> None:
     state_path = tmp_path / "review-repairs.json"
     with (
         patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
@@ -207,7 +207,8 @@ def test_failed_review_feedback_delivery_remains_retryable(tmp_path) -> None:
         _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=_github_client(), unresolved_threads=(_thread(),))
         _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=_github_client(), unresolved_threads=(_thread(),))
 
-    assert send_followup.call_count == 2
+    assert send_followup.call_count == 1
+    assert json.loads(state_path.read_text())["pending_feedback"]
     assert state_path.exists()
 
 
@@ -1116,3 +1117,97 @@ def test_stale_peer_write_cannot_erase_accepted_claude_receipt_after_restart(tmp
         assert native.send_followup.call_count == 2
         assert "independently" in native.send_followup.call_args.args[1]
         assert next(iter(json.loads(path.read_text())["no_commit_series"].values()))["ordinal"] == 1
+
+
+@pytest.mark.parametrize("failure", ["crash", "exception", "false"])
+def test_stale_peer_snapshot_before_reservation_cannot_erase_unknown_claude_post(tmp_path, failure):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from auto_coder.pr_processor import _load_delivered_review_feedback, _load_pending_review_feedback, _record_review_feedback_state
+
+    class Interrupted(BaseException):
+        pass
+
+    path = tmp_path / "repairs.json"
+    _record_review_feedback_state(path, set(), set())
+    loaded, release_peer = Event(), Event()
+
+    def stale_peer():
+        delivered = _load_delivered_review_feedback(path)
+        pending = _load_pending_review_feedback(path)
+        assert pending == set()  # B's snapshot strictly precedes A's reservation.
+        loaded.set()
+        assert release_peer.wait(5), "B's stale write was never released"
+        _record_review_feedback_state(path, delivered, pending)
+
+    def unknown_post(*_args):
+        if failure == "crash":
+            raise Interrupted()
+        if failure == "exception":
+            raise RuntimeError("POST response lost")
+        return False
+
+    native = MagicMock()
+    native.send_followup.side_effect = unknown_post
+    github = _github_client()
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-5262")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+        ThreadPoolExecutor(max_workers=1) as workers,
+    ):
+        peer = workers.submit(stale_peer)
+        assert loaded.wait(5), "B never loaded the older snapshot"
+        try:
+            if failure == "crash":
+                with pytest.raises(Interrupted):
+                    _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+            else:
+                assert not _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),)).delivered
+            unknown = _load_pending_review_feedback(path)
+            assert unknown and all(identity.startswith("owner/repo#5262:") for identity in unknown)
+        finally:
+            release_peer.set()
+            peer.result(timeout=5)
+        assert _load_pending_review_feedback(path) == unknown
+        assert _load_delivered_review_feedback(path) == set()
+        # Recreate ordinary processing from disk after A's interruption and B's
+        # stale write. A's unknown original must not acquire a second POST.
+        result = _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert not result.delivered
+        assert "unconfirmed durable receipt" in result[0]
+        native.send_followup.assert_called_once()
+        assert not json.loads(path.read_text()).get("no_commit_series")
+
+
+def test_pre_send_refusal_clears_only_its_own_reservation_and_remains_retryable(tmp_path):
+    from auto_coder.pr_processor import _load_delivered_review_feedback, _load_pending_review_feedback, _record_review_feedback_state
+
+    path = tmp_path / "repairs.json"
+    peer_pending = {"owner/repo#5263:claude-routine:session-B:unknown-post"}
+    github = _github_client()
+
+    def unavailable_metadata(*_args):
+        # B reserves after A loaded its snapshot. A's known pre-send cleanup
+        # must remove only A's own identifiers, leaving this new claim intact.
+        _record_review_feedback_state(path, _load_delivered_review_feedback(path), peer_pending)
+        raise RuntimeError("current PR metadata unavailable")
+
+    github.get_pull_request_repair_metadata_strict.side_effect = unavailable_metadata
+    native = MagicMock()
+    native.send_followup.return_value = True
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-5262")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+    ):
+        refused = _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        assert not refused.delivered
+        native.send_followup.assert_not_called()
+        assert _load_pending_review_feedback(path) == peer_pending
+        github.get_pull_request_repair_metadata_strict.side_effect = None
+        assert _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),)).delivered
+        native.send_followup.assert_called_once()
+        assert _load_pending_review_feedback(path) == peer_pending
+        assert not peer_pending.intersection(_load_delivered_review_feedback(path))

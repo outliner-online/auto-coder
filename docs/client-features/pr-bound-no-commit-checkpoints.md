@@ -31,7 +31,13 @@ new request admission and checkpoint reservation/dispatch. Confirmed original
 source identities and their clock commit atomically. Later receipt writers merge
 the latest confirmed identities while holding the file guard, then exclude them
 from pending. A stale peer snapshot cannot erase an accepted source or make it
-pending again. Only confirmed delivered identities participate in this merge.
+pending again. Pending updates are explicit additions and exact known-no-effect releases;
+bookkeeping writes carry no pending additions. The writer merges additions with
+the latest pending set under the same lock, so a snapshot taken before another
+PR reserved work cannot erase that unseen reservation. Confirmed receipts remove
+only their exact identities. Generic exceptions and bare False transport results
+retain uncertainty; pre-send metadata/ownership refusals and typed quota holds
+release only the sender's own reserved identities.
 
 The normal duplicate-correction wait and retained current-correction handoff
 revisit the series. Before another send, current PR metadata and the exact
@@ -93,6 +99,10 @@ another external event or a candidate scan. A controlled peer-write regression
 pauses B after loading A's pre-acceptance pending snapshot, accepts A, reconstructs
 A after interruption, then releases B's stale write. A's original is not replayed,
 its checkpoint becomes due normally, and B's unknown source is not promoted.
+The inverse regression captures B's empty snapshot before A reserves, interrupts
+A's Claude POST without a confirmed outcome, then releases B's stale write and
+restarts A. A remains pending and is never replayed. Companion cases cover
+exception/False outcomes and known pre-send cleanup preserving another PR's claim.
 
 The `pr.no-commit-recovery` stage reports provider/task, head, ordinal, reason and
 next eligible time. `accepted` confirms assignment only. `delivery_unknown` and

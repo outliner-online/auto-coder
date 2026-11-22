@@ -10122,18 +10122,22 @@ def _load_review_validation_snapshots(state_path: Path) -> dict[str, dict[str, s
 def _record_review_feedback_state(
     state_path: Path,
     delivered: set[str],
-    pending: set[str],
+    pending_additions: set[str],
     validation_generations: Optional[dict[str, str]] = None,
     validation_snapshots: Optional[dict[str, dict[str, str]]] = None,
+    *,
+    remove_pending: Optional[set[str]] = None,
 ) -> None:
-    """Atomically persist confirmed and indeterminate feedback deliveries."""
+    """Merge confirmed receipts and explicit pending additions/releases atomically."""
     from .pr_no_commit_recovery import review_repair_state_lock
 
     with review_repair_state_lock(state_path):
         # A caller's snapshot can predate another PR's confirmed POST. Receipt
         # identities are monotonic; a stale write cannot erase or re-pend them.
         delivered = delivered | _load_delivered_review_feedback(state_path)
-        pending = pending - delivered
+        # Unseen reservations belong to other in-flight writers. Only confirmed
+        # receipts or an explicit, known-no-effect removal may clear an identity.
+        pending = (pending_additions | _load_pending_review_feedback(state_path)) - delivered - (remove_pending or set())
         state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = state_path.with_suffix(f"{state_path.suffix}.{os.getpid()}.tmp")
         temporary.write_text(
@@ -10166,15 +10170,14 @@ def _record_review_validation_snapshot(state_path: Path, validation_report: str,
         _record_review_feedback_state(
             state_path,
             _load_delivered_review_feedback(state_path),
-            _load_pending_review_feedback(state_path),
+            set(),
             validation_snapshots=snapshots,
         )
 
 
 def _record_delivered_review_feedback(state_path: Path, feedback: set[str]) -> None:
     """Atomically persist confirmed feedback deliveries."""
-    pending = _load_pending_review_feedback(state_path) - feedback
-    _record_review_feedback_state(state_path, feedback, pending)
+    _record_review_feedback_state(state_path, feedback, set())
 
 
 def _cloud_review_feedback_markers(feedback: Sequence[str]) -> str:
@@ -10763,20 +10766,20 @@ def _delegate_cloud_review_thread_repair(
         )
     with _cloud_review_delivery_lock:
         try:
-            _record_review_feedback_state(state_path, delivered, indeterminate | pending_identities)
+            _record_review_feedback_state(state_path, delivered, pending_identities)
         except OSError as exc:
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: a durable delivery reservation could not be recorded: {exc}"])
 
     if github_client is None:
         with _cloud_review_delivery_lock:
-            _record_review_feedback_state(state_path, delivered, indeterminate)
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: an authoritative current PR lookup is unavailable"])
     try:
         live_metadata = github_client.get_pull_request_repair_metadata_strict(repo_name, pr_number)
     except Exception as exc:
         with _cloud_review_delivery_lock:
             try:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
             except OSError:
                 pass
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: current PR head/branch could not be verified: {exc}"])
@@ -10786,7 +10789,7 @@ def _delegate_cloud_review_thread_repair(
     target = resolve_existing_pr_repair_target(repo_name, live_pr_data)
     if not target:
         with _cloud_review_delivery_lock:
-            _record_review_feedback_state(state_path, delivered, indeterminate)
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: current PR head/base branch metadata is unavailable"])
 
     canonical_pending = [(thread, comment, identity) for thread, comment, identity in pending if comment.body.startswith(("### Auto-Coder adversarial finding", "### Auto-Coder material test-oracle gap"))]
@@ -10851,10 +10854,12 @@ def _delegate_cloud_review_thread_repair(
         attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin)
         if attribution_error:
             with _cloud_review_delivery_lock:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {attribution_error}"])
         accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, tuple(sorted(pending_identities)), repair_target=target, recovery_provider=provider)
     except ClaudeFollowupHoldActive as exc:
+        with _cloud_review_delivery_lock:
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult(
             [f"DEFERRED Claude review repair for PR #{pr_number} until {exc.retry_not_before}"],
             deferred=True,
@@ -10864,7 +10869,7 @@ def _delegate_cloud_review_thread_repair(
         retry_at = _retain_claude_quota_deferral(exc, pr_number, task_id, "review-thread-repair", work_identity)
         if exc.delivery_certainty is DeliveryCertainty.NOT_SENT:
             with _cloud_review_delivery_lock:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult(
             [f"DEFERRED Claude review repair for PR #{pr_number} until {retry_at}"],
             deferred=True,
@@ -10874,17 +10879,17 @@ def _delegate_cloud_review_thread_repair(
         logger.warning(f"Cloud review repair delegation failed for PR #{pr_number}: {exc}")
         with _cloud_review_delivery_lock:
             try:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set())
             except OSError:
                 pass
         return CloudReviewRepairResult([f"Review repair was not delivered to {provider} for PR #{pr_number}: {exc}"])
     if not accepted:
         with _cloud_review_delivery_lock:
             try:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set())
             except OSError:
                 pass
-        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' rejected follow-up delivery"])
+        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' has unconfirmed follow-up delivery"])
 
     get_claude_followup_wait_store().retire(repo_name, task_id, "review-thread-repair", work_identity)
 
@@ -11691,7 +11696,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
             _record_review_feedback_state(
                 state_path,
                 delivered,
-                _load_pending_review_feedback(state_path),
+                set(),
                 validation_generations,
             )
             remediation_tokens = {finding_identity: validation_generations[validation_identities[finding_identity]] for _body, finding_identity in feedback_bodies}

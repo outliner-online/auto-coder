@@ -3810,3 +3810,14 @@ observability-neutral receipt preservation: the existing assignment/hold/termina
 stage facts and mounted timeline remain unchanged, and no unknown POST is
 promoted by the merge. Run the regression with `bash scripts/test.sh
 --ci-tests-only tests/test_codex_cloud_pr_review_flow.py::test_stale_peer_write_cannot_erase_accepted_claude_receipt_after_restart`.
+
+The inverse interleaving is covered by
+`tests/test_codex_cloud_pr_review_flow.py::test_stale_peer_snapshot_before_reservation_cannot_erase_unknown_claude_post`:
+a peer snapshot predates the original reservation, and its later write must
+preserve the unknown POST across restart. The writer now accepts explicit
+pending additions and exact known-no-effect removals against the latest document;
+bookkeeping updates add no pending claims. Generic exception/False outcomes
+retain the pending source, while the pre-send-refusal regression proves cleanup
+removes only the current request's identities and remains retryable. No event
+schema or processing origin changes: the existing indeterminate-delivery wait
+remains the observable outcome, without another provider call.

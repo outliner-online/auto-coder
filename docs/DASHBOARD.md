@@ -477,3 +477,8 @@ Confirmed correction receipts survive stale writes from other PR workers. The
 existing no-commit recovery stage keeps its ordinary eligibility and assignment
 meaning after restart; no new dashboard event or provider-state inference is
 introduced by this receipt-preservation fix.
+
+Pending-source writes also preserve reservations absent from an older worker
+snapshot. Unknown POST outcomes remain fenced across restart; only exact
+confirmed identities or proven pre-send no-effect claims can leave pending.
+The existing indeterminate-delivery wait reports this condition.
