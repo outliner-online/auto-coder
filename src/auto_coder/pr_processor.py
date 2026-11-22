@@ -10888,14 +10888,9 @@ def _delegate_cloud_review_thread_repair(
     if not accepted:
         definitely_rejected = provider not in SUPPORTED_PROVIDERS
         if provider == "codex-cloud":
-            from .codex_wham_client import FollowUpDeliveryOutcome
-
-            try:
-                # False alone is ambiguous; only the exact native journal can
-                # prove every identity was rejected before any accepted POST.
-                definitely_rejected = all(client.get_followup_delivery(task_id, identity) is FollowUpDeliveryOutcome.NOT_DELIVERED for identity in pending_identities)
-            except Exception as exc:
-                logger.warning(f"Could not confirm rejected review repair delivery for PR #{pr_number}: {exc}")
+            # Only positive evidence from this exact send can release the
+            # shared claim. Missing native journal keys may be lost writes.
+            definitely_rejected = client.consume_followup_rejection(task_id, tuple(sorted(pending_identities)))
         with _cloud_review_delivery_lock:
             try:
                 _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if definitely_rejected else None)

@@ -752,8 +752,6 @@ def test_unresolved_origin_still_refuses_delivery_without_sending_anything():
 
 def test_rejected_followup_delivery_remains_retryable_not_terminal(tmp_path):
     """A supplied not-delivered/retry-permitted transport outcome keeps that meaning."""
-    from auto_coder.codex_wham_client import FollowUpDeliveryOutcome
-
     pr_data = {
         "number": 5003,
         "body": "https://chatgpt.com/codex/tasks/task_e_retry9003",
@@ -768,7 +766,7 @@ def test_rejected_followup_delivery_remains_retryable_not_terminal(tmp_path):
     with (
         patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("codex-cloud", "task_e_retry9003", None)),
         patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=tmp_path / "review.json"),
-        patch("auto_coder.codex_cloud_client.CodexCloudClient.get_followup_delivery", return_value=FollowUpDeliveryOutcome.NOT_DELIVERED),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.consume_followup_rejection", return_value=True),
         patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", side_effect=[False, True]) as send_followup,
     ):
         result = _delegate_cloud_review_thread_repair("owner/repo", pr_data, github_client, (thread,))

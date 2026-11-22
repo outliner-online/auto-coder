@@ -1248,3 +1248,68 @@ def test_legacy_jules_false_and_exception_remain_retryable_without_enrollment(tm
         assert all(len(call.args) == 2 for call in native.send_followup.call_args_list)
         assert _load_pending_review_feedback(path) == peer_pending
         assert not json.loads(path.read_text()).get("no_commit_series")
+
+
+@pytest.mark.parametrize("outcome", ["rejected", "indeterminate", "lost", "malformed", "mixed"])
+def test_native_review_rejection_requires_positive_current_send_evidence(tmp_path, outcome):
+    """A native journal lost write or unreadable entry cannot release the shared claim."""
+    import hashlib
+
+    from auto_coder.codex_cloud_client import CodexCloudClient
+    from auto_coder.codex_wham_client import FollowUpDeliveryOutcome, FollowUpDeliveryResult
+
+    shared_path = tmp_path / "review.json"
+    native_path = tmp_path / "native.json"
+    wham = MagicMock()
+    wham.resolve_latest_assistant_turn.return_value = "task_e_review5262~assttrn_1"
+    wham.reconcile_follow_up.return_value = False
+    wham.send_follow_up.side_effect = [
+        FollowUpDeliveryResult(FollowUpDeliveryOutcome.NOT_DELIVERED if outcome == "rejected" else FollowUpDeliveryOutcome.INDETERMINATE, 400 if outcome == "rejected" else 502),
+        FollowUpDeliveryResult(FollowUpDeliveryOutcome.DELIVERED, 200),
+    ]
+    native_send = CodexCloudClient.send_followup
+    sent_identities = []
+
+    def send_then_interleave(client, task_id, message, logical_identities=(), *args, **kwargs):
+        result = native_send(client, task_id, message, logical_identities, *args, **kwargs)
+        sent_identities.extend(logical_identities)
+        if outcome == "lost":
+            # Another process replaces a whole-file snapshot missing this key.
+            native_path.write_text("{}")
+        elif outcome in {"malformed", "mixed"}:
+            records = json.loads(native_path.read_text())
+            key = hashlib.sha256(f"{task_id}\0{logical_identities[-1]}".encode()).hexdigest()
+            records[key] = None
+            if outcome == "mixed":
+                first_key = hashlib.sha256(f"{task_id}\0{logical_identities[0]}".encode()).hexdigest()
+                records[first_key]["status"] = "delivered"
+            native_path.write_text(json.dumps(records))
+        return result
+
+    threads = (_thread(),)
+    if outcome == "mixed":
+        threads += (ReviewThread(id="PRRT_second", comments=[ReviewThreadComment(database_id=203, body="Second finding", author_login="reviewer")]),)
+    pr_data = _pr_data(head_sha="a" * 40)
+    github = _github_client()
+    github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata("codex/review-5262", "a" * 40, "main")
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=shared_path),
+        patch("auto_coder.codex_cloud_client._codex_followup_state_path", return_value=native_path),
+        patch("auto_coder.codex_cloud_client.CodexWhamClient", return_value=wham),
+        patch.object(CodexCloudClient, "send_followup", autospec=True, side_effect=send_then_interleave),
+    ):
+        first = _delegate_cloud_review_thread_repair("owner/repo", pr_data, github, threads)
+        assert first.delivered is False
+        second = _delegate_cloud_review_thread_repair("owner/repo", pr_data, github, threads)
+
+    if outcome == "rejected":
+        assert "rejected follow-up delivery" in first[0]
+        assert second.delivered is True
+        assert wham.send_follow_up.call_count == 2
+    else:
+        assert "unconfirmed follow-up delivery" in first[0]
+        assert second.delivered is False
+        wham.send_follow_up.assert_called_once()
+        assert json.loads(shared_path.read_text())["pending_feedback"]
+    if outcome == "mixed":
+        assert len(sent_identities) == 2

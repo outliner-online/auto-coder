@@ -59,13 +59,14 @@ for delivered scope and limitations.
 
 ## Focused verification
 
-The final production-boundary selection passed **484 tests in 31.85s**, exit 0:
+The final production-boundary selection passed **528 tests in 30.94s**, exit 0:
 
 ```bash
 env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
   AUTO_CODER_LOG_FILE=/workspace/auto-coder-runtime/logs/auto-coder.log \
   AUTO_CODER_DISABLE_AUTO_UPDATE=1 PATH=/workspace/auto-coder/.venv/bin:$PATH \
   bash scripts/test.sh --ci-tests-only \
+  tests/test_codex_cloud_client.py \
   tests/test_pr_no_commit_recovery.py \
   tests/test_codex_cloud_pr_review_flow.py \
   tests/test_pr_repair_bootstrap_policy_no_replay.py \
@@ -87,7 +88,7 @@ env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
 ```
 
 `.venv/bin/mypy --config-file pyproject.toml -p auto_coder` passed across **376
-source files**. Black check, isort check, flake8 on all nine changed Python
+source files**. Black check, isort check, flake8 on all eleven changed Python
 files, and `git diff --check`, passed. Test transports were local controlled
 boundaries; no live provider follow-up was run. The test collector could not
 save its redundant JSON log under the read-only home directory; test execution
@@ -99,3 +100,10 @@ changing its implementation or test. Running
 `bash scripts/test.sh --ci-tests-only tests/test_pr_correction_job.py::test_worktree_preparation_failure_retries_same_job_and_invokes_model_once -q --timeout=120`
 with the same environment passed **1 test in 3.57s**. The CI job log download
 returned Forbidden, so that clock failure was not reproduced or fixed here.
+
+The rejection-release regression now exercises the real native sender/journal.
+Only a positive, single-use rejection result from the latest send can release the
+exact shared source claim. Missing keys, a simulated peer whole-file overwrite,
+malformed exact entries and mixed confirmed/unknown identities stay fenced.
+Native delivery queries distinguish an absent key from a malformed exact entry;
+neither query is used as positive current-send rejection evidence.

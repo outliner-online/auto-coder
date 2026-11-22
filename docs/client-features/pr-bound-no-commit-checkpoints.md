@@ -37,8 +37,12 @@ the latest pending set under the same lock, so a snapshot taken before another
 PR reserved work cannot erase that unseen reservation. Confirmed receipts remove
 only their exact identities. For Codex Cloud and Claude Routine, generic
 exceptions and bare False transport results retain uncertainty. A Codex False
-result releases its exact source claim only when every native logical identity
-is authoritatively `NOT_DELIVERED`; unknown or unreadable receipts remain held. Pre-send
+result releases its exact source claim only with a single-use positive rejection
+receipt from that client's latest send, bound to the exact task and complete
+identity set. Native journal absence is not such evidence: another process can
+lose a key with a stale whole-file write. Unknown, missing or unreadable receipts
+retain the shared reservation. The native getter reports an exact malformed
+entry as indeterminate instead of silently treating it as absent. Pre-send
 metadata/ownership refusals and typed quota holds release only the sender's own
 reserved identities. Excluded providers retain their legacy failure handling:
 Jules False/exception results release only its own request's reservation and
@@ -125,3 +129,11 @@ supported-provider crash/restart and stale-writer regressions remain unchanged.
 verifies a definitively rejected original follow-up can be accepted on its next
 ordinary observation. The review-flow unknown receipt test covers both explicit
 indeterminacy and receipt failure after the attempted send; neither permits replay.
+
+`test_native_review_rejection_requires_positive_current_send_evidence` uses the
+real native sender and journal, with controlled transport outcomes. A proven
+rejection permits the next ordinary send; indeterminate POSTs, a peer overwriting
+the journal without the key, a null exact entry and mixed confirmed/malformed
+identities do not. Native client cases distinguish malformed targets from absent
+keys and verify that positive rejection evidence is consumed once and cleared by
+a subsequent successful send. No new durable store or provider mechanism is added.

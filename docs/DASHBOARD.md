@@ -486,9 +486,16 @@ cleanup, which releases only its own reservation. The existing indeterminate-
 delivery wait continues to report supported-provider uncertainty.
 
 Ordinary Codex review repair preserves the native journal's definite rejection
-outcome: all exact identities must be `NOT_DELIVERED` before their claims are
-released for retry. An unknown or unreadable receipt retains the existing wait.
+outcome: a positive current-send rejection receipt must match the exact task and
+complete identity set before their claims are released for retry. A missing key,
+unknown or unreadable receipt retains the existing shared wait; native malformed
+exact entries report indeterminate. Journal absence cannot prove rejection.
 The existing repair result distinguishes rejection from unconfirmed delivery;
 this restores transport outcome reporting without a new event schema or stage.
 The bootstrap-policy retry regression and review-flow unknown-receipt regression
 exercise these outcomes; Claude uncertainty and excluded Jules handling are unchanged.
+
+The native-journal regression exercises definite refusal, indeterminate delivery,
+a lost-key peer write, a malformed exact entry and mixed identities through the
+ordinary review producer. This hardens existing outcome reporting; it adds no
+processing origin or event schema and leaves Jules unchanged.
