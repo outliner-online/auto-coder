@@ -14,7 +14,7 @@ from .canonical_pr_blocker_ledger import BlockerDisposition, CanonicalPRBlockerL
 from .cloud_provider_instructions import CloudTaskOperation, prepare_cloud_task
 from .codex_cloud_client import _codex_followup_state_path, _followup_state_lock, _load_pending_followups
 from .codex_work_accounting import CodexWorkPhase
-from .codex_work_fence import production_codex_fence
+from .codex_work_fence import CodexWorkAuthorityRefused, production_codex_fence
 from .implementation_slots import ImplementationOwner
 from .pr_no_commit_recovery import pr_correction_lock, review_repair_state_lock
 from .pr_repair import ExistingPrRepairTarget, build_existing_pr_repair_prompt
@@ -129,7 +129,7 @@ def deliver_scoped_followup(
     target: ExistingPrRepairTarget,
     effect: UpholdEffect,
     current_source: Callable[[], bool],
-    send: Callable[[str, str], str],
+    send: Callable[[str, str, Callable[[], bool]], str],
 ) -> str:
     """Claim an exact accepted source once; old unknowns are never changed.
 
@@ -255,7 +255,15 @@ def deliver_scoped_followup(
         if not ready:
             _settle_not_sent(path, effect.decision_id, snapshot, identity)
             return "held_source_not_sent"
-        outcome = send(prompt, identity)
+
+        def final_authority_check() -> bool:
+            return current_source() and _registered_obligation(target, effect) == obligation
+
+        try:
+            outcome = send(prompt, identity, final_authority_check)
+        except CodexWorkAuthorityRefused:
+            _settle_not_sent(path, effect.decision_id, snapshot, identity)
+            return "held_source_not_sent"
         if outcome in {"accepted", "delivery_unknown"}:
             # Normalize the current operation's native evidence while it is
             # still this producer's new claim. A later source cannot enrich an

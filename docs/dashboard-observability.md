@@ -3987,3 +3987,34 @@ tests/test_pr_no_commit_recovery.py`. The production-entry controls cover differ
 PRs tied to one Issue, exact same-subject force holds, missing associations/legacy
 metadata, first-publication positives and refused observations, old/new incarnation
 and cross-repository behavior. Same-PR mixed-send eligibility remains disabled.
+
+### Scoped final authority after owner-lock wait
+
+The existing scoped `current_source`/registered-obligation check is passed through
+the bounded native sender to `CodexWorkFence.execute`. It executes inside the
+owner file lock immediately before accounting/native reservation and POST. A
+false result or read failure raises a specific no-wire outcome, allowing exact
+producer cleanup and the existing `held_source_not_sent` / `DEFERRED` projection.
+Generic or post-wire exceptions remain uncertainty; this adds no remote-refusal
+label or lifecycle settlement. The private callback is not an endpoint or flag.
+
+The admission scope also now requires canonical writable head repository/ref
+separation for different PR numbers; shared heads with different bases and
+missing old/new head evidence retain local-duplicate holds. The same existing
+caller outcomes and deferred view mapping apply. No event schema or renderer
+changes are required.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_scoped_final_authority.py
+tests/test_codex_subject_separation.py tests/test_scoped_review_followup.py
+tests/test_codex_cloud_pr_review_flow.py tests/test_codex_cloud_pr_ci_flow.py
+tests/test_pr_no_commit_recovery.py`. The new production-entry regression uses a
+real competing process and owner file lock, confirms a failed nonblocking flock,
+then changes only remote head/decision evidence before releasing the lock. It
+asserts zero POSTs and exact claim cleanup, plus unchanged positive and reserved
+bookkeeping failure outcomes across restart. The subject regressions preserve
+different-branch positives and add same-head/different-base negatives.
+
+Scope delimiter: publication and ordinary non-scoped routes retain their existing
+authority-check timing; the initial-publication remote observation still precedes
+owner-lock wait. This increment neither closes that race nor enables same-PR
+mixed-send eligibility. No extra polling or provider verification engine exists.

@@ -14,7 +14,7 @@ import time
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .cloud_task_client_base import CloudTask, CloudTaskClientBase, CloudTaskState
 from .codex_cloud_task import canonical_codex_cloud_task_url, extract_codex_cloud_task_id, is_valid_codex_cloud_task_id
@@ -659,8 +659,10 @@ class CodexCloudClient(CloudTaskClientBase):
         latest = max(accepted, key=lambda record: record.accepted_at)
         return latest.completed_turn_id
 
-    def send_existing_pr_followup(self, task_id: str, message: str, target: ExistingPrRepairTarget, logical_identities: tuple[str, ...] = ()) -> bool:
+    def send_existing_pr_followup(self, task_id: str, message: str, target: ExistingPrRepairTarget, logical_identities: tuple[str, ...] = (), *, final_authority_check: Optional[Callable[[], bool]] = None) -> bool:
         """Carry the existing-PR producer contract into the durable sender journal."""
+        if final_authority_check is not None:
+            return self.send_followup(task_id, message, logical_identities, repair_target=target, final_authority_check=final_authority_check)
         return self.send_followup(task_id, message, logical_identities, repair_target=target)
 
     def consume_followup_duplicate_guard(self, task_id: str, logical_identities: tuple[str, ...]) -> bool:
@@ -678,7 +680,7 @@ class CodexCloudClient(CloudTaskClientBase):
         self._followup_rejection = None
         return rejection == (task_id, tuple(sorted(logical_identities)))
 
-    def send_followup(self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None) -> bool:
+    def send_followup(self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None) -> bool:
         """Send work once, reconciling any prior ambiguous POST before retrying."""
         self._followup_rejection = None
         self._followup_duplicate_guard = None
@@ -730,7 +732,7 @@ class CodexCloudClient(CloudTaskClientBase):
         # before the follow-up journal can retain responsibility or WHAM can
         # observe a POST.
         from .codex_work_accounting import CodexSendProvenance
-        from .codex_work_fence import CodexWorkOutsideScope, CodexWorkOverlap, production_codex_fence
+        from .codex_work_fence import CodexWorkAuthorityRefused, CodexWorkOutsideScope, CodexWorkOverlap, production_codex_fence
 
         source_request_id = ",".join(sorted(identities))
         try:
@@ -781,6 +783,8 @@ class CodexCloudClient(CloudTaskClientBase):
             return wham.send_follow_up(task_id=task_id, turn_id=turn_id, prompt=message)
 
         try:
+            if final_authority_check is not None and (fence is None or work_identity is None):
+                raise CodexWorkAuthorityRefused("Scoped final authority requires the existing tracked owner fence")
             provenance = CodexSendProvenance(
                 message_fingerprint,
                 tuple(sorted(identities)),
@@ -789,7 +793,13 @@ class CodexCloudClient(CloudTaskClientBase):
                 repair_target.head_branch if repair_target is not None else None,
                 repair_target.base_branch if repair_target is not None else None,
             )
-            result = fence.execute(work_identity, send_registered_followup, force=force, send_provenance=provenance) if fence is not None and work_identity is not None else send_registered_followup()
+            if fence is not None and work_identity is not None:
+                if final_authority_check is not None:
+                    result = fence.execute(work_identity, send_registered_followup, force=force, send_provenance=provenance, final_authority_check=final_authority_check)
+                else:
+                    result = fence.execute(work_identity, send_registered_followup, force=force, send_provenance=provenance)
+            else:
+                result = send_registered_followup()
         except CodexWorkOverlap as exc:
             self._followup_duplicate_guard = (task_id, tuple(sorted(identities)))
             logger.warning(f"Codex follow-up held by local wildcard overlap guard; no provider request: {exc}")

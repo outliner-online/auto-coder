@@ -17,6 +17,10 @@ class CodexWorkOutsideScope(LookupError):
     """The task has no durable ordinary Issue-owned Codex provenance."""
 
 
+class CodexWorkAuthorityRefused(ImplementationSlotUnavailable):
+    """The final bounded authority read refused before native reservation/wire."""
+
+
 class CodexWorkOverlap(ImplementationSlotUnavailable):
     """An ambiguous owner operation has no exhaustively separate scope."""
 
@@ -42,8 +46,8 @@ class _CodexSubject:
     head_ref: str = ""
 
     def separate_from(self, other: _CodexSubject) -> bool:
-        if self.pr_number is not None and other.pr_number is not None:
-            return self.pr_number != other.pr_number
+        if self.pr_number is not None and self.pr_number == other.pr_number:
+            return False
         if any(ref.startswith("refs/") or any(character.isspace() for character in ref) for ref in (self.head_ref, other.head_ref)) or any(
             len(repo.split("/")) != 2 or not all(repo.split("/")) or ":" in repo or any(character.isspace() for character in repo) for repo in (self.head_repository, other.head_repository)
         ):
@@ -66,6 +70,7 @@ class CodexWorkFence:
 
     def _subject(self, identity: CodexWorkIdentity, provenance: Optional[CodexSendProvenance], *, publication_observation: Optional[CodexRunObservation] = None, incoming: bool = False) -> Optional[_CodexSubject]:
         from .cloud_run import CloudRunRepository
+        from .codex_pr_attribution import AttributionDisposition, CodexPrAttributionRepository
         from .implementation_slots import ImplementationSlotSnapshot
 
         if provenance is None:
@@ -77,10 +82,34 @@ class CodexWorkFence:
         if bound is None or bound.incarnation != identity.incarnation or len(runs) != 1:
             return None
         run = runs[0]
+
+        def authenticated_head(pr_number: int, head_ref: Optional[str]) -> tuple[str, str]:
+            # This existing authenticated attribution producer establishes this
+            # evidence only after exact GitHub head repo/ref == launch intent.
+            # A task URL or PR association alone does not establish the head.
+            attribution = CodexPrAttributionRepository(identity.repository).get(pr_number)
+            origin = attribution.origin
+            if attribution.disposition is not AttributionDisposition.VERIFIED or origin is None:
+                return "", ""
+            if (origin.repository, origin.pr_number, origin.issue_number, origin.provider, origin.task_id, origin.attempt, origin.launch_identity, origin.evidence) != (
+                identity.repository,
+                pr_number,
+                identity.issue_number,
+                "codex-cloud",
+                run.task_id,
+                run.attempt,
+                run.launch_identity,
+                "retained-publication-intent+closing-reference",
+            ):
+                return "", ""
+            if not head_ref or head_ref != run.publication_head_ref or run.publication_head_repository.casefold() != identity.repository.casefold():
+                return "", ""
+            return origin.repository, head_ref
+
         if provenance.pr_number is not None:
             if provenance.pr_number not in bound.implementation_prs or provenance.pr_number not in run.pull_request_numbers:
                 return None
-            head_repo, head_ref = (run.publication_head_repository, run.publication_head_ref) if run.publication_head_ref == provenance.head_branch else ("", "")
+            head_repo, head_ref = authenticated_head(provenance.pr_number, provenance.head_branch)
             return _CodexSubject(provenance.pr_number, head_repo, head_ref)
         if not provenance.publication_launch_identity or (provenance.publication_launch_identity, provenance.publication_head_repository, provenance.publication_head_ref) != (run.launch_identity, run.publication_head_repository, run.publication_head_ref):
             return None
@@ -98,10 +127,11 @@ class CodexWorkFence:
         if run.pull_request_numbers:
             if len(run.pull_request_numbers) != 1 or run.pull_request_numbers[0] not in bound.implementation_prs:
                 return None
-            return _CodexSubject(run.pull_request_numbers[0], run.publication_head_repository, run.publication_head_ref)
+            head_repo, head_ref = authenticated_head(run.pull_request_numbers[0], run.publication_head_ref)
+            return _CodexSubject(run.pull_request_numbers[0], head_repo, head_ref)
         return _CodexSubject(None, run.publication_head_repository, run.publication_head_ref)
 
-    def execute(self, identity: CodexWorkIdentity, send: Callable[[], T], force: bool = False, *, send_provenance: Optional[CodexSendProvenance] = None, publication_observation: Optional[CodexRunObservation] = None) -> T:
+    def execute(self, identity: CodexWorkIdentity, send: Callable[[], T], force: bool = False, *, send_provenance: Optional[CodexSendProvenance] = None, publication_observation: Optional[CodexRunObservation] = None, final_authority_check: Optional[Callable[[], bool]] = None) -> T:
         if identity.repository != self.accounting.slots.repo_name:
             raise ImplementationSlotUnavailable("Codex work belongs to a different repository")
         owner = ImplementationOwner("issue", identity.issue_number)
@@ -121,6 +151,13 @@ class CodexWorkFence:
                     old_subject = self._subject(old_identity, operation.send_provenance)
                     if subject is None or old_subject is None or not subject.separate_from(old_subject):
                         raise CodexWorkOverlap("Ambiguous wildcard Codex work overlaps this request; duplicate send refused before transport")
+            if final_authority_check is not None:
+                try:
+                    current = final_authority_check() is True
+                except Exception as exc:
+                    raise CodexWorkAuthorityRefused("Final scoped authority read failed before transport") from exc
+                if not current:
+                    raise CodexWorkAuthorityRefused("Final scoped authority changed before transport")
             registration = self.accounting.register(
                 owner,
                 identity.incarnation,

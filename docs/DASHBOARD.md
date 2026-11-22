@@ -534,9 +534,17 @@ not clear uncertainty or overwrite a recorded wire attempt. Private wire
 provenance adds no new dashboard fact or status.
 
 Wildcard overlap is narrowed to a PR only by current owner/task durable PR
-associations. Different verified PRs under one Issue can proceed; a changed head
+associations. Different verified PRs under one Issue can proceed only on different canonical
+writable head repository/ref pairs; a changed head
 or reopening the same PR cannot bypass uncertainty. Existing first-publication
 recovery can establish a separate prospective subject with its fresh observation
 and immutable launch/head binding. Missing or unverifiable subjects keep the
 broader hold. Existing local-duplicate/deferred diagnostics display these results;
 subject separation does not enable mixed obligations within a PR.
+
+A scoped source/head authority change detected after waiting for the owner lock
+uses the existing `held_source_not_sent` deferred status. It proves no native
+reservation or POST for that exact claim, not provider rejection. Ambiguous
+bookkeeping outcomes stay fenced. Distinct PR numbers sharing a head, even with
+different bases, remain overlapping. These use existing diagnostics and add no
+public fact fields. Publication-route remote freshness remains unchanged.

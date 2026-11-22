@@ -171,7 +171,8 @@ bypass an old wildcard. No positive mixed eligibility fixture is supplied.
 A wildcard is narrowed to its repository/PR number only when that PR is positively
 bound to both the current owner incarnation's PR membership and the exact task's
 durable CloudRun association. Both sides are re-read under owner serialization.
-Different PR numbers can proceed under one Issue owner. SHA, base changes, close
+Different PR numbers can proceed under one Issue owner only when both also have
+verified canonical writable head identities and those repository/ref pairs differ. SHA, base changes, close
 and reopen activity do not distinguish the same PR. Task IDs or lane/kind names
 alone do not prove separate subjects. Missing legacy provenance, association,
 current ownership or target remains an owner-wide unknown overlap; no historical
@@ -196,3 +197,38 @@ with a real ordinary unknown request and drives native continuation, the real CI
 producer and initial-publication monitor. It covers independent PR/publication
 positives, same-subject and evidence-deficient negatives, close/reopen activity,
 stale incarnation and cross-repository controls while preserving the old records.
+
+Different PR numbers with the same writable head repository/ref remain overlapping
+even with different bases. Missing head identity cannot establish separation;
+this also applies when older provenance has only a PR number. Same-PR head
+changes never establish a new subject. Canonical repository casing is normalized
+for comparison and ambiguous ref representations remain held.
+
+Scoped corrections now carry their existing bounded `current_source` check and
+exact registered-obligation comparison through the native sender. The existing
+owner file lock is acquired before this final check, which runs after overlap
+admission and immediately before accounting/native reservation and POST. It
+rechecks current provider attribution, PR/head, source decision, contract/finding
+and existing pending/allowance gates; no new engine, poller or permission exists.
+A false result or failed authority read has a typed pre-wire refusal. Only the
+exact scoped pending claim becomes `not_sent` under its existing shared lock;
+there is no native reservation or provider request. Generic/post-wire failures
+remain fenced. Untracked/unbounded senders cannot accept this scoped callback.
+
+This final check is limited to the scoped correction path. Ordinary, CI, conflict,
+checkpoint and initial-publication routes retain their current authority checks.
+In particular, the initial-publication monitor still obtains its fresh remote
+observation before owner-lock acquisition; its remote lock-wait freshness gap is
+not fixed by this increment. Same-PR mixed-send eligibility remains disabled.
+`tests/test_scoped_final_authority.py` uses an actual competing process/file lock,
+observes a real failed flock attempt, changes only the remote fixture's head or
+decision after outer checks and proves zero POSTs, plus exact positive and
+ambiguous/accepted bookkeeping exceptions with durable replay suppression.
+
+Existing-PR head identity comes from the existing authenticated attribution
+producer's exact head-match publication proof, bound to the same repository, PR,
+Issue, task, attempt and launch, together with current ownership and the frozen
+producer head ref. Task-URL-only attribution does not retain canonical head proof
+and remains insufficient for cross-subject separation. A record's label alone
+cannot qualify mismatching ownership/launch/head evidence. No new attribution
+record is synthesized at the send fence.

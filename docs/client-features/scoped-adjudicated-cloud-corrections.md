@@ -101,3 +101,12 @@ authorized selections held by the common wildcard fence. Configured second-wire
 unknown/crash/rejection controls are never reached behind that fence. Actual
 native crash/rejection handling is covered by `tests/test_codex_send_provenance.py`.
 No ledger distinctness is seeded.
+
+The scoped final authority check now also executes after acquiring the existing
+cross-process owner lock, before its accounting/native reservation and POST. It
+uses the same current source/head/provider/effect gates and compares the exact
+registered obligation again. A typed refusal or read exception before wire
+settles only that producer's matching pending claim as `not_sent`; post-wire
+exceptions never do. The check remains a bounded controller read, not an atomic
+transaction with GitHub. Other publication routes are outside this correction.
+The contested-lock regression is `tests/test_scoped_final_authority.py`.

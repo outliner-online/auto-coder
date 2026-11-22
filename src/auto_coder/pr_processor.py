@@ -2503,23 +2503,25 @@ def _retire_closed_cloud_checkpoint(repository: str, pr_number: int) -> None:
         NoCommitRecovery(path).end_series(pr_number, "closed")
 
 
-def _send_followup_with_quota_admission(client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, recovery_provider: str = "", checkpoint: bool = False) -> bool:
+def _send_followup_with_quota_admission(
+    client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, recovery_provider: str = "", checkpoint: bool = False, final_authority_check: Optional[Callable[[], bool]] = None
+) -> bool:
     """Keep accepted PR correction checkpoints on the normal authenticated sender."""
     from .pr_no_commit_recovery import SUPPORTED_PROVIDERS
 
     if repair_target is None or checkpoint:
-        return _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target)
+        return _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}))
     if recovery_provider not in SUPPORTED_PROVIDERS:
         with _new_pr_correction_request(repository, repair_target.pr_number):
             native_identities = identities if not recovery_provider else ()
-            return _send_followup_with_quota_admission_impl(client, repository, task_id, message, native_identities, repair_target=repair_target)
+            return _send_followup_with_quota_admission_impl(client, repository, task_id, message, native_identities, repair_target=repair_target, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}))
     from .pr_no_commit_recovery import NoCommitRecovery, pr_correction_lock
 
     path = _cloud_review_repair_state_path(repository)
     with pr_correction_lock(path, repair_target.pr_number):
         recovery = NoCommitRecovery(path)
         recovery.supersede_prior_request(recovery_provider, task_id, repair_target, identities, message)
-        accepted = _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities if recovery_provider == "codex-cloud" else (), repair_target=repair_target)
+        accepted = _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities if recovery_provider == "codex-cloud" else (), repair_target=repair_target, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}))
         if accepted:
             try:
                 recovery.record_acceptance(recovery_provider, task_id, repair_target, identities, message, time.time())
@@ -2530,14 +2532,18 @@ def _send_followup_with_quota_admission(client: Any, repository: str, task_id: s
         return accepted
 
 
-def _send_followup_with_quota_admission_impl(client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None) -> bool:
+def _send_followup_with_quota_admission_impl(client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None) -> bool:
     """Serialize Claude usage rechecks and fence final provider assignment."""
     context = getattr(type(client), "followup_quota_context", None)
     if not callable(context):
         bounded_sender = getattr(type(client), "send_existing_pr_followup", None)
         if repair_target is not None and callable(bounded_sender):
-            return bounded_sender(client, task_id, message, repair_target, identities)
+            return bounded_sender(client, task_id, message, repair_target, identities, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}))
+        if final_authority_check is not None:
+            raise ValueError("Scoped final authority requires the bounded native sender")
         return client.send_followup(task_id, message, identities) if identities else client.send_followup(task_id, message)
+    if final_authority_check is not None:
+        raise ValueError("Scoped final authority is limited to Codex native ownership")
     backend_name, credential_context = context(client)
     store = get_claude_followup_wait_store()
     with store.admission(repository, backend_name, credential_context) as claim:
@@ -11208,11 +11214,11 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
                     latest = _current_adjudication_ledger_snapshots(repo_name, pr_number, github_client)
                     return any(item.context is not None and item.context.context_id == upheld.context_id and item.result.status is AdjudicationStatus.APPLICABLE and item.result.decision_id == upheld.decision_id and item.source_comment_id == upheld.source_comment_id for item in latest)
 
-                def send_scoped(prompt: str, identity: str) -> str:
+                def send_scoped(prompt: str, identity: str, final_authority_check: Callable[[], bool]) -> str:
                     if origin is None:
                         return "held_owner"
                     try:
-                        accepted = _send_followup_with_quota_admission(origin.client, repo_name, scoped.task_id, prompt, (identity,), repair_target=target)
+                        accepted = _send_followup_with_quota_admission(origin.client, repo_name, scoped.task_id, prompt, (identity,), repair_target=target, final_authority_check=final_authority_check)
                     except Exception:
                         if origin.client.consume_followup_rejection(scoped.task_id, (identity,)):
                             return "remote_rejected"
