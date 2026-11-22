@@ -284,13 +284,10 @@ def test_native_scoped_source_is_claimed_once_without_replaying_unknown_old(tmp_
         # Reconstruct every reader/client through the real entry on each pass.
         _apply_review_adjudication_effects(REPO, PR, data, github)
         _apply_review_adjudication_effects(REPO, PR, data, github)
-    expected = 2 if control in {"fresh", "unknown_new", "lost_new_native", "remote_rejected", "prewire_refusal", "prewire_exception", "crash_after_wire"} else 1
+    # Until exhaustive ordinary scope has a real producer, even the v2 source
+    # cannot bypass an older wildcard operation at the shared owner boundary.
+    expected = 1
     assert wham.send_follow_up.call_count == expected, actions
-    if expected == 2:
-        prompt = wham.send_follow_up.call_args.kwargs["prompt"]
-        assert FAILURE_REQUIREMENT in prompt
-        assert COVERAGE_REQUIREMENT not in prompt
-        assert "Automated finding" not in prompt
     retained = json.loads(path.read_text())
     if control != "missing_snapshot":
         assert retained["scoped_review_followups"][first.decision_id] == old
@@ -304,15 +301,9 @@ def test_native_scoped_source_is_claimed_once_without_replaying_unknown_old(tmp_
     from auto_coder.execution_trace import Outcome
 
     assert all(args[3] is Outcome.DEFERRED for args in scoped_stages if args[4]["status"].startswith("held_") or args[4]["status"] == "already_accepted")
-    if control in {"fresh", "prewire_refusal", "prewire_exception"}:
-        assert sum(args[3] is Outcome.ACCEPTED_HANDOFF for args in scoped_stages) == 1
-        assert retained["scoped_review_followups"][second.decision_id]["state"] == "accepted"
-    elif control in {"unknown_new", "lost_new_native", "remote_rejected", "native_duplicate", "crash_after_wire"}:
+    if control in {"fresh", "unknown_new", "lost_new_native", "remote_rejected", "prewire_refusal", "prewire_exception", "crash_after_wire", "native_duplicate"}:
         assert all(args[3] is not Outcome.ACCEPTED_HANDOFF for args in scoped_stages)
-        if control == "native_duplicate":
-            assert any(args[4]["status"] == "held_native_duplicate" and args[3] is Outcome.DEFERRED for args in scoped_stages)
-        if control == "remote_rejected":
-            assert any(args[4]["status"] == "remote_rejected" and args[3] is Outcome.FAILED for args in scoped_stages)
+        assert any(args[4]["status"] == "held_native_duplicate" and args[3] is Outcome.DEFERRED for args in scoped_stages)
         assert retained["scoped_review_followups"][second.decision_id]["state"] == "reserved"
     assert tuple(item for item in CodexWorkAccounting(slots).snapshot(owner, incarnation).operations if item.source_request_id == old["snapshot"]["identity"]) == old_operations
     # Durable v1/v2 source reload must still validate its immutable body/digest.

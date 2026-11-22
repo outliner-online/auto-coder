@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Callable, Optional, TypeVar
 
-from .codex_work_accounting import CodexWorkAccounting, CodexWorkPhase
+from .codex_work_accounting import CodexSendProvenance, CodexWorkAccounting, CodexWorkPhase, WorkAccountingStatus
 from .implementation_slots import ImplementationOwner, ImplementationSlotRepository, ImplementationSlotUnavailable
 
 T = TypeVar("T")
@@ -14,6 +14,10 @@ T = TypeVar("T")
 
 class CodexWorkOutsideScope(LookupError):
     """The task has no durable ordinary Issue-owned Codex provenance."""
+
+
+class CodexWorkOverlap(ImplementationSlotUnavailable):
+    """An ambiguous owner operation has no exhaustively separate scope."""
 
 
 @dataclass(frozen=True)
@@ -41,11 +45,20 @@ class CodexWorkFence:
     def __init__(self, accounting: CodexWorkAccounting) -> None:
         self.accounting = accounting
 
-    def execute(self, identity: CodexWorkIdentity, send: Callable[[], T], force: bool = False) -> T:
+    def execute(self, identity: CodexWorkIdentity, send: Callable[[], T], force: bool = False, *, send_provenance: Optional[CodexSendProvenance] = None) -> T:
         if identity.repository != self.accounting.slots.repo_name:
             raise ImplementationSlotUnavailable("Codex work belongs to a different repository")
         owner = ImplementationOwner("issue", identity.issue_number)
         with self.accounting.slots.serialize(owner):
+            if identity.operation_kind in {"follow-up", "publication", "repair"}:
+                snapshot = self.accounting.snapshot(owner, identity.incarnation)
+                if snapshot.accounting_status is not WorkAccountingStatus.COMPLETE:
+                    raise ImplementationSlotUnavailable("Codex send inventory is incomplete")
+                # No producer yet supplies exhaustive accepted-obligation scope.
+                # Missing/legacy provenance is a wildcard too. Force is not a
+                # certificate that an ambiguous operation is a different duty.
+                if any((operation.send_provenance is not None and operation.send_provenance.outcome in {"reserved", "unknown"}) or (operation.send_provenance is None and operation.phase in {CodexWorkPhase.RESERVED, CodexWorkPhase.DELIVERY_UNKNOWN}) for operation in snapshot.operations):
+                    raise CodexWorkOverlap("Ambiguous wildcard Codex work overlaps this request; duplicate send refused before transport")
             registration = self.accounting.register(
                 owner,
                 identity.incarnation,
@@ -54,7 +67,10 @@ class CodexWorkFence:
                 source_request_id=identity.source_request_id,
                 causal_baseline=identity.causal_baseline,
                 task_id=identity.task_id,
+                send_provenance=send_provenance,
             )
+            if not registration.created and send_provenance is not None:
+                raise CodexWorkOverlap("Existing Codex wire reservation cannot be replayed by force; duplicate send refused")
             if not registration.created and not force:
                 raise ImplementationSlotUnavailable("Codex logical operation was already accounted; duplicate send refused")
             return send()

@@ -100,7 +100,7 @@ against later native key loss. Legacy mixed comment batches stay held: new IDs,
 role declarations and different canonical UUIDs do not establish independent
 operations. No old uncertain request is released or replayed.
 
-Explicit independently scoped corrections can instead use the authenticated v2
+Explicit scoped corrections can use the authenticated v2
 adjudication path documented in [Scoped adjudicated cloud corrections](scoped-adjudicated-cloud-corrections.md).
 Its authority is the existing allowed adjudicator's explicit revision-bound
 correction, not a controller-created distinct-defect decision. The former
@@ -152,3 +152,7 @@ ordinary intake consumes only the current exact task/full-identity proof under
 the shared lock and releases only that request's pending claim. Stale receipts
 are discarded before admission; absent, mismatched and ambiguous proof remain
 fenced. This does not settle or rewrite other accounting/uncertain operations.
+
+The common Codex owner fence now also holds the v2 prototype behind any ambiguous
+wildcard. Current wire provenance does not yet provide exhaustive registered
+obligation eligibility; see [Durable Codex work accounting](durable-codex-work-accounting.md#before-wire-continuation-provenance-milestone).

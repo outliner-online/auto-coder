@@ -3898,9 +3898,10 @@ See [Scoped adjudicated cloud corrections](client-features/scoped-adjudicated-cl
 Run `bash scripts/test.sh --ci-tests-only tests/test_scoped_review_followup.py tests/test_review_adjudication.py tests/test_review_adjudication_orchestrator.py tests/test_pr_processor_adjudication_effects.py tests/test_review_feedback_marker.py tests/test_codex_cloud_pr_review_flow.py`.
 The new real-entry regression controls only source/GitHub/transport boundaries;
 actual owner, attribution, native journal, accounting and source persistence are
-used. It asserts old evidence preservation and one new emission across repeated
-reconstruction. The baseline adjudication regressions cover the existing stage
-contract. The scoped fixture also checks the emitted stage outcome/status mapping.
+used. It asserts old evidence preservation across repeated reconstruction.
+The current common owner wildcard fence disables its former mixed positive
+emission until exhaustive ordinary obligation authority exists. The baseline
+adjudication regressions cover the existing stage contract. The scoped fixture also checks the emitted stage outcome/status mapping.
 
 Scoped adjudication pre-wire source refusal now emits `held_source_not_sent`
 through the existing deferred status mapping. Its private exact claim is settled
@@ -3911,8 +3912,8 @@ unsupported or duplicate requirement selections. No free-form replacement payloa
 or distinction field is accepted. The registered requirement/finding determines
 the instruction; the same existing facts and public renderer are retained.
 The real-entry scoped regression checks refusal after reservation, no wire call,
-a subsequent authorized source, and restart fences alongside duplicate,
-whitespace-only and unrelated obligation controls.
+a subsequent authorized source held by the owner wildcard fence, and restart
+fences alongside duplicate, whitespace-only and unrelated obligation controls.
 
 ### Ordinary legacy source evidence and rejection bookkeeping
 
@@ -3932,3 +3933,31 @@ renderer: no new processing origin, schema, dashboard status or recovery clock i
 introduced. Other work-accounting records remain governed by their existing
 settlement rules. Run `bash scripts/test.sh --ci-tests-only
 tests/test_legacy_review_source_evidence.py tests/test_codex_cloud_pr_review_flow.py`.
+
+## Common Codex before-wire provenance milestone
+
+Native correction callers now persist private wire membership in existing owner
+accounting before journal reservation/POST. Scope is always wildcard; no new
+mixed-send eligibility or processing origin is enabled. Reserved/unknown legacy
+and future operations hold later correction/publication sends under the owner
+file lock, including forced broad continuation and the v2 prototype. The client
+reports this as its existing local duplicate guard, not remote refusal; scoped
+adjudication retains `held_native_duplicate` / `DEFERRED`. Other caller result
+stages retain their existing mapping. No payload, owner incarnation, membership
+list, endpoint or private provenance is added to the public projection.
+
+Exact native outcome persistence precedes later bookkeeping. Positive definite
+rejection remains distinguishable if that bookkeeping raises. Acceptance is not
+lifecycle completion, and existing checkpoint clocks/observability remain owned
+by #2889. Existing receipt reconciliation may update future wire outcome only
+with exact fingerprint and whole native membership. No new polling is added.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_codex_send_provenance.py
+tests/test_codex_work_fence.py tests/test_codex_work_accounting.py
+tests/test_codex_work_reconstruction.py tests/test_legacy_review_source_evidence.py
+tests/test_codex_cloud_pr_review_flow.py tests/test_scoped_review_followup.py
+tests/test_pr_no_commit_recovery.py`. These cover before-wire persistence, ordinary
+acceptance, restart/legacy and forced wildcard holds, no-ambiguity broad baseline,
+crashes, known rejection, existing native acceptance reconciliation and unchanged
+legacy/scoped uncertainty. No dashboard schema or renderer change is required
+because the boundary reuses existing assignment/hold/refusal distinctions.

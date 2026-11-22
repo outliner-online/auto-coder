@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 import re
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from typing import Callable, Iterator, Mapping, Optional
 
@@ -74,6 +74,43 @@ class ReconstructionReceipt:
 
 
 @dataclass(frozen=True)
+class CodexSendProvenance:
+    """Exact before-wire facts; wildcard scope grants no separation authority."""
+
+    fingerprint: str
+    logical_identities: tuple[str, ...]
+    pr_number: Optional[int] = None
+    head_sha: Optional[str] = None
+    head_branch: Optional[str] = None
+    base_branch: Optional[str] = None
+    scope: str = "wildcard"
+    outcome: str = "reserved"
+
+    def __post_init__(self) -> None:
+        if self.scope != "wildcard" or self.outcome not in {"reserved", "unknown", "accepted", "not_delivered"}:
+            raise ValueError("Unsupported Codex send provenance scope or outcome")
+        if not isinstance(self.fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", self.fingerprint) is None:
+            raise ValueError("Malformed Codex send provenance fingerprint")
+        members = self.logical_identities
+        if not isinstance(members, tuple) or not members or any(not isinstance(member, str) or not member for member in members) or tuple(sorted(set(members))) != members:
+            raise ValueError("Codex send membership must be complete, unique and sorted")
+        target = (self.pr_number, self.head_sha, self.head_branch, self.base_branch)
+        if any(value is not None for value in target) and (
+            type(self.pr_number) is not int or self.pr_number <= 0 or not isinstance(self.head_sha, str) or re.fullmatch(r"[0-9a-f]{40}", self.head_sha) is None or any(not isinstance(value, str) or not value for value in (self.head_branch, self.base_branch))
+        ):
+            raise ValueError("Incomplete Codex send provenance target")
+
+    @classmethod
+    def from_record(cls, raw: object) -> CodexSendProvenance:
+        if not isinstance(raw, dict) or not isinstance(raw.get("logical_identities"), (list, tuple)):
+            raise ValueError("Malformed Codex send provenance")
+        try:
+            return cls(**{**raw, "logical_identities": tuple(raw["logical_identities"])})
+        except TypeError as exc:
+            raise ValueError("Malformed Codex send provenance") from exc
+
+
+@dataclass(frozen=True)
 class CodexWorkOperation:
     logical_operation_id: str
     kind: str
@@ -89,6 +126,9 @@ class CodexWorkOperation:
     definite_non_delivery: bool = False
     request_fingerprint: Optional[str] = None
     handoff_pr_number: Optional[int] = None
+    send_provenance: Optional[CodexSendProvenance] = None
+    # Receipt-only native membership; never a source-birth/scope certificate.
+    native_membership: tuple[str, ...] = ()
 
     @property
     def settled(self) -> bool:
@@ -192,6 +232,12 @@ class CodexWorkAccounting:
                         for field in ("publication_complete", "tracking_complete"):
                             if encoded[field] is True:
                                 existing[field] = True
+                        if existing.get("send_provenance") is not None and operation.phase is CodexWorkPhase.ACCEPTED:
+                            provenance = CodexSendProvenance.from_record(existing["send_provenance"])
+                            if provenance.fingerprint == operation.request_fingerprint and provenance.logical_identities == operation.native_membership:
+                                if provenance.outcome == "not_delivered":
+                                    raise ImplementationSlotUnavailable("Native acceptance conflicts with definite rejection")
+                                existing["send_provenance"] = asdict(replace(provenance, outcome="accepted"))
                         for field in ("request_fingerprint", "handoff_pr_number"):
                             previous = existing.get(field)
                             incoming = encoded[field]
@@ -243,11 +289,14 @@ class CodexWorkAccounting:
         source_request_id: str,
         causal_baseline: Optional[str] = None,
         task_id: Optional[str] = None,
+        send_provenance: Optional[CodexSendProvenance] = None,
     ) -> CodexWorkRegistration:
         """Record already-authorized work; registration grants no send authority."""
         required = (logical_operation_id, kind, source_request_id)
         if any(not value for value in required):
             raise ValueError("Logical operation, kind, and source request identities are required")
+        if send_provenance is not None and (send_provenance.outcome != "reserved" or ",".join(send_provenance.logical_identities) != source_request_id):
+            raise ValueError("Codex provenance does not match the reserved native membership")
         with self.slots.serialize(owner), self.slots._state_lock():
             owners = self.slots._read()
             record = self._active_record(owners, owner, incarnation)
@@ -255,7 +304,7 @@ class CodexWorkAccounting:
             self._require_current_reconstruction(accounting)
             operations = accounting["operations"]
             assert isinstance(operations, dict)
-            proposed = {
+            proposed: dict[str, object] = {
                 "kind": kind,
                 "source_request_id": source_request_id,
                 "causal_baseline": causal_baseline,
@@ -268,16 +317,45 @@ class CodexWorkAccounting:
                 "accepted": task_id is not None,
                 "definite_non_delivery": False,
             }
+            if send_provenance is not None:
+                proposed["send_provenance"] = asdict(send_provenance)
+                proposed["request_fingerprint"] = send_provenance.fingerprint
             existing = operations.get(logical_operation_id)
             if existing is not None:
                 immutable_fields = ("kind", "source_request_id", "causal_baseline", "task_id")
                 if not isinstance(existing, dict) or any(existing.get(field) != proposed[field] for field in immutable_fields):
                     raise ValueError("Logical operation identity was replayed with different attributes")
+                if send_provenance is not None:
+                    previous = existing.get("send_provenance")
+                    if previous is None or replace(CodexSendProvenance.from_record(previous), outcome="reserved") != send_provenance:
+                        raise ValueError("Codex send provenance collision; legacy work cannot be backfilled")
                 return CodexWorkRegistration(self._snapshot_from_record(owner, incarnation, record), False, False)
             operations[logical_operation_id] = proposed
             self._advance_revision(record)
             self.slots._write(owners)
             return CodexWorkRegistration(self._snapshot_from_record(owner, incarnation, record), True, False)
+
+    def record_send_outcome(self, owner: ImplementationOwner, incarnation: str, operation_id: str, *, source_request_id: str, causal_baseline: Optional[str], task_id: Optional[str], outcome: str) -> None:
+        """Retain exact native outcome without settling execution/handoff work."""
+        if outcome not in {"accepted", "unknown", "not_delivered"}:
+            raise ValueError("Unsupported Codex native send outcome")
+        with self.slots.serialize(owner), self.slots._state_lock():
+            owners = self.slots._read()
+            record = self._active_record(owners, owner, incarnation)
+            operations = self._complete_accounting(record)["operations"]
+            assert isinstance(operations, dict)
+            raw = operations.get(operation_id)
+            if not isinstance(raw, dict) or any(raw.get(key) != value for key, value in (("source_request_id", source_request_id), ("causal_baseline", causal_baseline), ("task_id", task_id))):
+                raise ValueError("Native send outcome does not match its exact reservation")
+            if raw.get("send_provenance") is None:
+                return  # Preserve legacy evidence without invented provenance.
+            provenance = CodexSendProvenance.from_record(raw["send_provenance"])
+            if provenance.outcome not in {"reserved", "unknown", outcome} or (provenance.outcome == "unknown" and outcome == "not_delivered"):
+                raise ValueError("Native outcome would weaken previous send evidence")
+            if provenance.outcome != outcome:
+                raw["send_provenance"] = asdict(replace(provenance, outcome=outcome))
+                self._advance_revision(record)
+                self.slots._write(owners)
 
     def transition(
         self,
@@ -425,6 +503,9 @@ class CodexWorkAccounting:
             raise ValueError("Malformed Codex prepared-message fingerprint")
         if handoff_pr is not None and (type(handoff_pr) is not int or handoff_pr <= 0):
             raise ValueError("Malformed Codex follow-up handoff PR")
+        provenance = None if raw.get("send_provenance") is None else CodexSendProvenance.from_record(raw["send_provenance"])
+        if provenance is not None and (",".join(provenance.logical_identities) != raw["source_request_id"] or provenance.fingerprint != fingerprint):
+            raise ValueError("Codex provenance conflicts with operation membership or payload")
         phase = CodexWorkPhase(raw["phase"])
         accepted = raw["accepted"]
         definite_non_delivery = raw["definite_non_delivery"]
@@ -449,6 +530,7 @@ class CodexWorkAccounting:
             definite_non_delivery,
             fingerprint,
             handoff_pr,
+            provenance,
         )
 
     @staticmethod
@@ -467,6 +549,7 @@ class CodexWorkAccounting:
             "definite_non_delivery": operation.definite_non_delivery,
             "request_fingerprint": operation.request_fingerprint,
             "handoff_pr_number": operation.handoff_pr_number,
+            **({"send_provenance": asdict(operation.send_provenance)} if operation.send_provenance is not None else {}),
         }
 
     @staticmethod

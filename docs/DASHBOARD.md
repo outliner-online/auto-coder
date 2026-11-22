@@ -503,9 +503,9 @@ processing origin or event schema and leaves Jules unchanged.
 For mixed Codex review feedback, `unconfirmed_delivery_receipt` can also mean
 that intake held uncertain native identities or feedback whose independence is
 unresolved. Local duplicate suppression explicitly reports that no provider
-request was made. A remote rejection requires positive sender evidence. One new
-explicitly scoped adjudicated request may be accepted while older uncertain requests
-remain fenced; acceptance does not resolve those threads or permit merging.
+request was made. A remote rejection requires positive sender evidence. The common owner fence also holds scoped adjudication behind ambiguous wildcard
+work. Current wire provenance does not authorize mixed-send separation; it does
+not resolve threads or permit merging.
 
 Scoped v2 adjudicated corrections use the existing review-adjudication-effect
 stage with `SCOPED_FIX`. An accepted handoff confirms assignment only. Held or
@@ -526,3 +526,9 @@ mismatched proof remain fenced. Historical payload matches and a Finding marked
 `NONE` do not authorize splitting a legacy mixed batch. Existing action details
 and `unconfirmed_delivery_receipt` continue to display these outcomes without a
 new status or event schema.
+
+Native owner wildcard holds reuse the existing local duplicate diagnostic and
+`held_native_duplicate` adjudication status. They mean no provider request was
+made. Broad new requests remain available without ambiguous work; `force` does
+not clear uncertainty or overwrite a recorded wire attempt. Private wire
+provenance adds no new dashboard fact or status.

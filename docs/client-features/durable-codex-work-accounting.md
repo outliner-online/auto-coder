@@ -113,3 +113,54 @@ recover publication/tracking facts. The retry source consistency token includes
 the run, recovery and owner binding, so later changes invalidate the observation.
 This never declares execution settled: current, causally terminal native
 provider evidence and the existing closed-PR predicate remain necessary.
+
+## Before-wire continuation provenance milestone
+
+Issue-owned native Codex follow-ups now freeze `send_provenance` in the existing
+accounting operation, under the existing cross-process owner serialization,
+before native journal reservation and WHAM. It binds the prepared-payload
+fingerprint, complete sorted native membership and available exact PR/head/base
+branches to that operation's existing task, source, owner and incarnation.
+This is wire provenance, not an approved-obligation or source-birth certificate.
+There is no new external envelope, setting or enablement flag. Its only supported
+scope is `wildcard`; no exhaustive bounded scope is accepted by this milestone.
+
+Reserved, interrupted and unknown wildcard work overlaps another follow-up,
+repair or publication operation for the owner. Legacy records lacking provenance
+are also wildcard when reserved/unknown. The check runs inside the owner lock,
+before creating another operation or entering transport; neither a different
+message/lane/batch nor `force` establishes separation. All native correction
+producers converge here, including broad CI continuation and the scoped v2
+prototype. Existing direct publication recovery uses the same fence. Untracked
+tasks retain their existing outside-policy behavior. Missing/corrupt accounting
+continues to fail closed. Historical records are not assigned source birth or
+new provenance.
+
+When no ambiguous work exists, ordinary new broad continuation remains available.
+A recorded wire attempt cannot be forcibly reused: that would overwrite its
+before-wire provenance without reserving a new attempt. Existing accepted
+unforced duplicates still use native idempotent receipt handling. This milestone
+does not add retry/attempt sequencing or mint new identities for old work.
+
+Native accepted, unknown and positive definitely-not-delivered outcomes are
+retained independently of execution/publication settlement. The exact outcome
+is persisted before later lifecycle bookkeeping, preserving known rejection if
+that bookkeeping raises. Missing journal entries and generic exceptions never
+prove rejection. Existing native reconciliation can update future provenance to
+accepted only when prepared fingerprint and the entire observed native membership
+match; no new provider getter or polling is introduced. It cannot create legacy
+provenance or settle lifecycle responsibility. Existing checkpoint clocks and
+acceptance timestamps are unchanged.
+
+Mixed-send eligibility remains disabled. The next boundary is actual trusted
+accepted-source birth plus exhaustively approved obligation membership shared by
+ordinary, adversarial and adjudicated producers; broad requests must remain
+wildcard when they cannot enumerate that membership. Separately actionable scope
+must come from trusted exhaustive records, never UUIDs, strings or digests.
+Legacy #6009 is neither backfilled nor qualified.
+
+`tests/test_codex_send_provenance.py` exercises real ordinary acceptance and native
+pre-wire state, restart, broad continuation with/without force, legacy records,
+pre-/post-wire crashes, exact positive receipt reconciliation and rejection with
+bookkeeping failure. Scoped regressions now prove that the v2 journal cannot
+bypass an old wildcard. No positive mixed eligibility fixture is supplied.

@@ -729,7 +729,8 @@ class CodexCloudClient(CloudTaskClientBase):
         # spelling or a caller-provided eligibility flag. Registration occurs
         # before the follow-up journal can retain responsibility or WHAM can
         # observe a POST.
-        from .codex_work_fence import CodexWorkOutsideScope, production_codex_fence
+        from .codex_work_accounting import CodexSendProvenance
+        from .codex_work_fence import CodexWorkOutsideScope, CodexWorkOverlap, production_codex_fence
 
         source_request_id = ",".join(sorted(identities))
         try:
@@ -780,7 +781,19 @@ class CodexCloudClient(CloudTaskClientBase):
             return wham.send_follow_up(task_id=task_id, turn_id=turn_id, prompt=message)
 
         try:
-            result = fence.execute(work_identity, send_registered_followup, force=force) if fence is not None and work_identity is not None else send_registered_followup()
+            provenance = CodexSendProvenance(
+                message_fingerprint,
+                tuple(sorted(identities)),
+                repair_target.pr_number if repair_target is not None else None,
+                repair_target.head_sha if repair_target is not None else None,
+                repair_target.head_branch if repair_target is not None else None,
+                repair_target.base_branch if repair_target is not None else None,
+            )
+            result = fence.execute(work_identity, send_registered_followup, force=force, send_provenance=provenance) if fence is not None and work_identity is not None else send_registered_followup()
+        except CodexWorkOverlap as exc:
+            self._followup_duplicate_guard = (task_id, tuple(sorted(identities)))
+            logger.warning(f"Codex follow-up held by local wildcard overlap guard; no provider request: {exc}")
+            return False
         except (OSError, ValueError, TypeError) as exc:
             logger.warning(f"Cannot durably reserve Codex follow-up; request was not sent: {exc}")
             return False
@@ -811,6 +824,19 @@ class CodexCloudClient(CloudTaskClientBase):
                     pending.pop(key, None)
             _save_pending_followups(state_path, pending)
         if fence is not None and work_identity is not None:
+            from .implementation_slots import ImplementationOwner
+
+            # Preserve native certainty before later lifecycle accounting can
+            # raise. This does not settle execution/publication responsibility.
+            fence.accounting.record_send_outcome(
+                ImplementationOwner("issue", work_identity.issue_number),
+                work_identity.incarnation,
+                work_identity.operation_id,
+                source_request_id=work_identity.source_request_id,
+                causal_baseline=work_identity.causal_baseline,
+                task_id=work_identity.task_id,
+                outcome="accepted" if result.delivered else "not_delivered" if result.outcome is FollowUpDeliveryOutcome.NOT_DELIVERED else "unknown",
+            )
             fence.record_delivery(
                 work_identity,
                 accepted=result.delivered,
