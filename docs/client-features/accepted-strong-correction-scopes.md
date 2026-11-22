@@ -50,9 +50,19 @@ Ordinary review intake selects one sealed unattempted source, builds only its
 bounded instruction from the registered finding and existing Requirement, and
 uses its existing verified Codex-cloud owner. Under the common owner lock it
 rechecks the accepted snapshot, complete reconciled old inventory, exact named
-native groups and prompt fingerprint. Immediately before reservation/POST the
+native groups and prompt fingerprint. Old native groups use the sender's existing
+canonical `sha256(task + NUL + logical_identity)` lookup keys, typed journal reader,
+exact operation/source/baseline and full recorded repair target. Since native rows
+have no head-repository field, the existing authenticated publication attribution
+must positively match the frozen launch/head repository/ref as well. Only persisted
+`indeterminate`/`delivered` rows are admissible, and accepted accounting requires
+all group rows delivered. Miskeyed, deficient or contradictory old evidence is held
+without relocation or repair. Immediately before reservation/POST the
 existing final-authority callback refreshes origin, open PR, exact head/base,
 current contract/policy, root bodies, allowance, draining and pending-effect gates.
+The source reader also requires an OPEN/RECURRENCE canonical blocker with no
+reconciliation needs, so invalidation/correction or a scope reconciliation hold
+revokes eligibility even when root IDs and accepted source bytes are unchanged.
 Only two exhaustive approved same-PR scopes can bypass the old wildcard overlap
 hold. Shared writable heads across PRs remain overlapping; genuine different
 branches retain the reviewed subject-separation behavior. Force cannot bypass
@@ -90,7 +100,11 @@ edited roots/publication, a remote-only head change after outer checks, pending
 effects, exhausted allowance, missing owner run,
 alternate force lanes, exact cross-lane replay and crashes before acceptance,
 before wire and after wire, and native accepted/unknown/rejection certainty when
-later lifecycle bookkeeping fails. Reconstructed clients/evaluations never duplicate.
+later lifecycle bookkeeping fails. Miskeyed and wrong-repair-target native rows
+remain byte-for-byte unchanged while blocking new sends. Real competing-process
+owner-lock tests revoke canonical authority, add a reconciliation hold, or edit
+only the physical root during the wait; all produce zero new POSTs and no new
+native source claim. Reconstructed clients/evaluations never duplicate.
 
 Run `bash scripts/test.sh --ci-tests-only tests/test_strong_correction_scope.py`.
 The common contested-lock and unrelated-subject controls remain in

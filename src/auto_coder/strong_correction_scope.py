@@ -100,15 +100,41 @@ def _frozen(operation, sources) -> dict:
     attempt = source.get("attempt")
     if not isinstance(attempt, dict) or attempt.get("operation_id") != operation.logical_operation_id or attempt.get("scoped") is not True or tuple(attempt.get("native_membership", ())) != provenance.logical_identities:
         raise ValueError("Older operation has no exact atomic source attempt binding")
-    from .codex_cloud_client import _codex_followup_state_path
+    from .codex_cloud_client import _codex_followup_state_path, _load_pending_followups
+    from .codex_wham_client import FollowUpDeliveryOutcome
+    from .codex_work_fence import CodexWorkFence, CodexWorkIdentity, stable_codex_operation_id
 
-    path = _codex_followup_state_path(source["snapshot"]["repository"])
-    native = json.loads(path.read_text())
-    group = [item for item in native.values() if isinstance(item, dict) and item.get("task_id") == operation.task_id and item.get("message_fingerprint") == provenance.fingerprint and item.get("pre_send_turn_id") == operation.causal_baseline]
-    if sorted(item.get("logical_identity", "") for item in group) != list(provenance.logical_identities) or any(
-        item.get("repair_owner_incarnation") != source["snapshot"]["owner_incarnation"] or item.get("repair_pr_number") != source["snapshot"]["pr_number"] or item.get("repair_head_sha") != source["snapshot"]["head_sha"] for item in group
-    ):
-        raise ValueError("Older native membership/binding is absent or incomplete")
+    if operation.kind != "follow-up" or not operation.causal_baseline or operation.source_request_id != ",".join(provenance.logical_identities) or operation.logical_operation_id != stable_codex_operation_id(operation.kind, operation.source_request_id):
+        raise ValueError("Older operation identity does not match its exact native request")
+    snapshot = source["snapshot"]
+    slots, owner, incarnation, run = owner_binding(snapshot["repository"], snapshot["pr_number"])
+    if (owner.number, incarnation, run.task_id, run.launch_identity, run.publication_head_repository, run.publication_head_ref, run.base_branch or "main") != (
+        snapshot["owner_issue"],
+        snapshot["owner_incarnation"],
+        operation.task_id,
+        snapshot["launch_identity"],
+        snapshot["head_repository"],
+        snapshot["head_ref"],
+        snapshot["base_branch"],
+    ) or (provenance.head_branch, provenance.base_branch) != (snapshot["head_ref"], snapshot["base_branch"]):
+        raise ValueError("Older immutable repair target/owner binding changed")
+    identity = CodexWorkIdentity(snapshot["repository"], owner.number, incarnation, operation.logical_operation_id, operation.kind, operation.source_request_id, operation.task_id, operation.causal_baseline)
+    subject = CodexWorkFence(CodexWorkAccounting(slots))._subject(identity, provenance)
+    # Native rows do not carry a head repository: the existing authenticated
+    # publication attribution must positively bind it to this frozen launch.
+    if subject is None or not subject.head_repository or (subject.head_repository, subject.head_ref) != (snapshot["head_repository"], snapshot["head_ref"]):
+        raise ValueError("Older writable head has no exact authenticated binding")
+    native = _load_pending_followups(_codex_followup_state_path(snapshot["repository"]))
+    group = [(key, item) for key, item in native.items() if item.task_id == operation.task_id and item.message_fingerprint == provenance.fingerprint and item.pre_send_turn_id == operation.causal_baseline]
+    if sorted(item.logical_identity for _key, item in group) != list(provenance.logical_identities):
+        raise ValueError("Older native membership is absent or incomplete")
+    expected_target = (snapshot["repository"], snapshot["owner_issue"], snapshot["owner_incarnation"], snapshot["pr_number"], snapshot["head_sha"], snapshot["head_ref"], snapshot["base_branch"])
+    for key, item in group:
+        target = (item.repair_repository, item.repair_issue_number, item.repair_owner_incarnation, item.repair_pr_number, item.repair_head_sha, item.repair_head_branch, item.repair_base_branch)
+        if key != hashlib.sha256(f"{operation.task_id}\0{item.logical_identity}".encode("utf-8")).hexdigest() or target != expected_target:
+            raise ValueError("Older native lookup key/immutable repair binding disagrees")
+        if item.status not in {FollowUpDeliveryOutcome.INDETERMINATE.value, FollowUpDeliveryOutcome.DELIVERED.value} or (provenance.outcome == "accepted" and item.status != FollowUpDeliveryOutcome.DELIVERED.value):
+            raise ValueError("Older native status contradicts durable send evidence")
     return {
         "operation_id": operation.logical_operation_id,
         "source": source["snapshot"],
@@ -363,7 +389,7 @@ def claim_sources(accounting, slots, owner, incarnation, operation_id, provenanc
 
 
 def current_source(repository: str, source: str, row: dict) -> bool:
-    from .canonical_pr_blocker_ledger import CanonicalPRBlockerLedger
+    from .canonical_pr_blocker_ledger import BlockerDisposition, CanonicalPRBlockerLedger
     from .pr_review_cycle import OPEN, PrReviewCycleRepository
 
     snapshot = row["snapshot"]
@@ -388,6 +414,8 @@ def current_source(repository: str, source: str, row: dict) -> bool:
     if len(blockers) != 1 or blockers[0].blocker_id != row["canonical_blocker"]:
         return False
     blocker = blockers[0]
+    if blocker.disposition not in {BlockerDisposition.OPEN, BlockerDisposition.RECURRENCE} or blocker.reconciliation_needs:
+        return False
     if tuple(alias.alias_value for alias in blocker.aliases if alias.alias_type == "strong_audit_finding") != (source,) or blocker.authoritative_boundary != finding.affected_boundary or blocker.required_correction_outcome != finding.expected_behavior:
         return False
     if len(blocker.qualified_requirements) != 1 or f"#{blocker.qualified_requirements[0].issue_number}/{blocker.qualified_requirements[0].requirement_id}" != finding.requirement_ids[0]:
@@ -463,7 +491,7 @@ def deliver_ordinary(repository, pr_data, github, origin, pending, state_path, d
     prompt = instruction(repository, source, row)
 
     def current() -> bool:
-        if processor._revalidate_cloud_origin(repository, pr_number, origin) or not processor.new_work_allowed() or not current_source(repository, source, row):
+        if processor._revalidate_cloud_origin(repository, pr_number, origin) or not processor.new_work_allowed():
             return False
         if processor._get_adjudication_effect_store().force_revalidation_needed(repository, pr_number):
             return False
@@ -479,7 +507,7 @@ def deliver_ordinary(repository, pr_data, github, origin, pending, state_path, d
         if inputs is None or inputs.contract.identity != row["snapshot"]["contract_identity"] or inputs.policy.identity != row["snapshot"]["policy_identity"] or inputs.head_sha != target.head_sha or inputs.base_sha != row["snapshot"]["base_sha"]:
             return False
         observed = {str(thread.comments[0].database_id): thread for thread in github.get_pr_review_threads_strict(repository, pr_number) if thread.comments and not thread.is_resolved}
-        return bool(row.get("root_bodies")) and all(root in observed and digest(observed[root].comments[0].body) == body_digest for root, body_digest in row["root_bodies"].items())
+        return current_source(repository, source, row) and bool(row.get("root_bodies")) and all(root in observed and digest(observed[root].comments[0].body) == body_digest for root, body_digest in row["root_bodies"].items())
 
     with processor._cloud_review_delivery_lock:
         processor._record_review_feedback_state(state_path, delivered, members)

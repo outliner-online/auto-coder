@@ -567,3 +567,12 @@ tests/test_codex_send_provenance.py tests/test_codex_subject_separation.py` for 
 actual Strong acceptance/canonical/ordinary/native path, delivery/deferred outcomes,
 legacy identities, wildcard holds and unchanged unrelated-subject behavior. These
 controlled transport fixtures do not contact production.
+
+Accepted Strong delivery additionally holds on old native lookup-key/repair-target
+or persisted-status disagreement and on current canonical invalidation or
+reconciliation needs. Existing local/deferred diagnostics remain controlling;
+no remote-refusal or public event field is introduced. The physical-root body
+refresh already runs in the final owner-fenced callback and is unchanged.
+`tests/test_strong_correction_scope.py` covers preserved deficient old records and
+actual owner-lock waits with canonical revocation or a remote root edit, alongside
+the unchanged expanded-round positive.

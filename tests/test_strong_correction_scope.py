@@ -1,6 +1,10 @@
 """Real Strong acceptance -> authenticated canonical roots -> ordinary native send."""
 
+import hashlib
 import json
+import multiprocessing
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -72,6 +76,20 @@ def sources(slots):
         "remote_rejected",
         "accepted_bookkeeping",
         "ambiguous_bookkeeping",
+        "old_native_key",
+        "old_native_repository",
+        "old_native_issue",
+        "old_native_owner",
+        "old_native_pr",
+        "old_native_sha",
+        "old_native_head",
+        "old_native_base",
+        "old_native_status",
+        "old_native_accepted_status",
+        "old_native_operation",
+        "waited_root",
+        "waited_revoked",
+        "waited_reconciliation",
     ],
 )
 def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypatch, control):
@@ -283,6 +301,35 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
             target = ExistingPrRepairTarget(REPO, PR, "work-branch", "main", NEXT)
             assert not CodexCloudClient(repo_name=REPO).continue_if_paused(TASK, prompt=build_existing_pr_repair_prompt(target, "Unbounded alternate correction"), repair_target=target, force=True)
             wham.send_follow_up.assert_called_once()
+        if control.startswith("old_native_"):
+            path = _codex_followup_state_path(REPO)
+            native = json.loads(path.read_text())
+            key = hashlib.sha256(f"{TASK}\0{old_scope['native_membership'][0]}".encode()).hexdigest()
+            if control == "old_native_key":
+                native["e" * 64] = native.pop(key)
+            elif control in {"old_native_accepted_status", "old_native_operation"}:
+                with slots._state_lock():
+                    records = slots._read()
+                    operation = records[owner.key][CodexWorkAccounting._FIELD]["operations"][old_scope["attempt"]["operation_id"]]
+                    if control == "old_native_accepted_status":
+                        operation["send_provenance"]["outcome"] = "accepted"
+                    else:
+                        operation["source_request_id"] = "another-request"
+                    slots._write(records)
+            else:
+                field, value = {
+                    "old_native_repository": ("repair_repository", "other/repository"),
+                    "old_native_issue": ("repair_issue_number", 10),
+                    "old_native_owner": ("repair_owner_incarnation", "other-incarnation"),
+                    "old_native_pr": ("repair_pr_number", PR + 1),
+                    "old_native_sha": ("repair_head_sha", "e" * 40),
+                    "old_native_head": ("repair_head_branch", "other-branch"),
+                    "old_native_base": ("repair_base_branch", "other-base"),
+                    "old_native_status": ("status", "not_delivered"),
+                }[control]
+                native[key][field] = value
+            path.write_text(json.dumps(native))
+            old_native = path.read_bytes()  # Preserve even the deficient old evidence verbatim.
         if control == "remote_rejected":
             wham.send_follow_up.side_effect = [FollowUpDeliveryResult(FollowUpDeliveryOutcome.NOT_DELIVERED, 429)]
         if control in {"accepted_bookkeeping", "ambiguous_bookkeeping"}:
@@ -316,6 +363,23 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
             if control == "crash_before_wire":
                 with patch("auto_coder.codex_cloud_client._save_pending_followups", side_effect=OSError("Controlled failure after durable operation claim")):
                     result = _delegate_cloud_review_thread_repair(REPO, data(), github, (old, new))
+            elif control.startswith("waited_"):
+
+                def change_remote_authority():
+                    if control == "waited_root":
+                        new.comments[0].body += "\nRemote edit during owner-lock wait"
+                        return
+                    ledger = env.ledger.get_snapshot("https://api.github.com", REPO, PR)
+                    blocker = sources(slots)[new_source]["canonical_blocker"]
+                    if control == "waited_revoked":
+                        from auto_coder.canonical_pr_blocker_ledger import BlockerDisposition
+
+                        env.ledger.record_transition("https://api.github.com", REPO, PR, "controlled-revocation", ledger.ledger_revision, blocker, BlockerDisposition.AUTHORIZED_INVALIDATION, "Controlled accepted invalidation during wait")
+                    else:
+                        env.ledger.record_requirement_manifest_change("https://api.github.com", REPO, PR, "controlled-reconciliation", ledger.ledger_revision, blocker, "new-manifest", "Scope must be reconciled")
+
+                result = _after_owner_wait(slots, lambda: _delegate_cloud_review_thread_repair(REPO, data(), github, (old, new)), change_remote_authority)
+                assert sources(slots)[new_source]["attempt"] is None
             else:
                 result = _delegate_cloud_review_thread_repair(REPO, data(), github, (old, new))
             _delegate_cloud_review_thread_repair(REPO, data(), github, (old, new))
@@ -348,3 +412,46 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
         if control == "remote_rejected":
             assert not set(sources(slots)[new_source]["native_membership"]) & set(state_doc["pending_feedback"])
         assert set(old_scope["native_membership"]).issubset(state_doc["pending_feedback"])
+
+
+def _after_owner_wait(slots, dispatch, change):
+    """Change only remote/canonical authority after the real native lock competes."""
+    import auto_coder.runtime_locks as locks
+    from auto_coder.codex_work_fence import CodexWorkFence
+    from tests.test_scoped_final_authority import _hold_owner
+
+    at_boundary, waiting = threading.Event(), threading.Event()
+    context = multiprocessing.get_context("spawn")
+    acquired, release = context.Event(), context.Event()
+    holder = context.Process(target=_hold_owner, args=(str(slots.storage_path), acquired, release))
+    execute, flock = CodexWorkFence.execute, locks.fcntl.flock
+
+    def gate(fence, identity, send, *args, **kwargs):
+        assert kwargs.get("final_authority_check") is not None
+        at_boundary.set()
+        assert acquired.wait(10)
+        return execute(fence, identity, send, *args, **kwargs)
+
+    def observe(fd, operation):
+        try:
+            return flock(fd, operation)
+        except BlockingIOError:
+            if acquired.is_set():
+                waiting.set()
+            raise
+
+    with patch.object(CodexWorkFence, "execute", gate), patch.object(locks.fcntl, "flock", observe), ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(dispatch)
+        try:
+            assert at_boundary.wait(10)
+            holder.start()
+            assert acquired.wait(10)
+            assert waiting.wait(10), "Actual owner-lock contention was not observed"
+            change()
+            release.set()
+            return future.result(timeout=10)
+        finally:
+            release.set()
+            if holder.pid is not None:
+                holder.join(10)
+                assert holder.exitcode == 0
