@@ -6,6 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Callable, Optional, TypeVar
 
+from .codex_observation import CodexRunObservation, ObservationBinding, PullRequestPresence
 from .codex_work_accounting import CodexSendProvenance, CodexWorkAccounting, CodexWorkPhase, WorkAccountingStatus
 from .implementation_slots import ImplementationOwner, ImplementationSlotRepository, ImplementationSlotUnavailable
 
@@ -34,6 +35,24 @@ class CodexWorkIdentity:
     causal_baseline: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class _CodexSubject:
+    pr_number: Optional[int]
+    head_repository: str = ""
+    head_ref: str = ""
+
+    def separate_from(self, other: _CodexSubject) -> bool:
+        if self.pr_number is not None and other.pr_number is not None:
+            return self.pr_number != other.pr_number
+        if any(ref.startswith("refs/") or any(character.isspace() for character in ref) for ref in (self.head_ref, other.head_ref)) or any(
+            len(repo.split("/")) != 2 or not all(repo.split("/")) or ":" in repo or any(character.isspace() for character in repo) for repo in (self.head_repository, other.head_repository)
+        ):
+            return False  # Only canonical GitHub full_name + short head-ref evidence qualifies.
+        # A first publication has no PR number yet. Distinct immutable GitHub
+        # head branches are positive separation only after both bindings verify.
+        return bool(self.head_repository and self.head_ref and other.head_repository and other.head_ref and (self.head_repository.casefold(), self.head_ref) != (other.head_repository.casefold(), other.head_ref))
+
+
 class CodexWorkFence:
     """Register a mutation before invoking its external side effect.
 
@@ -45,7 +64,44 @@ class CodexWorkFence:
     def __init__(self, accounting: CodexWorkAccounting) -> None:
         self.accounting = accounting
 
-    def execute(self, identity: CodexWorkIdentity, send: Callable[[], T], force: bool = False, *, send_provenance: Optional[CodexSendProvenance] = None) -> T:
+    def _subject(self, identity: CodexWorkIdentity, provenance: Optional[CodexSendProvenance], *, publication_observation: Optional[CodexRunObservation] = None, incoming: bool = False) -> Optional[_CodexSubject]:
+        from .cloud_run import CloudRunRepository
+        from .implementation_slots import ImplementationSlotSnapshot
+
+        if provenance is None:
+            return None
+        slots = self.accounting.slots.snapshot()
+        owner = ImplementationOwner("issue", identity.issue_number)
+        bound = next((item for item in slots.owners if item.owner == owner), None) if isinstance(slots, ImplementationSlotSnapshot) else None
+        runs = [run for run in CloudRunRepository(identity.repository).list_all() if run.provider == "codex-cloud" and run.task_id == identity.task_id and run.issue_number == identity.issue_number and run.repo_name == identity.repository]
+        if bound is None or bound.incarnation != identity.incarnation or len(runs) != 1:
+            return None
+        run = runs[0]
+        if provenance.pr_number is not None:
+            if provenance.pr_number not in bound.implementation_prs or provenance.pr_number not in run.pull_request_numbers:
+                return None
+            head_repo, head_ref = (run.publication_head_repository, run.publication_head_ref) if run.publication_head_ref == provenance.head_branch else ("", "")
+            return _CodexSubject(provenance.pr_number, head_repo, head_ref)
+        if not provenance.publication_launch_identity or (provenance.publication_launch_identity, provenance.publication_head_repository, provenance.publication_head_ref) != (run.launch_identity, run.publication_head_repository, run.publication_head_ref):
+            return None
+        if incoming and (
+            publication_observation is None
+            or publication_observation.binding != ObservationBinding.from_run(run)
+            or publication_observation.errors
+            or publication_observation.issue_state != "open"
+            or publication_observation.pull_request.presence is not PullRequestPresence.NO_MATCHING_PR
+            or not publication_observation.execution.recovery_eligible
+            or publication_observation.execution.assistant_turn_id != identity.causal_baseline
+            or run.pull_request_numbers
+        ):
+            return None
+        if run.pull_request_numbers:
+            if len(run.pull_request_numbers) != 1 or run.pull_request_numbers[0] not in bound.implementation_prs:
+                return None
+            return _CodexSubject(run.pull_request_numbers[0], run.publication_head_repository, run.publication_head_ref)
+        return _CodexSubject(None, run.publication_head_repository, run.publication_head_ref)
+
+    def execute(self, identity: CodexWorkIdentity, send: Callable[[], T], force: bool = False, *, send_provenance: Optional[CodexSendProvenance] = None, publication_observation: Optional[CodexRunObservation] = None) -> T:
         if identity.repository != self.accounting.slots.repo_name:
             raise ImplementationSlotUnavailable("Codex work belongs to a different repository")
         owner = ImplementationOwner("issue", identity.issue_number)
@@ -54,11 +110,17 @@ class CodexWorkFence:
                 snapshot = self.accounting.snapshot(owner, identity.incarnation)
                 if snapshot.accounting_status is not WorkAccountingStatus.COMPLETE:
                     raise ImplementationSlotUnavailable("Codex send inventory is incomplete")
-                # No producer yet supplies exhaustive accepted-obligation scope.
-                # Missing/legacy provenance is a wildcard too. Force is not a
-                # certificate that an ambiguous operation is a different duty.
-                if any((operation.send_provenance is not None and operation.send_provenance.outcome in {"reserved", "unknown"}) or (operation.send_provenance is None and operation.phase in {CodexWorkPhase.RESERVED, CodexWorkPhase.DELIVERY_UNKNOWN}) for operation in snapshot.operations):
-                    raise CodexWorkOverlap("Ambiguous wildcard Codex work overlaps this request; duplicate send refused before transport")
+                subject = self._subject(identity, send_provenance, publication_observation=publication_observation, incoming=True)
+                if send_provenance is not None and send_provenance.publication_launch_identity and subject is None:
+                    raise CodexWorkOverlap("Current publication subject has no verified observation/binding")
+                for operation in snapshot.operations:
+                    ambiguous = (operation.send_provenance is not None and operation.send_provenance.outcome in {"reserved", "unknown"}) or (operation.send_provenance is None and operation.phase in {CodexWorkPhase.RESERVED, CodexWorkPhase.DELIVERY_UNKNOWN})
+                    if not ambiguous:
+                        continue
+                    old_identity = CodexWorkIdentity(identity.repository, identity.issue_number, identity.incarnation, operation.logical_operation_id, operation.kind, operation.source_request_id, operation.task_id, operation.causal_baseline)
+                    old_subject = self._subject(old_identity, operation.send_provenance)
+                    if subject is None or old_subject is None or not subject.separate_from(old_subject):
+                        raise CodexWorkOverlap("Ambiguous wildcard Codex work overlaps this request; duplicate send refused before transport")
             registration = self.accounting.register(
                 owner,
                 identity.incarnation,
@@ -85,6 +147,7 @@ class CodexWorkFence:
         task_id: Optional[str] = None,
     ) -> None:
         owner = ImplementationOwner("issue", identity.issue_number)
+        self.accounting.record_send_outcome(owner, identity.incarnation, identity.operation_id, source_request_id=identity.source_request_id, causal_baseline=identity.causal_baseline, task_id=identity.task_id, outcome="accepted" if accepted else "unknown" if indeterminate else "not_delivered")
         phase = CodexWorkPhase.ACCEPTED if accepted else CodexWorkPhase.DELIVERY_UNKNOWN
         if not accepted and not indeterminate:
             phase = CodexWorkPhase.SETTLED

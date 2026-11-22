@@ -85,6 +85,9 @@ class CodexSendProvenance:
     base_branch: Optional[str] = None
     scope: str = "wildcard"
     outcome: str = "reserved"
+    publication_launch_identity: Optional[str] = None
+    publication_head_repository: Optional[str] = None
+    publication_head_ref: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.scope != "wildcard" or self.outcome not in {"reserved", "unknown", "accepted", "not_delivered"}:
@@ -99,6 +102,10 @@ class CodexSendProvenance:
             type(self.pr_number) is not int or self.pr_number <= 0 or not isinstance(self.head_sha, str) or re.fullmatch(r"[0-9a-f]{40}", self.head_sha) is None or any(not isinstance(value, str) or not value for value in (self.head_branch, self.base_branch))
         ):
             raise ValueError("Incomplete Codex send provenance target")
+
+        publication = (self.publication_launch_identity, self.publication_head_repository, self.publication_head_ref)
+        if any(value is not None for value in publication) and (any(not isinstance(value, str) or not value for value in publication) or any(value is not None for value in target)):
+            raise ValueError("Incomplete or conflicting Codex publication subject")
 
     @classmethod
     def from_record(cls, raw: object) -> CodexSendProvenance:
@@ -241,6 +248,8 @@ class CodexWorkAccounting:
                         for field in ("request_fingerprint", "handoff_pr_number"):
                             previous = existing.get(field)
                             incoming = encoded[field]
+                            if incoming is None and existing.get("send_provenance") is not None and CodexSendProvenance.from_record(existing["send_provenance"]).publication_launch_identity:
+                                continue  # Recovery receipts do not contain wire bytes; retain the producer proof.
                             if previous is not None and previous != incoming:
                                 raise ImplementationSlotUnavailable("Reconstruction conflicts with the bound Codex follow-up evidence")
                             if incoming is not None:
@@ -345,10 +354,12 @@ class CodexWorkAccounting:
             operations = self._complete_accounting(record)["operations"]
             assert isinstance(operations, dict)
             raw = operations.get(operation_id)
-            if not isinstance(raw, dict) or any(raw.get(key) != value for key, value in (("source_request_id", source_request_id), ("causal_baseline", causal_baseline), ("task_id", task_id))):
-                raise ValueError("Native send outcome does not match its exact reservation")
+            if not isinstance(raw, dict):
+                raise ValueError("Native send outcome has no reservation")
             if raw.get("send_provenance") is None:
                 return  # Preserve legacy evidence without invented provenance.
+            if any(raw.get(key) != value for key, value in (("source_request_id", source_request_id), ("causal_baseline", causal_baseline), ("task_id", task_id))):
+                raise ValueError("Native send outcome does not match its exact reservation")
             provenance = CodexSendProvenance.from_record(raw["send_provenance"])
             if provenance.outcome not in {"reserved", "unknown", outcome} or (provenance.outcome == "unknown" and outcome == "not_delivered"):
                 raise ValueError("Native outcome would weaken previous send evidence")

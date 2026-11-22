@@ -3961,3 +3961,29 @@ acceptance, restart/legacy and forced wildcard holds, no-ambiguity broad baselin
 crashes, known rejection, existing native acceptance reconciliation and unchanged
 legacy/scoped uncertainty. No dashboard schema or renderer change is required
 because the boundary reuses existing assignment/hold/refusal distinctions.
+
+### Narrowed verified-subject overlap
+
+The owner file lock still serializes the decision, but wildcard overlap now uses
+a positively verified repository/PR subject when current slot membership and the
+exact CloudRun association both establish it. Another PR can proceed without
+releasing the old operation. Same-PR SHA/base/close/reopen changes do not separate
+work. Unknown legacy/unverifiable subjects retain the broader hold.
+
+Existing initial-publication recovery may separate a prospective PR using its
+existing fresh observation and durable immutable launch/head binding. Its grace,
+causal and reservation-budget rules remain controlling. Accepted/unknown/rejected
+wire outcome is retained independently from lifecycle settlement. No new provider
+getter, permission, execution origin, dashboard schema or public subject field is
+added. Existing caller outcomes and local-duplicate/deferred statuses continue to
+describe POST versus hold; different-subject sends use their normal assignment
+stages. This correction changes admission scope, not the public trace contract.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_codex_subject_separation.py
+tests/test_codex_send_provenance.py tests/test_codex_work_accounting.py
+tests/test_codex_work_fence.py tests/test_codex_pr_recovery.py
+tests/test_codex_cloud_pr_ci_flow.py tests/test_codex_cloud_pr_review_flow.py
+tests/test_pr_no_commit_recovery.py`. The production-entry controls cover different
+PRs tied to one Issue, exact same-subject force holds, missing associations/legacy
+metadata, first-publication positives and refused observations, old/new incarnation
+and cross-repository behavior. Same-PR mixed-send eligibility remains disabled.

@@ -126,7 +126,8 @@ There is no new external envelope, setting or enablement flag. Its only supporte
 scope is `wildcard`; no exhaustive bounded scope is accepted by this milestone.
 
 Reserved, interrupted and unknown wildcard work overlaps another follow-up,
-repair or publication operation for the owner. Legacy records lacking provenance
+repair or publication operation for the same verified subject. The original
+owner-wide milestone hold is narrowed as described below. Legacy records lacking provenance
 are also wildcard when reserved/unknown. The check runs inside the owner lock,
 before creating another operation or entering transport; neither a different
 message/lane/batch nor `force` establishes separation. All native correction
@@ -164,3 +165,34 @@ pre-wire state, restart, broad continuation with/without force, legacy records,
 pre-/post-wire crashes, exact positive receipt reconciliation and rejection with
 bookkeeping failure. Scoped regressions now prove that the v2 journal cannot
 bypass an old wildcard. No positive mixed eligibility fixture is supplied.
+
+## Verified PR subject separation
+
+A wildcard is narrowed to its repository/PR number only when that PR is positively
+bound to both the current owner incarnation's PR membership and the exact task's
+durable CloudRun association. Both sides are re-read under owner serialization.
+Different PR numbers can proceed under one Issue owner. SHA, base changes, close
+and reopen activity do not distinguish the same PR. Task IDs or lane/kind names
+alone do not prove separate subjects. Missing legacy provenance, association,
+current ownership or target remains an owner-wide unknown overlap; no historical
+record is backfilled or released. Repository namespaces remain independent.
+
+The existing initial-publication monitor can supply its fresh, exact existing
+no-matching-PR observation plus immutable launch/head-repository/head-ref binding.
+Only after these and current ownership verify can a distinct canonical launch
+head establish a different prospective PR subject. An ambiguous/noncanonical ref,
+missing binding, closed Issue, existing publication or conflicting observation
+cannot establish this separation. The monitor retains all its existing grace,
+preflight, causal and publication-budget gates; no new polling or action exists.
+Before-wire provenance freezes that launch/head binding, and the exact native
+outcome is retained before lifecycle bookkeeping. If the run later acquires one
+verified PR association, that numeric PR dominates the prospective branch subject;
+multiple/unverified associations remain broader uncertainty.
+
+This is subject separation only. Wildcards on one PR still overlap across heads
+and force cannot bypass them. Exhaustive accepted-obligation membership and mixed
+sends within a PR remain disabled. `tests/test_codex_subject_separation.py` starts
+with a real ordinary unknown request and drives native continuation, the real CI
+producer and initial-publication monitor. It covers independent PR/publication
+positives, same-subject and evidence-deficient negatives, close/reopen activity,
+stale incarnation and cross-repository controls while preserving the old records.
