@@ -463,7 +463,8 @@ a successful terminal receipt alone does not prove the OS process has exited.
 See the release source-deployment and private worker-observation feature fragments
 for exact recovery evidence and the operator-owned attention boundary on expiry.
 
-Cloud PR corrections may show a **no-commit recovery** stage. It displays the
+Codex Cloud and Claude Routine PR corrections may show a **no-commit recovery**
+stage. Jules is not enrolled in this feature. It displays the
 original task/provider, bound head, checkpoint ordinal, eligibility deadline and
 reason. An accepted checkpoint means the same task received another bounded
 implementation request; it does not establish completion or an implementation

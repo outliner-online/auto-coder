@@ -34,7 +34,6 @@ class ContinuationCapability:
 
 SUPPORTED_PROVIDERS = {
     "codex-cloud": ContinuationCapability(native_logical_identity=True),
-    "jules": ContinuationCapability(),
     "claude-routine": ContinuationCapability(),
 }
 
@@ -120,7 +119,7 @@ class NoCommitRecovery:
             records[key] = record
         return records
 
-    def _save(self, records: dict[str, NoCommitSeries], pr_number: int) -> None:
+    def _save(self, records: dict[str, NoCommitSeries], pr_number: int, accepted_identities: tuple[str, ...] = ()) -> None:
         # Other PRs may accept or finish work while this PR's transport is in
         # flight. Merge only this guarded target, preserving their latest rows.
         with review_repair_state_lock(self.path):
@@ -128,6 +127,16 @@ class NoCommitRecovery:
             current.update({key: value for key, value in records.items() if value.pr_number == pr_number})
             document = self._document()
             document["no_commit_series"] = {key: asdict(value) for key, value in current.items()}
+            if accepted_identities:
+                delivered = document.get("delivered_feedback", [])
+                pending = document.get("pending_feedback", [])
+                if not isinstance(delivered, list) or not isinstance(pending, list) or not all(isinstance(identity, str) for identity in (*delivered, *pending)):
+                    raise ValueError("review delivery receipts must be string lists")
+                # This is the confirmed original POST's exact source receipt,
+                # committed atomically with its recovery clock. Other pending
+                # sources, including unknown POSTs, are never promoted.
+                document["delivered_feedback"] = sorted(set(delivered) | set(accepted_identities))
+                document["pending_feedback"] = sorted(set(pending) - set(accepted_identities))
             temporary = self.path.with_suffix(f".json.{os.getpid()}.tmp")
             with temporary.open("w", encoding="utf-8") as output:
                 json.dump(document, output, indent=2, sort_keys=True)
@@ -150,12 +159,13 @@ class NoCommitRecovery:
         with pr_correction_lock(self.path, target.pr_number):
             records = self._records()
             if identity in records:
+                self._save(records, target.pr_number, accepted_identities=identities)
                 return
             for record in records.values():
                 if record.pr_number == target.pr_number and record.status != "ended":
                     record.status, record.outcome = "ended", "superseded_request"
             records[identity] = NoCommitSeries(identity, provider, task_id, target.pr_number, target.head_branch, target.base_branch, target.head_sha, now)
-            self._save(records, target.pr_number)
+            self._save(records, target.pr_number, accepted_identities=identities)
 
     def supersede_prior_request(self, provider: str, task_id: str, target: ExistingPrRepairTarget, identities: tuple[str, ...], message: str) -> None:
         """A competing send attempt also holds old recovery if its result is lost."""

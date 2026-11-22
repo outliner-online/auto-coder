@@ -17,7 +17,7 @@ TARGET = ExistingPrRepairTarget("owner/repo", 88, "implementation", "main", "1" 
 @pytest.fixture
 def series(tmp_path):
     store = NoCommitRecovery(tmp_path / "cloud_review_repairs.json")
-    store.record_acceptance("jules", "session-88", TARGET, ("review-1",), "fix edge case", 1000.0)
+    store.record_acceptance("claude-routine", "session-88", TARGET, ("review-1",), "fix edge case", 1000.0)
     return store
 
 
@@ -41,15 +41,15 @@ def test_sixty_minutes_and_three_acceptance_relative_intervals_across_restart(se
     for ordinal in range(1, 4):
         store = NoCommitRecovery(series.path)
         clock[0] = snapshot(series)[0]["accepted_at"] + 59 * 60
-        result = store.checkpoint("jules", "session-88", TARGET, lambda: clock[0], lambda: pytest.fail("too early"), send)
+        result = store.checkpoint("claude-routine", "session-88", TARGET, lambda: clock[0], lambda: pytest.fail("too early"), send)
         assert result.reason == "not_due"
         clock[0] += 60
-        result = store.checkpoint("jules", "session-88", TARGET, lambda: clock[0], lambda: "eligible", send)
+        result = store.checkpoint("claude-routine", "session-88", TARGET, lambda: clock[0], lambda: "eligible", send)
         assert (result.reason, result.ordinal) == ("accepted", ordinal)
         assert snapshot(series)[0]["accepted_at"] == clock[0]
-        assert store.checkpoint("jules", "session-88", TARGET, lambda: clock[0], lambda: "eligible", send).reason in {"not_due", "limit_reached"}
+        assert store.checkpoint("claude-routine", "session-88", TARGET, lambda: clock[0], lambda: "eligible", send).reason in {"not_due", "limit_reached"}
     clock[0] += 100000
-    assert store.checkpoint("jules", "session-88", TARGET, lambda: clock[0], lambda: pytest.fail("exhausted"), send).reason == "limit_reached"
+    assert store.checkpoint("claude-routine", "session-88", TARGET, lambda: clock[0], lambda: pytest.fail("exhausted"), send).reason == "limit_reached"
     assert len(sends) == len(set(sends)) == 3
 
 
@@ -57,7 +57,7 @@ def test_concurrent_reobservations_reserve_only_one_ordinal(series):
     sends = []
 
     def observe(_):
-        return NoCommitRecovery(series.path).checkpoint("jules", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", lambda logical, _target: sends.append(logical) or True).reason
+        return NoCommitRecovery(series.path).checkpoint("claude-routine", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", lambda logical, _target: sends.append(logical) or True).reason
 
     with ThreadPoolExecutor(max_workers=4) as workers:
         outcomes = list(workers.map(observe, range(8)))
@@ -75,11 +75,11 @@ def test_unknown_send_never_mints_another_logical_request(series, failure):
 
     if failure == "exception":
         with pytest.raises(RuntimeError, match="response lost"):
-            series.checkpoint("jules", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", send)
+            series.checkpoint("claude-routine", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", send)
     else:
-        assert series.checkpoint("jules", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", send).reason == "delivery_unknown"
+        assert series.checkpoint("claude-routine", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", send).reason == "delivery_unknown"
     resumed = NoCommitRecovery(series.path)
-    assert resumed.checkpoint("jules", "session-88", TARGET, lambda: 50000.0, lambda: pytest.fail("unknown"), lambda *_: pytest.fail("resend")).reason == "delivery_unknown"
+    assert resumed.checkpoint("claude-routine", "session-88", TARGET, lambda: 50000.0, lambda: pytest.fail("unknown"), lambda *_: pytest.fail("resend")).reason == "delivery_unknown"
     assert snapshot(series)[0]["ordinal"] == 1
 
 
@@ -94,38 +94,38 @@ def test_definite_pre_send_quota_refusal_reuses_same_ordinal(series):
         raise NotSent("quota")
 
     with pytest.raises(NotSent):
-        series.checkpoint("jules", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", refuse)
-    result = series.checkpoint("jules", "session-88", TARGET, lambda: 4700.0, lambda: "eligible", lambda logical, _target: identities.append(logical) or True)
+        series.checkpoint("claude-routine", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", refuse)
+    result = series.checkpoint("claude-routine", "session-88", TARGET, lambda: 4700.0, lambda: "eligible", lambda logical, _target: identities.append(logical) or True)
     assert (result.reason, result.ordinal) == ("accepted", 1)
     assert identities[0] == identities[1]
 
 
 @pytest.mark.parametrize("reason", ["closed", "owner_changed", "no_change", "input_blocked"])
 def test_terminal_outcomes_stop_the_original_series(series, reason):
-    assert series.checkpoint("jules", "session-88", TARGET, lambda: 4600.0, lambda: reason, lambda *_: pytest.fail("terminal")).reason == reason
+    assert series.checkpoint("claude-routine", "session-88", TARGET, lambda: 4600.0, lambda: reason, lambda *_: pytest.fail("terminal")).reason == reason
     assert snapshot(series)[0]["outcome"] == reason
-    assert NoCommitRecovery(series.path).checkpoint("jules", "session-88", TARGET, lambda: 50000.0, lambda: "eligible", lambda *_: pytest.fail("ended")).reason == "no_accepted_request"
+    assert NoCommitRecovery(series.path).checkpoint("claude-routine", "session-88", TARGET, lambda: 50000.0, lambda: "eligible", lambda *_: pytest.fail("ended")).reason == "no_accepted_request"
 
 
 @pytest.mark.parametrize("reason", ["allowance_exhausted", "pending_delivery", "target_unavailable", "ownership_unavailable", "ci_wait", "review_wait"])
 def test_context_holds_do_not_spend_an_ordinal(series, reason):
-    assert series.checkpoint("jules", "session-88", TARGET, lambda: 4600.0, lambda: reason, lambda *_: pytest.fail("hold")).reason == reason
+    assert series.checkpoint("claude-routine", "session-88", TARGET, lambda: 4600.0, lambda: reason, lambda *_: pytest.fail("hold")).reason == reason
     assert snapshot(series)[0]["ordinal"] == 0
 
 
 def test_changed_commit_or_branch_invalidates_without_claiming_implementation(series):
-    result = series.checkpoint("jules", "session-88", replace(TARGET, head_sha="2" * 40), lambda: 4600.0, lambda: pytest.fail("changed"), lambda *_: pytest.fail("send"))
+    result = series.checkpoint("claude-routine", "session-88", replace(TARGET, head_sha="2" * 40), lambda: 4600.0, lambda: pytest.fail("changed"), lambda *_: pytest.fail("send"))
     assert result.reason == snapshot(series)[0]["outcome"] == "baseline_changed"
     assert snapshot(series)[0]["ordinal"] == 0
 
 
 def test_acceptance_reobservation_never_resets_clock_or_exhausted_history(series):
-    series.record_acceptance("jules", "session-88", TARGET, ("review-1",), "fix edge case", 9000.0)
+    series.record_acceptance("claude-routine", "session-88", TARGET, ("review-1",), "fix edge case", 9000.0)
     assert snapshot(series)[0]["accepted_at"] == 1000.0
-    series.supersede_prior_request("jules", "session-88", TARGET, ("review-2",), "new correction")
+    series.supersede_prior_request("claude-routine", "session-88", TARGET, ("review-2",), "new correction")
     assert snapshot(series)[0]["outcome"] == "superseded_request"
-    series.record_acceptance("jules", "session-88", TARGET, ("review-2",), "new correction", 9000.0)
-    series.record_acceptance("jules", "session-88", TARGET, ("review-1",), "fix edge case", 10000.0)
+    series.record_acceptance("claude-routine", "session-88", TARGET, ("review-2",), "new correction", 9000.0)
+    series.record_acceptance("claude-routine", "session-88", TARGET, ("review-1",), "fix edge case", 10000.0)
     active = [record for record in snapshot(series) if record["status"] == "accepted"]
     assert len(active) == 1
     assert active[0]["accepted_at"] == 9000.0
@@ -134,7 +134,7 @@ def test_acceptance_reobservation_never_resets_clock_or_exhausted_history(series
 def test_old_delivery_writes_preserve_recovery_and_recovery_preserves_receipts(series):
     _record_review_feedback_state(series.path, {"review-1"}, set(), {"v": "generation"}, {"snapshot": {"finding": "turn"}})
     assert len(snapshot(series)) == 1
-    series.checkpoint("jules", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", lambda *_: True)
+    series.checkpoint("claude-routine", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", lambda *_: True)
     document = json.loads(series.path.read_text())
     assert document["delivered_feedback"] == ["review-1"]
     assert document["validation_generations"] == {"v": "generation"}
@@ -155,7 +155,7 @@ def test_existing_quota_hold_is_definitely_before_send(series):
         raise ClaudeFollowupHoldActive(8000.0)
 
     with pytest.raises(ClaudeFollowupHoldActive):
-        series.checkpoint("jules", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", held)
+        series.checkpoint("claude-routine", "session-88", TARGET, lambda: 4600.0, lambda: "eligible", held)
     assert (snapshot(series)[0]["status"], snapshot(series)[0]["ordinal"]) == ("accepted", 0)
 
 
@@ -163,7 +163,7 @@ def test_other_pr_can_finish_while_transport_is_in_flight_without_lost_receipts(
     from threading import Barrier
 
     other = replace(TARGET, pr_number=89, head_branch="other")
-    series.record_acceptance("jules", "session-89", other, ("review-89",), "other fix", 1000.0)
+    series.record_acceptance("claude-routine", "session-89", other, ("review-89",), "other fix", 1000.0)
     entered = Barrier(2)
 
     def run(target):
@@ -171,7 +171,7 @@ def test_other_pr_can_finish_while_transport_is_in_flight_without_lost_receipts(
             entered.wait(timeout=2)
             return True
 
-        return NoCommitRecovery(series.path).checkpoint("jules", f"session-{target.pr_number}", target, lambda: 4600.0, lambda: "eligible", send)
+        return NoCommitRecovery(series.path).checkpoint("claude-routine", f"session-{target.pr_number}", target, lambda: 4600.0, lambda: "eligible", send)
 
     with ThreadPoolExecutor(max_workers=2) as workers:
         results = list(workers.map(run, (TARGET, other)))
@@ -195,7 +195,7 @@ def test_a_different_pr_repair_sender_invalidates_without_registering_a_budget(s
 
 def test_missing_observed_baseline_does_not_poison_delivery_state(series):
     with pytest.raises(ValueError, match="observed PR baseline"):
-        series.record_acceptance("jules", "session-89", replace(TARGET, head_sha=""), ("new",), "fix", 1000.0)
+        series.record_acceptance("claude-routine", "session-89", replace(TARGET, head_sha=""), ("new",), "fix", 1000.0)
     assert snapshot(series)[0]["status"] == "accepted"
 
 
@@ -214,4 +214,4 @@ def test_known_terminal_pr_callback_prevents_reopen_from_reviving_old_series(ser
     reclamation.assert_called_once()
     assert (snapshot(series)[0]["status"], snapshot(series)[0]["outcome"]) == ("ended", "closed")
     # Reopen with the same task/head does not erase the known terminal outcome.
-    assert series.checkpoint("jules", "session-88", TARGET, lambda: 50000.0, lambda: "eligible", lambda *_: pytest.fail("revived")).reason == "no_accepted_request"
+    assert series.checkpoint("claude-routine", "session-88", TARGET, lambda: 50000.0, lambda: "eligible", lambda *_: pytest.fail("revived")).reason == "no_accepted_request"

@@ -15,7 +15,7 @@ unknown provider execution is permitted; no execution-state detector is added.
 | --- | --- |
 | Initial Issue starts | `IssueDispatchService`, three `_process_issue_*_mode` producers, CloudRun/CloudManager and implementation slots. No uniform frozen acceptance clock plus proven branch baseline exists. Initial Issue and initial PR task launches are a separate slice, even if a PR later appears. |
 | Review/adversarial PR corrections | `pr_processor` resolves exact ownership, checks correction allowance, renders a bounded PR/head/branch prompt and retains delivery identities in `cloud_review_repairs.json`. Extend this producer/file; never invent an old acceptance clock from observation time. |
-| Delivery | Codex's logical-identity-aware native journal; Jules's authenticated same-session `send_message`; Claude's existing-session CLI and OAuth quota admission. Use the existing send abstraction with typed native-signature capabilities; Boolean False remains unknown. |
+| Delivery | Codex's logical-identity-aware native journal and Claude's existing-session CLI/OAuth quota admission. Jules is excluded from this feature and the next initial-task slice; its existing behavior stays intact. Use the existing send abstraction with typed native-signature capabilities; Boolean False remains unknown. |
 | Correction generation (#2141/#2142) | Keep existing owner, canonical bundle/generation and exhaustion gates. Checkpoints never create failed corrections, spend/reset their allowance or re-open exhausted blockers. |
 | Publication (#1864) | `CodexPRRecoveryMonitor` retains its completed/no-PR Create PR reminder and 120-second grace. This slice requires an existing PR and an accepted correction, so neither initial task nor publication reminder is registered. |
 | Jules checkpoint/recovery (#2092) | Initial prompt guidance is not runtime commit evidence. Live session reconciliation, approvals, failed-session recovery and no-PR messages remain unchanged. |
@@ -29,7 +29,9 @@ argument; retain live provider resolution, CI continuation and the manual CLI.
 ## Implementation decision
 
 Retain original request identity, PR/head/branch/provider/task, acceptance clock,
-ordinal and send reservation alongside review receipts. Use one cross-process
+ordinal and send reservation alongside review receipts. Atomically promote the
+exact confirmed original identities with the clock; retain all other unknown
+POST reservations. Scope pending-source holds to the same PR. Use one cross-process
 file guard for source writes, new acceptance and checkpoints. Persist the exact
 ordinal before sending. Lost responses/crashes retain that reservation. Typed
 pre-send quota refusals retry the same ordinal through existing quota admission.
@@ -46,12 +48,14 @@ an empty, bot, base-merge or unrelated commit as implementation progress.
 No new engine, DB, slot model, provider execution reader or live selection/timeout
 is introduced. No duplicate open Issue/PR owner or numbered-Issue publication gate
 was found. The supplied #5993 incident demonstrates a useful checkpoint prompt,
-not why prior execution stopped. See [operator behavior and verification](client-features/pr-bound-no-commit-checkpoints.md)
+not why prior execution stopped. Ordinary completed PR workers signal the
+existing scheduler wake so its first newly registered watch cannot be lost
+while it is parked with no prior timer. See [operator behavior and verification](client-features/pr-bound-no-commit-checkpoints.md)
 for delivered scope and limitations.
 
 ## Focused verification
 
-The final production-boundary selection passed **329 tests in 19.92s**, exit 0:
+The final production-boundary selection passed **448 tests in 30.57s**, exit 0:
 
 ```bash
 env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
@@ -68,7 +72,12 @@ env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
   tests/test_cloud_task_engine.py \
   tests/test_verified_codex_pr_repair_routing.py \
   tests/test_codex_cloud_pr_ci_flow.py \
-  tests/test_codex_cloud_followup_script.py -q --timeout=120
+  tests/test_codex_cloud_followup_script.py \
+  tests/test_pr_worker_observation_status.py \
+  tests/test_ci_watch_own_batch.py \
+  tests/test_ci_webhook_intake.py \
+  tests/test_entity_invalidation.py \
+  tests/test_invalidation_failure_backoff.py -q --timeout=120
 ```
 
 `.venv/bin/mypy --config-file pyproject.toml -p auto_coder` passed across **376

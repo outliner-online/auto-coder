@@ -5,14 +5,18 @@ PR can receive up to **three additional checkpoint messages**, at least **60
 minutes** apart. The interval starts when the original request, or preceding
 checkpoint, is confirmed accepted. Normal exact-head PR reevaluation services
 the due check through the existing CI-watch cadence. There is no new scanner or
-timer, and an elapsed hour alone does not send.
+timer, and an elapsed hour alone does not send. Completed ordinary PR work
+wakes the existing invalidation scheduler to recompute its deadlines, including
+when that work registered the first watch after the scheduler parked idle.
 
-The shared policy supports Codex Cloud, Jules and Claude Routine through their
+The shared policy supports Codex Cloud and Claude Routine through their
 existing authenticated same-task senders and typed native call capabilities.
-Codex receives the logical identity in its native journal; Jules and Claude use
-their task/text signature while retaining the shared reservation. Claude's OAuth
+Codex receives the logical identity in its native journal; Claude uses
+its task/text signature while retaining the shared reservation. Claude's OAuth
 quota admission and durable cooldowns stay controlling. Unsupported providers
-cannot register a series. No execution-state read is added: the task can still
+cannot register a series. Jules is excluded from this feature and any subsequent
+initial-task slice; its existing task, review and recovery behavior remains intact. No execution-state
+read is added: the task can still
 be running, or its state unknown.
 
 ## Admission and durable outcomes
@@ -28,6 +32,8 @@ new request admission and checkpoint reservation/dispatch.
 The normal duplicate-correction wait and retained current-correction handoff
 revisit the series. Before another send, current PR metadata and the exact
 cloud owner are refreshed, with existing exhaustion and scope gates retained.
+Only pending sources belonging to this PR hold its checkpoints; an ambiguous
+POST for another PR in the repository remains fenced without blocking this one.
 Other existing PR CI/conflict/adjudication sends invalidate the prior series
 under the same guard without acquiring their own recovery budget. A newer send
 whose delivery is unknown also prevents the old policy from sending more work.
@@ -70,11 +76,16 @@ policy remain intact. The unused CloudTaskEngine restart sweep is removed.
 repeats, the three-cap across restart/concurrency, unknown sends, quota refusal,
 supersession, baseline changes, terminal outcomes, unsupported providers and
 preservation of source receipts, plus the terminal-PR callback and reopen fence. `tests/test_codex_cloud_pr_review_flow.py`
-exercises accepted production handoff and duplicate processing with all three
+exercises accepted production handoff and duplicate processing with both supported
 native signatures, current-scope refresh, explicit addressed outcome and the cap.
 `tests/test_dashboard_observability.py::test_pr_no_commit_checkpoint_reaches_mounted_detail`
-traverses passing-CI PR processing and durable registration to a Jules checkpoint,
-while active CI suppresses it before the corrective handoff.
+traverses passing-CI PR processing and durable registration to a Claude checkpoint,
+while active CI suppresses it before the corrective handoff. Additional review-flow
+regressions interrupt an accepted Claude source before its later receipt update,
+retain an unknown POST on another PR, explicitly refuse Jules enrollment, and
+start the real invalidation/worker loops with zero watches. The latter expires
+only existing durable timer deadlines and reaches all three checkpoints without
+another external event or a candidate scan.
 
 The `pr.no-commit-recovery` stage reports provider/task, head, ordinal, reason and
 next eligible time. `accepted` confirms assignment only. `delivery_unknown` and

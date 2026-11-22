@@ -1536,10 +1536,10 @@ def test_pr_no_commit_checkpoint_reaches_mounted_detail(mock_ui, tmp_path, monke
         "number": 5993,
         "state": "open",
         "body": "Fixes #5980",
-        "head": {"ref": "jules/navigation-race", "sha": "1" * 40},
+        "head": {"ref": "claude/navigation-race", "sha": "1" * 40},
         "base": {"ref": "main", "sha": "2" * 40},
         "labels": [],
-        "user": {"login": "google-labs-jules[bot]"},
+        "user": {"login": "maintainer"},
     }
     github = MagicMock()
     github.get_pr_comments.return_value = []
@@ -1558,7 +1558,7 @@ def test_pr_no_commit_checkpoint_reaches_mounted_detail(mock_ui, tmp_path, monke
         patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", side_effect=lambda *_args, **_kwargs: passing[0]),
         patch("auto_coder.pr_processor._check_github_actions_status", side_effect=lambda *_args, **_kwargs: authoritative_ci_status(success=passing[0], in_progress=not passing[0], ids=[1])(*_args, **_kwargs)),
         patch("auto_coder.pr_processor._get_claimed_review_thread_state", return_value=ClaimedReviewThreadGateState(unresolved=(thread,), blocking_unresolved=(thread,), has_blocking_unresolved=True)),
-        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("jules", "session-navigation")),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-navigation")),
         patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
         get_trace_collector().start_execution(repository="owner/repo", item_type="pr", item_number=5993, origin="durable-invalidation-worker"),
     ):
@@ -1575,6 +1575,6 @@ def test_pr_no_commit_checkpoint_reaches_mounted_detail(mock_ui, tmp_path, monke
     checkpoint = next(event for event in snapshot.events if event.stage_id == "pr.no-commit-recovery" and event.facts.get("reason") == "accepted")
     assert checkpoint.outcome == Outcome.ACCEPTED_HANDOFF.value
     assert checkpoint.facts["ordinal"] == 1
-    assert checkpoint.facts["provider"] == "jules"
+    assert checkpoint.facts["provider"] == "claude-routine"
     assert checkpoint.facts["head_sha"] == "1" * 40
     _assert_required_stage_visible(_mounted_detail(mock_ui, "pr", 5993), "no-commit recovery")

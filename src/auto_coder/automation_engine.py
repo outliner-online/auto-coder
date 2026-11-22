@@ -5245,6 +5245,11 @@ class AutomationEngine:
                     self.queue.task_done()
                     if decision_completed:
                         await self._enqueue_pending_invalidations(repo_name)
+                        # PR processing may have registered the first CI watch
+                        # after the scheduler parked with no timer. Recompute its
+                        # durable deadlines, including all later checkpoint wakes.
+                        if candidate.type == "pr" and self._invalidation_wake_event is not None:
+                            self._invalidation_wake_event.set()
                 if self.is_draining:
                     logger.info(f"Worker {worker_id} reached its graceful drain checkpoint")
                     return

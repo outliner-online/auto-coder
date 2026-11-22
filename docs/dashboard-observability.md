@@ -3787,6 +3787,16 @@ Run `bash scripts/test.sh --ci-tests-only tests/test_pr_no_commit_recovery.py
 The first two suites cover durable source generation, hour/cap/unknown-delivery
 admission and native sender boundaries. The mounted-detail regression begins at
 ordinary passing-CI `_handle_pr_merge`, creates the accepted source and receipt,
-then exercises an active-CI wait followed by a due Jules checkpoint and asserts
+then exercises an active-CI wait followed by a due Claude checkpoint and asserts
 the actual stage facts and visible diagram label. This is assignment evidence,
 not a reviewer verdict, observed implementation commit or merge authority.
+
+Receipt recovery and scheduling use the same stage schema: confirmed original
+source identities and their clock now commit atomically, and pending sources
+are scoped to their PR. Completed PR workers wake the existing scheduler to
+recompute its first watch deadline. No new origin or provider-state read is
+added. `tests/test_codex_cloud_pr_review_flow.py` exercises a held POST on a
+second PR, a Claude acceptance interrupted before later receipt promotion,
+Jules non-enrollment, and the ordinary scheduler/worker loops starting with zero
+watches and reaching all three checkpoints using only existing timer deadlines.
+The mounted-detail checkpoint regression now uses Claude Routine.

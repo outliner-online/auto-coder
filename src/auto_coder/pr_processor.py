@@ -2505,11 +2505,14 @@ def _retire_closed_cloud_checkpoint(repository: str, pr_number: int) -> None:
 
 def _send_followup_with_quota_admission(client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, recovery_provider: str = "", checkpoint: bool = False) -> bool:
     """Keep accepted PR correction checkpoints on the normal authenticated sender."""
+    from .pr_no_commit_recovery import SUPPORTED_PROVIDERS
+
     if repair_target is None or checkpoint:
         return _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target)
-    if not recovery_provider:
+    if recovery_provider not in SUPPORTED_PROVIDERS:
         with _new_pr_correction_request(repository, repair_target.pr_number):
-            return _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target)
+            native_identities = identities if not recovery_provider else ()
+            return _send_followup_with_quota_admission_impl(client, repository, task_id, message, native_identities, repair_target=repair_target)
     from .pr_no_commit_recovery import NoCommitRecovery, pr_correction_lock
 
     path = _cloud_review_repair_state_path(repository)
@@ -10436,6 +10439,8 @@ def _checkpoint_cloud_review_repair(repo_name: str, pr_data: Dict[str, Any], git
     """Revisit an accepted correction only from its ordinary duplicate-wait path."""
     from .pr_no_commit_recovery import SUPPORTED_PROVIDERS, NoCommitRecovery
 
+    if origin.provider not in SUPPORTED_PROVIDERS:
+        return
     target = resolve_existing_pr_repair_target(repo_name, pr_data)
     if target is None or github_client is None:
         return
@@ -10452,7 +10457,8 @@ def _checkpoint_cloud_review_repair(repo_name: str, pr_data: Dict[str, Any], git
             return "acknowledged_outcome"
         if not new_work_allowed():
             return "draining"
-        if _load_pending_review_feedback(state_path) - _load_delivered_review_feedback(state_path):
+        pending = _load_pending_review_feedback(state_path) - _load_delivered_review_feedback(state_path)
+        if any(identity.startswith(f"{repo_name}#{target.pr_number}:") for identity in pending):
             return "pending_delivery"
         exhaustion = check_pr_repair_exhaustion(repo_name, target.pr_number)
         if exhaustion and exhaustion.is_exhausted:
@@ -10882,6 +10888,7 @@ def _delegate_cloud_review_thread_repair(
     try:
         with _cloud_review_delivery_lock:
             delivered = _load_delivered_review_feedback(state_path)
+            local_receipt = pending_identities.issubset(delivered)
             delivered.update(identity for _thread, _comment, identity in pending)
             _record_delivered_review_feedback(state_path, delivered)
             local_receipt = True
@@ -11886,6 +11893,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
     try:
         with _cloud_review_delivery_lock:
             delivered = _load_delivered_review_feedback(state_path)
+            local_receipt = set(identities).issubset(delivered)
             delivered.update(identity for _body, finding_identity, generation_identity in pending_feedback for identity in (finding_identity, generation_identity))
             delivered.update(validation_identities[finding_identity] for _body, finding_identity, _generation_identity in pending_feedback)
             delivered.update(baseline_receipts)
