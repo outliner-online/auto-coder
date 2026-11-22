@@ -3767,3 +3767,26 @@ tests/test_pr_worker_observation_status.py` exercises real SQLite/controller/wor
 processing, canonical CI reads and the existing skip-to-dashboard contract.
 The deterministic 0/1/1.5-second burst reduces two evaluations to one; it does not
 prove progress or authorize a merge in a live worker.
+
+## PR-bound no-commit checkpoints
+
+The normal accepted cloud review/adversarial handoff records its exact source,
+PR/head/branch/owner, acceptance clock and checkpoint ordinal in the existing
+review-delivery document. Normal PR reevaluation reaches
+`pr.no-commit-recovery` only for this correction scope. Its stage-result facts
+contain `provider`, `task_id`, `head_sha`, `ordinal`, `reason` and
+`next_check_at`; unavailable observations additionally name `error_type` without
+claiming receipt or completion. `accepted` emits `ACCEPTED_HANDOFF`; held or
+unknown evidence emits `DEFERRED`; terminal/cap/baseline outcomes emit `SKIPPED`.
+The existing generic stage timeline renders these events without a schema change.
+No execution-status inference or new polling origin is introduced.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_pr_no_commit_recovery.py
+ tests/test_codex_cloud_pr_review_flow.py
+ tests/test_dashboard_observability.py::test_pr_no_commit_checkpoint_reaches_mounted_detail`.
+The first two suites cover durable source generation, hour/cap/unknown-delivery
+admission and native sender boundaries. The mounted-detail regression begins at
+ordinary passing-CI `_handle_pr_merge`, creates the accepted source and receipt,
+then exercises an active-CI wait followed by a due Jules checkpoint and asserts
+the actual stage facts and visible diagram label. This is assignment evidence,
+not a reviewer verdict, observed implementation commit or merge authority.

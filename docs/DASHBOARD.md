@@ -462,3 +462,12 @@ Protected invocations/checkpoints remain owned until ordinary graceful drain;
 a successful terminal receipt alone does not prove the OS process has exited.
 See the release source-deployment and private worker-observation feature fragments
 for exact recovery evidence and the operator-owned attention boundary on expiry.
+
+Cloud PR corrections may show a **no-commit recovery** stage. It displays the
+original task/provider, bound head, checkpoint ordinal, eligibility deadline and
+reason. An accepted checkpoint means the same task received another bounded
+implementation request; it does not establish completion or an implementation
+commit. Unknown delivery stays reserved across restart. Changed baseline/owner,
+closure, explicit addressed outcome or the three-checkpoint limit stops that
+series. Initial/no-PR recovery is outside this stage. See
+[PR-bound checkpoint behavior](client-features/pr-bound-no-commit-checkpoints.md).

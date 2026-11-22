@@ -5,90 +5,75 @@ Inspected 2026-11-22 against `outliner-online/auto-coder` main
 Objective: recover accepted cloud implementation requests that demonstrably
 produced no relevant implementation commit, without duplicating owned work.
 
-## Latest scope
+The owner's subsequent scope decision selects existing PR-bound review-thread
+and adversarial corrective handoffs as the first vertical slice. Running or
+unknown provider execution is permitted; no execution-state detector is added.
 
-The owner's later instruction permits a continuation while the task is running
-or its execution status is unknown. No new turn/status reader or idle detector
-is needed. The policy inputs are an accepted request, known commit baseline,
-current owner/target, clock and counter. Send at confirmed-acceptance-relative
-60-minute intervals, at most three additional continuations. Keep existing
-sender identity, deduplication, uncertain-delivery, quota, approval and protection
-gates. Use CI/review waits already available in context, without new readers.
+## Traced authorities and selected boundary
 
-## Producers and durable authority
+| Boundary | Existing owner/source and decision |
+| --- | --- |
+| Initial Issue starts | `IssueDispatchService`, three `_process_issue_*_mode` producers, CloudRun/CloudManager and implementation slots. No uniform frozen acceptance clock plus proven branch baseline exists. Initial Issue and initial PR task launches are a separate slice, even if a PR later appears. |
+| Review/adversarial PR corrections | `pr_processor` resolves exact ownership, checks correction allowance, renders a bounded PR/head/branch prompt and retains delivery identities in `cloud_review_repairs.json`. Extend this producer/file; never invent an old acceptance clock from observation time. |
+| Delivery | Codex's logical-identity-aware native journal; Jules's authenticated same-session `send_message`; Claude's existing-session CLI and OAuth quota admission. Use the existing send abstraction with typed native-signature capabilities; Boolean False remains unknown. |
+| Correction generation (#2141/#2142) | Keep existing owner, canonical bundle/generation and exhaustion gates. Checkpoints never create failed corrections, spend/reset their allowance or re-open exhausted blockers. |
+| Publication (#1864) | `CodexPRRecoveryMonitor` retains its completed/no-PR Create PR reminder and 120-second grace. This slice requires an existing PR and an accepted correction, so neither initial task nor publication reminder is registered. |
+| Jules checkpoint/recovery (#2092) | Initial prompt guidance is not runtime commit evidence. Live session reconciliation, approvals, failed-session recovery and no-PR messages remain unchanged. |
+| Retirement (#2335/#2725) | Existing owner/incarnation/source fences remain in actual senders. Codex checkpoints use its ordinary retirement-accounted follow-up journal. |
+| CI/review/availability | Ordinary PR processing and existing periodic exact-head CI invalidations revisit the handoff. Preserve CI, review, approval, scope, governor and Claude quota gates. Refresh target/head and ownership only when a checkpoint is due. |
 
-| Boundary | Existing owner/source | Remaining integration |
-| --- | --- | --- |
-| Initial Issue | `IssueDispatchService` handoffs in `issue_dispatch.py`; the three `_process_issue_*_mode` functions; `CloudManager`; implementation slots | Accepted task and attempt are durable. Handoff `updated_at` is mutable bookkeeping, not a frozen acceptance clock. No shared initial owned-branch commit baseline exists. A configured publication ref is not proof of an observed branch/head. |
-| PR review correction | `pr_processor` cloud-origin resolution, review-feedback reservation/receipt files, `ProviderRepairCoordinator`, `RepairAllowanceLedger` (#2141/#2142) | Reuse exact owner, canonical generation/bundle and reviewed head; record the acceptance clock and continuation ordinal against this original request. Not all live review deliveries flow through the coordinator. Elapsed time must not settle a failed correction or reopen exhausted blockers. |
-| PR CI/conflict correction | Live CI `continue_if_paused`, conflict delivery journal and `_send_followup_with_quota_admission` in `pr_processor` | Separate existing producers have exact repair target/head evidence. They need registration in the same series contract, without changing ordinary CI routing. |
-| Codex sender | `PendingCodexFollowUp`, `CodexCloudClient.send_followup` | Already retains logical identity, fingerprint, acceptance time and indeterminate delivery. Reuse it and its owner fence; do not add provider reads to classify running versus paused. |
-| Jules sender | Authenticated `JulesClient.send_followup` / `send_message` | Real same-session send exists. PR reviewed-head evidence can support a second adapter without execution-state inspection. Its Boolean return does not distinguish definite non-delivery from lost POST response: retain unknown instead of trying a new logical send. |
-| Claude sender | `ClaudeRoutineClient.send_followup`, `claude_followup_waits` | Same-session authenticated CLI and typed quota holds exist. It too can participate with exact PR ownership/baseline; absence of an initial observed branch remains unsupported evidence, regardless of normalized task status. |
-| Initial publication | `CodexPRRecoveryMonitor` (#1864), started by `automation_engine` | Existing completed/no-PR recovery reserves one Create PR send after its own 120-second grace. Arbitrate with this obligation before either policy sends; do not change its timeout or equate no PR with no commit. |
-| Jules reconciliation | `jules_engine.check_and_resume_or_archive_sessions`, called by `automation_engine` | Live failed/timeout, approval, feedback/no-PR and force-PR sends already exist. The no-PR retry can reset its count and repeat. Slot activity admission protects retirement, not cross-policy duplicate work. This owner must be included in arbitration, not shadowed by a second scanner. |
-| Retirement | Implementation reclamation/retirement and Codex source reconstruction (#2335/#2725) | Reuse owner incarnation/activity revision; register admitted sends before outbound mutation so retirement cannot lose responsibility. |
-| Normal gates | `pr_progress_policy`, strict current-head CI and review/blocker admission, provider governor and Claude quota waits | Preserve these gates. Do not add a new CI/review observer, execution detector, API, DB or slot model. |
+`CloudTaskEngine.check_and_resume_tasks` had no production callers, only two unit
+tests. Remove its sweep-only discovery/state helpers and constructor state-file
+argument; retain live provider resolution, CI continuation and the manual CLI.
 
-#2092 is Jules initial prompt guidance, composed only for new tasks. It is not
-runtime commit-progress evidence or authorization for blanket approval replies.
-The supplied Outliner #5993 incident demonstrates a useful checkpoint prompt;
-HTTP 200, READY and missing turns do not explain why prior execution stopped.
+## Implementation decision
 
-## Minimal scope decision
+Retain original request identity, PR/head/branch/provider/task, acceptance clock,
+ordinal and send reservation alongside review receipts. Use one cross-process
+file guard for source writes, new acceptance and checkpoints. Persist the exact
+ordinal before sending. Lost responses/crashes retain that reservation. Typed
+pre-send quota refusals retry the same ordinal through existing quota admission.
 
-Multiple independent new **registration producers** remain necessary even after
-removing all execution-state classification: initial Issue admission and the
-existing PR review/CI/conflict handoffs. Existing publication and Jules recovery
-also require shared send arbitration to meet the no-overlap constraint. There is
-no single current producer whose wiring would cover the requested contract.
+At normal reevaluation, an unchanged bound target can receive one checkpoint
+when 3600 seconds have passed since confirmed acceptance, at most three additional
+sends. New review requests and other existing PR corrective sends invalidate the
+old series under the same guard. Other origins do not become registration
+producers. Closure, changed owner/baseline, an explicit addressed outcome or the
+cap stops recovery. A head change invalidates the baseline; it does not classify
+an empty, bot, base-merge or unrelated commit as implementation progress.
 
-Use the request's explicit stop option rather than ship a guessed aggregate
-scanner. Before enabling sends, explicitly own (1) a compact common series
-record in an existing durable source, populated by those actual acceptance
-producers with a proven branch/commit baseline, and (2) migration/arbitration of
-existing publication/Jules sends through that same owner. No provider execution
-state machine is needed. Unknown initial branch evidence is an explicit
-unsupported case, not proof of no commit. This change completes only the
-independently safe dead-sweep removal; the 60-minute/three-send policy is not
-implemented or claimed tested.
+No new engine, DB, slot model, provider execution reader or live selection/timeout
+is introduced. No duplicate open Issue/PR owner or numbered-Issue publication gate
+was found. The supplied #5993 incident demonstrates a useful checkpoint prompt,
+not why prior execution stopped. See [operator behavior and verification](client-features/pr-bound-no-commit-checkpoints.md)
+for delivered scope and limitations.
 
-`check_and_resume_tasks` has no production callers; only its two unit tests
-invoke it. Its automatic client discovery, state-file helpers/constant and
-constructor state-file argument have no other callers. The live
-`get_client_for_provider`, provider interfaces, CI continuation, manual operator
-CLI and Jules reconciliation are retained. Removal is observability-neutral:
-there is no production call or trace emitter to remove. Resolver tests and
-existing production routing tests verify retained behavior.
+## Focused verification
 
-Open Issues/PRs and matching remote branch names were inspected; none was found
-to own this policy. No numbered-Issue publication requirement was found in
-current repository guidance. No Issue, PR, provider follow-up, configuration
-change, deployment, merge or external message is created by this preflight.
+The final production-boundary selection passed **328 tests in 21.75s**, exit 0:
 
-Follow-on verification must exercise both initial and corrective production
-registration with deterministic time and durable sources: 59/60 minutes,
-acceptance-relative repeats, three-cap across restart/concurrency, existing send
-dedup/ambiguity, commit and lifecycle/owner stop, plus two provider-shaped paths
-and unsupported baseline refusal. Add trace reasons, runnable observability
-coverage and operator documentation when the policy actually exists.
+```bash
+env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
+  AUTO_CODER_LOG_FILE=/workspace/auto-coder-runtime/logs/auto-coder.log \
+  AUTO_CODER_DISABLE_AUTO_UPDATE=1 PATH=/workspace/auto-coder/.venv/bin:$PATH \
+  bash scripts/test.sh --ci-tests-only \
+  tests/test_pr_no_commit_recovery.py \
+  tests/test_codex_cloud_pr_review_flow.py \
+  tests/test_adversarial_validation_pr_flow.py \
+  tests/test_cloud_conflict_delegation.py \
+  tests/test_claude_followup_admission.py \
+  tests/test_pr_repair_exhaustion.py \
+  tests/test_dashboard_observability.py::test_pr_no_commit_checkpoint_reaches_mounted_detail \
+  tests/test_cloud_task_engine.py \
+  tests/test_verified_codex_pr_repair_routing.py \
+  tests/test_codex_cloud_pr_ci_flow.py \
+  tests/test_codex_cloud_followup_script.py -q --timeout=120
+```
 
-## Verification of the removal
-
-`env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache
-AUTO_CODER_LOG_FILE=/workspace/auto-coder-runtime/logs/auto-coder.log
-AUTO_CODER_DISABLE_AUTO_UPDATE=1 PATH=/workspace/auto-coder/.venv/bin:$PATH
-bash scripts/test.sh --ci-tests-only tests/test_cloud_task_engine.py
-tests/test_verified_codex_pr_repair_routing.py
-tests/test_codex_cloud_pr_ci_flow.py tests/test_codex_cloud_followup_script.py
--q --timeout=120`: **46 passed in 1.46s**, exit 0. The log collector could not
-save its redundant test-log JSON under the read-only home directory; test
-execution and its result completed normally. An earlier run inherited
-`CODEX_HOME`, bypassing the CLI test fixture's temporary credentials: 32 passed,
-14 failed. Unsetting that environment variable made the unchanged manual CLI
-suite use its intended local HTTP/CLI doubles; no credentials were changed.
-
-`.venv/bin/mypy --config-file pyproject.toml -p auto_coder`: **success, 375 source
-files**. Black check, isort check and flake8 on the two changed Python files,
-and `git diff --check`, passed. These checks verify removal and preserved
-resolution/CI/manual paths, not the unimplemented continuation policy.
+`.venv/bin/mypy --config-file pyproject.toml -p auto_coder` passed across **376
+source files**. Black check, isort check, flake8 on all seven changed Python
+files, and `git diff --check`, passed. Test transports were local controlled
+boundaries; no live provider follow-up was run. The test collector could not
+save its redundant JSON log under the read-only home directory; test execution
+itself completed with exit 0. Unsetting inherited `CODEX_HOME` lets the manual
+CLI tests use their own temporary test credentials; credentials were unchanged.
