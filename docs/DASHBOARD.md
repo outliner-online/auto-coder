@@ -518,3 +518,11 @@ refusal: the exact attempt's pending claim was released without changing older
 uncertainty. Unknown or crash-after-wire outcomes remain fenced. Instructions
 come from a selected pre-existing registered requirement and finding; free-form
 replacement instructions and digest-only distinctions are not accepted.
+
+For ordinary review repair, a bookkeeping error after positive exact native
+rejection is reported as rejected delivery plus the bookkeeping failure; only
+that request's pending claim is released. Generic exceptions and missing or
+mismatched proof remain fenced. Historical payload matches and a Finding marked
+`NONE` do not authorize splitting a legacy mixed batch. Existing action details
+and `unconfirmed_delivery_receipt` continue to display these outcomes without a
+new status or event schema.

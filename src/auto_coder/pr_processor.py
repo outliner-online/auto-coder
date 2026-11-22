@@ -10878,6 +10878,10 @@ def _delegate_cloud_review_thread_repair(
         feedback = "\n\n".join(f"Thread `{thread.id}`:\n{comment.body}" for thread, comment, _identity in pending)
         details = Template(get_prompt_template("codex_cloud.review_thread_repair_details")).safe_substitute(actionable_feedback=feedback)
         prompt = build_existing_pr_repair_prompt(target, details)
+    if provider == "codex-cloud":
+        # An admission failure before entering the native sender must not consume
+        # a one-use receipt left by an earlier invocation of the same request.
+        client.consume_followup_rejection(task_id, tuple(sorted(pending_identities)))
     try:
         attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin)
         if attribution_error:
@@ -10906,11 +10910,17 @@ def _delegate_cloud_review_thread_repair(
     except Exception as exc:
         logger.warning(f"Cloud review repair delegation failed for PR #{pr_number}: {exc}")
         with _cloud_review_delivery_lock:
+            # Native transport persists definite rejection before accounting its
+            # result. A later bookkeeping exception does not erase that proof.
+            definitely_rejected = provider not in SUPPORTED_PROVIDERS
+            if provider == "codex-cloud":
+                definitely_rejected = client.consume_followup_rejection(task_id, tuple(sorted(pending_identities))) is True
             try:
-                # Excluded providers retain their existing failure/retry policy.
-                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if provider not in SUPPORTED_PROVIDERS else None)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if definitely_rejected else None)
             except OSError:
                 pass
+        if provider == "codex-cloud" and definitely_rejected:
+            return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' rejected follow-up delivery; bookkeeping failed: {exc}"])
         return CloudReviewRepairResult([f"Review repair was not delivered to {provider} for PR #{pr_number}: {exc}"])
     if not accepted:
         definitely_rejected = provider not in SUPPORTED_PROVIDERS

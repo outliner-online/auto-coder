@@ -3913,3 +3913,22 @@ the instruction; the same existing facts and public renderer are retained.
 The real-entry scoped regression checks refusal after reservation, no wire call,
 a subsequent authorized source, and restart fences alongside duplicate,
 whitespace-only and unrelated obligation controls.
+
+### Ordinary legacy source evidence and rejection bookkeeping
+
+`tests/test_legacy_review_source_evidence.py` reaches `_handle_pr_merge` with
+real accepted canonical findings and durable Codex ownership. Exact historical
+payload/native-fingerprint matching does not turn Finding `NONE` into an unsent
+receipt. Distinct registered requirements, duplicate/paraphrased guidance and
+incomplete historical evidence keep the existing mixed-batch
+`unconfirmed_delivery_receipt` wait, unchanged across reevaluation.
+
+A post-transport bookkeeping exception can carry exact positive native rejection
+proof. Ordinary intake now consumes that proof under the shared lock and releases
+only its current pending identities; generic exceptions and stale/mismatched
+proof retain claims. The existing repair action reports rejection with the
+bookkeeping failure. These use the existing repair-result event/stage and detail
+renderer: no new processing origin, schema, dashboard status or recovery clock is
+introduced. Other work-accounting records remain governed by their existing
+settlement rules. Run `bash scripts/test.sh --ci-tests-only
+tests/test_legacy_review_source_evidence.py tests/test_codex_cloud_pr_review_flow.py`.

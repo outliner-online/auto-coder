@@ -112,3 +112,43 @@ separate from remote rejection. Only positive native rejection evidence can
 support a remote-refusal label. The production ordinary-intake regression
 `test_supported_external_feedback_producer_cannot_supply_mixed_split_resolution`
 continues to verify that raw new comments do not acquire this authority.
+
+### Ordinary legacy evidence boundary
+
+The ordinary repair-bundle audit retains the rendered payload in SQLite; a
+matching native prepared-message fingerprint can bind those exact bytes to a
+known old send. Native repair metadata can also bind PR/head and current owner
+incarnation. These are useful positive evidence, but neither the canonical
+blocker UUID nor the accepted Finding's `delivery_status=NONE` is an unsent
+receipt. Ordinary sending does not update that Finding field: it can remain
+`NONE` after an actual indeterminate provider request. The bundle audit has no
+immutable source/lane reservation joining accepted source, bounded obligation,
+owner incarnation and complete native send membership. Its payload row can be
+replaced, and the public bundle reader currently omits the stored payload bytes.
+Unavailable or mismatching historical bytes cannot establish old scope.
+
+`tests/test_legacy_review_source_evidence.py` drives the production merge entry
+with real accepted Strong findings, canonical root association, durable current
+Issue/Codex ownership and controlled native transport. It demonstrates both an
+exact old payload/fingerprint match and the misleading `NONE` value after a real
+unknown send. A different registered requirement, duplicate/paraphrased guidance,
+missing owner binding and missing historical payload all remain held across
+reevaluation with no second wire request or old native-record edits. This is a
+negative evidence regression, not a positive mixed-dispatch implementation.
+
+A future ordinary split requires a shared durable source/lane registration
+created before any correction producer can send that source: exact source,
+PR/head, verified owner, registered requirement and bounded payload, plus its
+consumptive native-operation membership. Every applicable producer must honor
+that reservation. Only sources positively born under that contract, or sources
+with independent exact no-effect proof, can establish no prior attempt; legacy
+`NONE` records cannot be backfilled as unsent. Recovering an old scope additionally
+requires exact immutable payload/native fingerprint and complete held-operation
+membership, with overlapping or unverifiable obligations held. This boundary
+adds no authority or automatic semantic classifier and is not implemented here.
+
+If native transport proves definite rejection and later bookkeeping raises,
+ordinary intake consumes only the current exact task/full-identity proof under
+the shared lock and releases only that request's pending claim. Stale receipts
+are discarded before admission; absent, mismatched and ambiguous proof remain
+fenced. This does not settle or rewrite other accounting/uncertain operations.
