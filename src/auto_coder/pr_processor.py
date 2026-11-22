@@ -10793,6 +10793,10 @@ def _delegate_cloud_review_thread_repair(
     selected_identities = {identity for _thread, _comment, identity in findings}
     with _cloud_review_delivery_lock:
         try:
+            from .strong_correction_scope import has_registered_task, strict_native_evidence
+
+            if provider == "codex-cloud" and has_registered_task(repo_name, task_id):
+                strict_native_evidence(repo_name)  # Before reconciliation can rewrite filtered legacy rows.
             delivered = _load_delivered_review_feedback(state_path)
             remote_delivered = _load_pr_delivered_review_feedback(github_client, repo_name, pr_number, sorted(selected_identities | diagnostic_candidates))
             # Excluded receipts are diagnostic evidence only: never reconcile

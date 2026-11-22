@@ -86,6 +86,37 @@ def seal_revision(row: dict) -> str:
     return digest({"source_revision": row["revision"], "native_membership": row["native_membership"], "canonical_blocker": row["canonical_blocker"], "root_bodies": row.get("root_bodies", {})})
 
 
+def strict_native_evidence(repository: str) -> dict:
+    """Read every raw row; scoped exhaustiveness cannot use legacy filtering."""
+    from .codex_cloud_client import PendingCodexFollowUp, _codex_followup_state_path
+    from .codex_wham_client import FollowUpDeliveryOutcome
+
+    path = _codex_followup_state_path(repository)
+    if not path.exists():
+        return {}
+
+    def unique_object(pairs):
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            raise ValueError("Duplicate native journal fields prevent exhaustive Strong scope")
+        return result
+
+    raw = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    if not isinstance(raw, dict) or any(not isinstance(key, str) or not isinstance(row, dict) for key, row in raw.items()):
+        raise ValueError("Unidentifiable native journal entry prevents exhaustive Strong scope")
+    for key, row in raw.items():
+        if any(not isinstance(row.get(field), str) or not row[field] for field in ("task_id", "logical_identity", "message_fingerprint", "pre_send_turn_id", "status")):
+            raise ValueError("Incomplete native journal row prevents exhaustive Strong scope")
+        if key != hashlib.sha256(f"{row['task_id']}\0{row['logical_identity']}".encode("utf-8")).hexdigest() or len(row["message_fingerprint"]) != 64 or any(c not in "0123456789abcdef" for c in row["message_fingerprint"]):
+            raise ValueError("Malformed native journal identity prevents exhaustive Strong scope")
+        if row["status"] not in {FollowUpDeliveryOutcome.INDETERMINATE.value, FollowUpDeliveryOutcome.DELIVERED.value}:
+            raise ValueError("Unsupported native journal status prevents exhaustive Strong scope")
+    try:
+        return {key: PendingCodexFollowUp(**row) for key, row in raw.items()}
+    except TypeError as exc:
+        raise ValueError("Malformed native journal record prevents exhaustive Strong scope") from exc
+
+
 def _frozen(operation, sources) -> dict:
     provenance = operation.send_provenance
     if provenance is None or not provenance.strong_source or provenance.strong_source not in sources:
@@ -100,7 +131,6 @@ def _frozen(operation, sources) -> dict:
     attempt = source.get("attempt")
     if not isinstance(attempt, dict) or attempt.get("operation_id") != operation.logical_operation_id or attempt.get("scoped") is not True or tuple(attempt.get("native_membership", ())) != provenance.logical_identities:
         raise ValueError("Older operation has no exact atomic source attempt binding")
-    from .codex_cloud_client import _codex_followup_state_path, _load_pending_followups
     from .codex_wham_client import FollowUpDeliveryOutcome
     from .codex_work_fence import CodexWorkFence, CodexWorkIdentity, stable_codex_operation_id
 
@@ -124,7 +154,7 @@ def _frozen(operation, sources) -> dict:
     # publication attribution must positively bind it to this frozen launch.
     if subject is None or not subject.head_repository or (subject.head_repository, subject.head_ref) != (snapshot["head_repository"], snapshot["head_ref"]):
         raise ValueError("Older writable head has no exact authenticated binding")
-    native = _load_pending_followups(_codex_followup_state_path(snapshot["repository"]))
+    native = strict_native_evidence(snapshot["repository"])
     group = [(key, item) for key, item in native.items() if item.task_id == operation.task_id and item.message_fingerprint == provenance.fingerprint and item.pre_send_turn_id == operation.causal_baseline]
     if sorted(item.logical_identity for _key, item in group) != list(provenance.logical_identities):
         raise ValueError("Older native membership is absent or incomplete")
@@ -164,6 +194,7 @@ def separate_source_subject(slots, owner, incarnation, task_id, provenance, row)
 def older_inventory(slots, owner, incarnation, pr_number: int, sources, *, current_source_key=None) -> list[dict]:
     from .codex_work_reconstruction import production_codex_reconstructor
 
+    strict_native_evidence(slots.repo_name)  # Before a legacy reader can omit unknown raw rows.
     reconstructor = production_codex_reconstructor(slots.repo_name, owner.number)
     accounting = CodexWorkAccounting(slots, reconstructor.consistency_ids)
     inventory = accounting.reconcile_from_receipt(owner, incarnation, reconstructor.reconstruct())

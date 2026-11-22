@@ -4047,3 +4047,10 @@ refresh already runs in the final owner-fenced callback and is unchanged.
 `tests/test_strong_correction_scope.py` covers preserved deficient old records and
 actual owner-lock waits with canonical revocation or a remote root edit, alongside
 the unchanged expanded-round positive.
+
+For registered Strong tasks, malformed extra native journal rows now hold before
+legacy reconciliation as well as exhaustive scope validation, preserving the raw
+document. Existing unavailable/deferred diagnostics apply; ordinary tasks without
+Strong provenance and the legacy journal reader/writer are unchanged. The extra-row
+controls in `tests/test_strong_correction_scope.py` cover even a would-succeed
+reconciliation without new POSTs or journal normalization.

@@ -51,13 +51,22 @@ bounded instruction from the registered finding and existing Requirement, and
 uses its existing verified Codex-cloud owner. Under the common owner lock it
 rechecks the accepted snapshot, complete reconciled old inventory, exact named
 native groups and prompt fingerprint. Old native groups use the sender's existing
-canonical `sha256(task + NUL + logical_identity)` lookup keys, typed journal reader,
+canonical `sha256(task + NUL + logical_identity)` lookup keys, scoped strict journal reader,
 exact operation/source/baseline and full recorded repair target. Since native rows
 have no head-repository field, the existing authenticated publication attribution
 must positively match the frozen launch/head repository/ref as well. Only persisted
 `indeterminate`/`delivered` rows are admissible, and accepted accounting requires
 all group rows delivered. Miskeyed, deficient or contradictory old evidence is held
-without relocation or repair. Immediately before reservation/POST the
+without relocation or repair. The scoped reader validates the entire raw native
+object, including every extra row, without the legacy loader's filtering or defaults
+for required identity/status evidence. Non-object, incomplete or malformed unknown
+rows and duplicate JSON fields hold exhaustive admission. It runs before older-inventory reconciliation and
+again in frozen native verification. Ordinary intake also checks it before any
+legacy reconciliation for tasks with a registered Strong birth, preventing a
+successful legacy reconciliation from saving a filtered document first. The legacy
+loader/writer and tasks without Strong provenance retain their behavior. Malformed
+raw entries are never removed, normalized or treated as absence by this scope gate.
+Immediately before reservation/POST the
 existing final-authority callback refreshes origin, open PR, exact head/base,
 current contract/policy, root bodies, allowance, draining and pending-effect gates.
 The source reader also requires an OPEN/RECURRENCE canonical blocker with no
@@ -101,7 +110,10 @@ effects, exhausted allowance, missing owner run,
 alternate force lanes, exact cross-lane replay and crashes before acceptance,
 before wire and after wire, and native accepted/unknown/rejection certainty when
 later lifecycle bookkeeping fails. Miskeyed and wrong-repair-target native rows
-remain byte-for-byte unchanged while blocking new sends. Real competing-process
+remain byte-for-byte unchanged while blocking new sends. Extra null/list/string
+or incomplete-object rows also hold, including when a controlled legacy
+reconciliation would otherwise succeed; the extra raw rows remain byte-for-byte
+intact and no reconciliation or new send occurs. Real competing-process
 owner-lock tests revoke canonical authority, add a reconciliation hold, or edit
 only the physical root during the wait; all produce zero new POSTs and no new
 native source claim. Reconstructed clients/evaluations never duplicate.

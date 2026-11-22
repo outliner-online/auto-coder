@@ -87,6 +87,12 @@ def sources(slots):
         "old_native_status",
         "old_native_accepted_status",
         "old_native_operation",
+        "old_native_extra_null",
+        "old_native_extra_list",
+        "old_native_extra_string",
+        "old_native_extra_object",
+        "old_native_extra_reconcile",
+        "old_native_extra_duplicate",
         "waited_root",
         "waited_revoked",
         "waited_reconciliation",
@@ -307,6 +313,13 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
             key = hashlib.sha256(f"{TASK}\0{old_scope['native_membership'][0]}".encode()).hexdigest()
             if control == "old_native_key":
                 native["e" * 64] = native.pop(key)
+            elif control.startswith("old_native_extra_"):
+                native["f" * 64] = {"old_native_extra_null": None, "old_native_extra_list": [], "old_native_extra_string": "unknown identity", "old_native_extra_object": {}, "old_native_extra_reconcile": None, "old_native_extra_duplicate": None}[control]
+                if control == "old_native_extra_duplicate":
+                    native.pop("f" * 64)
+                if control == "old_native_extra_reconcile":
+                    wham.reconcile_follow_up.return_value = True
+                    wham.reconcile_follow_up.reset_mock()
             elif control in {"old_native_accepted_status", "old_native_operation"}:
                 with slots._state_lock():
                     records = slots._read()
@@ -328,7 +341,12 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
                     "old_native_status": ("status", "not_delivered"),
                 }[control]
                 native[key][field] = value
-            path.write_text(json.dumps(native))
+            encoded = json.dumps(native)
+            if control == "old_native_extra_duplicate":
+                # A normal dict reader would hide the malformed duplicate
+                # behind the final valid original row at the canonical key.
+                encoded = encoded[:-1] + f', "{key}": null, "{key}": ' + json.dumps(native[key]) + "}"
+            path.write_text(encoded)
             old_native = path.read_bytes()  # Preserve even the deficient old evidence verbatim.
         if control == "remote_rejected":
             wham.send_follow_up.side_effect = [FollowUpDeliveryResult(FollowUpDeliveryOutcome.NOT_DELIVERED, 429)]
@@ -387,6 +405,11 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
         expected = 2 if control in {"fresh", "alternate_first", "cross_lane_duplicate", "missing_run", "crash_after_wire", "remote_rejected", "accepted_bookkeeping", "ambiguous_bookkeeping"} else 1
         assert wham.send_follow_up.call_count == expected, result
         assert sources(slots)[first_source] == old_scope
+        if control.startswith("old_native_extra_"):
+            assert _codex_followup_state_path(REPO).read_bytes() == old_native
+            assert sources(slots)[new_source]["attempt"] is None
+            if control == "old_native_extra_reconcile":
+                wham.reconcile_follow_up.assert_not_called()
         if control != "native_lost":
             current = json.loads(_codex_followup_state_path(REPO).read_text())
             assert all(current[key] == value for key, value in json.loads(old_native).items())
