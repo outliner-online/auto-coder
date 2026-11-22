@@ -3816,8 +3816,17 @@ The inverse interleaving is covered by
 a peer snapshot predates the original reservation, and its later write must
 preserve the unknown POST across restart. The writer now accepts explicit
 pending additions and exact known-no-effect removals against the latest document;
-bookkeeping updates add no pending claims. Generic exception/False outcomes
+bookkeeping updates add no pending claims. For Codex Cloud and Claude Routine, generic exception/False outcomes
 retain the pending source, while the pre-send-refusal regression proves cleanup
 removes only the current request's identities and remains retryable. No event
 schema or processing origin changes: the existing indeterminate-delivery wait
 remains the observable outcome, without another provider call.
+
+The unknown-outcome retention policy applies only to the checkpoint capability
+set (Codex Cloud and Claude Routine). Excluded Jules keeps the legacy ordinary
+repair failure/retry path: False or exception cleanup releases exactly its own
+reserved identities while preserving peer claims.
+`tests/test_codex_cloud_pr_review_flow.py::test_legacy_jules_false_and_exception_remain_retryable_without_enrollment`
+verifies both cases without a recovery series. Existing ordinary repair-result
+events report failure followed by a normal accepted retry; no new checkpoint
+event, event schema or processing origin is introduced for Jules.

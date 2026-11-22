@@ -479,6 +479,8 @@ meaning after restart; no new dashboard event or provider-state inference is
 introduced by this receipt-preservation fix.
 
 Pending-source writes also preserve reservations absent from an older worker
-snapshot. Unknown POST outcomes remain fenced across restart; only exact
-confirmed identities or proven pre-send no-effect claims can leave pending.
-The existing indeterminate-delivery wait reports this condition.
+snapshot. Codex Cloud and Claude Routine unknown POST outcomes remain fenced across
+restart; confirmed identities and proven pre-send no-effect claims release their
+exact pending identities. Excluded Jules retains its ordinary failure/retry
+cleanup, which releases only its own reservation. The existing indeterminate-
+delivery wait continues to report supported-provider uncertainty.

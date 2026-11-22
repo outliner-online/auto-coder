@@ -15,7 +15,7 @@ unknown provider execution is permitted; no execution-state detector is added.
 | --- | --- |
 | Initial Issue starts | `IssueDispatchService`, three `_process_issue_*_mode` producers, CloudRun/CloudManager and implementation slots. No uniform frozen acceptance clock plus proven branch baseline exists. Initial Issue and initial PR task launches are a separate slice, even if a PR later appears. |
 | Review/adversarial PR corrections | `pr_processor` resolves exact ownership, checks correction allowance, renders a bounded PR/head/branch prompt and retains delivery identities in `cloud_review_repairs.json`. Extend this producer/file; never invent an old acceptance clock from observation time. |
-| Delivery | Codex's logical-identity-aware native journal and Claude's existing-session CLI/OAuth quota admission. Jules is excluded from this feature and the next initial-task slice; its existing behavior stays intact. Use the existing send abstraction with typed native-signature capabilities; Boolean False remains unknown. |
+| Delivery | Codex's logical-identity-aware native journal and Claude's existing-session CLI/OAuth quota admission. Jules is excluded from this feature and the next initial-task slice; its existing behavior stays intact. Use the existing send abstraction with typed native-signature capabilities; For supported providers, Boolean False remains unknown; excluded Jules retains its legacy failure/retry cleanup. |
 | Correction generation (#2141/#2142) | Keep existing owner, canonical bundle/generation and exhaustion gates. Checkpoints never create failed corrections, spend/reset their allowance or re-open exhausted blockers. |
 | Publication (#1864) | `CodexPRRecoveryMonitor` retains its completed/no-PR Create PR reminder and 120-second grace. This slice requires an existing PR and an accepted correction, so neither initial task nor publication reminder is registered. |
 | Jules checkpoint/recovery (#2092) | Initial prompt guidance is not runtime commit evidence. Live session reconciliation, approvals, failed-session recovery and no-PR messages remain unchanged. |
@@ -59,7 +59,7 @@ for delivered scope and limitations.
 
 ## Focused verification
 
-The final production-boundary selection passed **461 tests in 30.33s**, exit 0:
+The final production-boundary selection passed **463 tests in 30.58s**, exit 0:
 
 ```bash
 env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \

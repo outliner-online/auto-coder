@@ -31,13 +31,16 @@ new request admission and checkpoint reservation/dispatch. Confirmed original
 source identities and their clock commit atomically. Later receipt writers merge
 the latest confirmed identities while holding the file guard, then exclude them
 from pending. A stale peer snapshot cannot erase an accepted source or make it
-pending again. Pending updates are explicit additions and exact known-no-effect releases;
+pending again. Pending updates are explicit additions and exact releases by the owning sender;
 bookkeeping writes carry no pending additions. The writer merges additions with
 the latest pending set under the same lock, so a snapshot taken before another
 PR reserved work cannot erase that unseen reservation. Confirmed receipts remove
-only their exact identities. Generic exceptions and bare False transport results
-retain uncertainty; pre-send metadata/ownership refusals and typed quota holds
-release only the sender's own reserved identities.
+only their exact identities. For Codex Cloud and Claude Routine, generic
+exceptions and bare False transport results retain uncertainty; pre-send
+metadata/ownership refusals and typed quota holds release only the sender's own
+reserved identities. Excluded providers retain their legacy failure handling:
+Jules False/exception results release only its own request's reservation and
+remain retryable, without enrolling in checkpoint recovery or clearing peer claims.
 
 The normal duplicate-correction wait and retained current-correction handoff
 revisit the series. Before another send, current PR metadata and the exact
@@ -110,3 +113,8 @@ next eligible time. `accepted` confirms assignment only. `delivery_unknown` and
 `owner_changed`, `closed`, `acknowledged_outcome` and `limit_reached` stop that
 series. Inspect the stage and delivery file when investigating holds; do not
 reset a reservation merely because another hour passed.
+
+`test_legacy_jules_false_and_exception_remain_retryable_without_enrollment`
+exercises the excluded Jules route's False and exception retry behavior, preserves
+another PR's unknown claim, and confirms no recovery series is registered. The
+supported-provider crash/restart and stale-writer regressions remain unchanged.

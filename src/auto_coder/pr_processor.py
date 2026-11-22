@@ -10136,7 +10136,7 @@ def _record_review_feedback_state(
         # identities are monotonic; a stale write cannot erase or re-pend them.
         delivered = delivered | _load_delivered_review_feedback(state_path)
         # Unseen reservations belong to other in-flight writers. Only confirmed
-        # receipts or an explicit, known-no-effect removal may clear an identity.
+        # receipts or an explicit release by the owning sender may clear an ID.
         pending = (pending_additions | _load_pending_review_feedback(state_path)) - delivered - (remove_pending or set())
         state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = state_path.with_suffix(f"{state_path.suffix}.{os.getpid()}.tmp")
@@ -10695,6 +10695,7 @@ def _delegate_cloud_review_thread_repair(
     provider_label = {"codex-cloud": "Codex Cloud", "jules": "Jules", "claude-routine": "Claude Routine"}.get(provider, provider)
 
     from .cloud_task_client_base import CloudTaskClientBase
+    from .pr_no_commit_recovery import SUPPORTED_PROVIDERS
 
     if getattr(type(client), "send_followup", None) is CloudTaskClientBase.send_followup:
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: cloud provider '{provider}' does not support follow-up delivery"])
@@ -10879,17 +10880,19 @@ def _delegate_cloud_review_thread_repair(
         logger.warning(f"Cloud review repair delegation failed for PR #{pr_number}: {exc}")
         with _cloud_review_delivery_lock:
             try:
-                _record_review_feedback_state(state_path, delivered, set())
+                # Excluded providers retain their existing failure/retry policy.
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if provider not in SUPPORTED_PROVIDERS else None)
             except OSError:
                 pass
         return CloudReviewRepairResult([f"Review repair was not delivered to {provider} for PR #{pr_number}: {exc}"])
     if not accepted:
         with _cloud_review_delivery_lock:
             try:
-                _record_review_feedback_state(state_path, delivered, set())
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if provider not in SUPPORTED_PROVIDERS else None)
             except OSError:
                 pass
-        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' has unconfirmed follow-up delivery"])
+        detail = "has unconfirmed follow-up delivery" if provider in SUPPORTED_PROVIDERS else "rejected follow-up delivery"
+        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' {detail}"])
 
     get_claude_followup_wait_store().retire(repo_name, task_id, "review-thread-repair", work_identity)
 

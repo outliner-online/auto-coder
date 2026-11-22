@@ -1211,3 +1211,29 @@ def test_pre_send_refusal_clears_only_its_own_reservation_and_remains_retryable(
         native.send_followup.assert_called_once()
         assert _load_pending_review_feedback(path) == peer_pending
         assert not peer_pending.intersection(_load_delivered_review_feedback(path))
+
+
+@pytest.mark.parametrize("failure", [False, RuntimeError("legacy send failed")])
+def test_legacy_jules_false_and_exception_remain_retryable_without_enrollment(tmp_path, failure):
+    from auto_coder.pr_processor import _load_pending_review_feedback, _record_review_feedback_state
+
+    path = tmp_path / "repairs.json"
+    peer_pending = {"owner/repo#5263:claude-routine:session-B:unknown-post"}
+    _record_review_feedback_state(path, set(), peer_pending)
+    github = _github_client()
+    native = MagicMock()
+    native.send_followup.side_effect = [failure, True]
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("jules", "existing-jules-session")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+    ):
+        first = _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        assert not first.delivered
+        assert _load_pending_review_feedback(path) == peer_pending
+        second = _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert second.delivered
+        assert native.send_followup.call_count == 2
+        assert all(len(call.args) == 2 for call in native.send_followup.call_args_list)
+        assert _load_pending_review_feedback(path) == peer_pending
+        assert not json.loads(path.read_text()).get("no_commit_series")
