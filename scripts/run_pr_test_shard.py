@@ -193,16 +193,11 @@ def _run_attempt(group: int, attempt: int, timeout: float, grace: float, log_dir
         logger.remove(sink)
         return "infrastructure"
     try:
-        environment = os.environ.copy()
-        # Keep native pytest phase evidence with the existing per-attempt
-        # diagnostics. A distinct directory separates a timeout from its retry.
-        environment["AUTO_CODER_CI_TIMING_DIR"] = str(log_dir / f"attempt-{attempt}-timing")
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
-            env=environment,
         )
     except OSError as exc:
         logger.error("Attempt {} infrastructure failure while launching: {}", attempt, exc)

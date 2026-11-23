@@ -25,15 +25,11 @@ failure propagation. Balancing does not change the suite, assertions, markers,
 check identities, or workflow timeout. CI output must still be evaluated for its
 actual result; estimates and a successful partition check are not a passing run.
 
-Each attempt enables the native pytest timing recorder in an attempt-specific
-directory beneath the shard diagnostics artifact. This keeps setup, call and
-teardown phase evidence separate across the single timeout-only retry and makes
-like-for-like job comparisons possible without changing test outcomes.
-
 The six-shard experiment in PR run
 `https://github.com/outliner-online/auto-coder/actions/runs/45101592400` was
 inconclusive and was not adopted: it had no identically instrumented four-shard
-baseline and three candidate shards exhausted both timeout attempts. The
+baseline, and enabling the recorder materially perturbed the candidate while
+three candidate shards exhausted both timeout attempts. The
 production matrix therefore remains at four shards until comparable repeated
 measurements establish native-work dominance, independence, and an improvement
 beyond run-to-run variation.

@@ -93,7 +93,7 @@ def test_production_step_passes_correct_shard_once(tmp_path, group):
     result = _run_step(
         tmp_path,
         group,
-        '#!/bin/bash\nprintf "%s\\n" "$*" >> invocations\nprintf "%s\\n" "$AUTO_CODER_CI_TIMING_DIR" > timing-env\necho shard-output\n',
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> invocations\necho shard-output\n',
     )
 
     assert result.returncode == 0
@@ -102,7 +102,6 @@ def test_production_step_passes_correct_shard_once(tmp_path, group):
     ]
     assert "shard-output" in result.stdout
     assert (tmp_path / f"pr-test-logs/shard-{group}/attempt-1.stdout.log").exists()
-    assert (tmp_path / "timing-env").read_text().strip() == f"pr-test-logs/shard-{group}/attempt-1-timing"
     assert not (tmp_path / f"pr-test-logs/shard-{group}/attempt-2.stdout.log").exists()
 
 
