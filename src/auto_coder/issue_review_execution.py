@@ -1,4 +1,4 @@
-"""Repository checkout binding for Muse individual specification review."""
+"""Repository checkout binding for Muse Issue specification and decomposition review."""
 
 from __future__ import annotations
 
@@ -69,14 +69,14 @@ def _verified_checkout(repository: str) -> Path:
 
 @contextmanager
 def issue_specification_execution_cwd(backend_type: str, is_noedit: bool) -> Iterator[None]:
-    """Bind only Muse individual review, using the lifecycle's exact target.
+    """Bind Muse Issue review, using the lifecycle's exact target.
 
     The lifecycle establishes this identity inside the actual scheduled callback.
     Binding before private-workspace preparation carries the verified source to
     Muse's existing Git snapshot without changing other providers or PR review.
     """
     target = current_invocation_target()
-    if backend_type != "muse" or not is_noedit or target is None or target.stage != "specification_validation":
+    if backend_type != "muse" or not is_noedit or target is None or target.stage not in {"specification_validation", "decomposition_validation"}:
         yield
         return
     checkout = _verified_checkout(target.repository)

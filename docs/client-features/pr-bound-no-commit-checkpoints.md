@@ -137,3 +137,10 @@ the journal without the key, a null exact entry and mixed confirmed/malformed
 identities do not. Native client cases distinguish malformed targets from absent
 keys and verify that positive rejection evidence is consumed once and cleared by
 a subsequent successful send. No new durable store or provider mechanism is added.
+
+Checkpoint origin refresh also carries the current strict GitHub client through
+main's bound-draft authority revalidation. A legitimate retained same-task series
+keeps its cadence under that authority; missing or changed evidence still holds.
+The review-flow same-owner/hourly regression runs both supported providers with
+and without a bound draft context, alongside draft admission and wrong-task
+negative controls. No fresh admission, replay or force exemption is introduced.

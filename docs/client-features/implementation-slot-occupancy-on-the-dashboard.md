@@ -43,3 +43,10 @@ worker reports the wait rather than successful processing; the mounted detail
 view preserves the admission reason and the occupied slot remains visible.
 Pending local repairs receive fair runner turns even if an older job repeatedly
 fails pre-entry authorization or preparation.
+
+Fresh autonomous drafts without a configured local repair backend are checked
+for a usable provider route before acquiring new capacity. A blocked or
+uncertain route reports deferred implementation admission with its reason and
+creates no slot row. Existing retained ownership stays visible and is not
+reclaimed from current PR prose; see
+[PR lifecycle directives and fresh draft admission](pr-lifecycle-directive-admission.md).

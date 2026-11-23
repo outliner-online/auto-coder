@@ -33,3 +33,14 @@ in src/auto_coder/cli_helpers.py) prefers `[backend_issue_adversarial_validation
 in ~/.auto-coder/llm_config.toml when present, falling back to
 `[backend_adversarial_validation]` otherwise; it never uses
 `[backend_pr_adversarial_validation]`.
+
+
+The shared structural region reader uses CommonMark block ranges for code and
+quotes, including tab-indented code, list-contained fences and fence-like lines
+that cannot close a block. It retains original source line numbers and the
+existing whole-inline-comment-line policy. Raw HTML Objective prose remains
+structural content, and real Requirements after examples or within raw HTML
+remain subject to the existing parent prohibition. Indentation continuing a
+paragraph is authored text rather than an independent code block. Adjacent
+regressions are in `tests/test_role_structural_assessment.py`; no model policy,
+validation setting or requirement ownership is changed by this parsing fix.

@@ -191,16 +191,21 @@ def test_python314_advisory_workflow_is_a_real_non_live_compatibility_check() ->
         "pyproject.toml",
         "uv.lock",
         "tests/test_ci_uv_lock_policy.py",
+        "tests/test_python314_orchestration.py",
+        "scripts/plan_python314_tests.py",
+        "scripts/plan_ci_shards.py",
+        "scripts/ci_shard_plugin.py",
+        "src/auto_coder/ci_shard_plan.py",
     }
     assert workflow["permissions"] == {"contents": "read"}
-    assert list(workflow["jobs"]) == ["python314-compatibility"]
-    job = workflow["jobs"]["python314-compatibility"]
+    assert set(workflow["jobs"]) == {"python314-plan", "python314-shard", "python314-compatibility"}
+    job = workflow["jobs"]["python314-shard"]
     assert job["runs-on"] == "ubuntu-latest"
-    assert job["env"]["UV_PYTHON"] == "3.14"
-    assert job["env"]["AUTO_CODER_REQUIRE_BROWSER"] == "1"
-    assert job["env"]["PLAYWRIGHT_BROWSERS_PATH"] == "/tmp/auto-coder-python314-playwright-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert workflow["env"]["UV_PYTHON"] == "3.14"
+    assert workflow["env"]["AUTO_CODER_REQUIRE_BROWSER"] == "1"
+    assert job["env"]["PLAYWRIGHT_BROWSERS_PATH"] == "/tmp/auto-coder-python314-playwright-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}"
     steps = job["steps"]
-    assert not any(step.get("continue-on-error", False) for step in steps)
+    assert [step["name"] for step in steps if step.get("continue-on-error", False)] == ["Summarize native phase timing"]
     assert [step["with"]["python-version"] for step in steps if step.get("uses") == "actions/setup-python@v7"] == ["3.12", "3.14"]
     checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v7")
     assert checkout["with"]["fetch-depth"] == 0
@@ -208,14 +213,17 @@ def test_python314_advisory_workflow_is_a_real_non_live_compatibility_check() ->
     commands = [step.get("run", "") for step in steps]
     assert "uv sync --locked --dev --extra test" in commands
     assert any("sys.version_info[:2] == (3, 14)" in command for command in commands)
-    quality = next(command for command in commands if "uv run black --check" in command)
+    quality = next(step["run"] for step in workflow["jobs"]["python314-plan"]["steps"] if "uv run black --check" in step.get("run", ""))
     assert all(gate in quality for gate in ("isort --check-only", "flake8 src/ tests/", "mypy --config-file pyproject.toml -p auto_coder"))
     fixture = commands.index("uv run python scripts/prepare_management_test_image.py")
     browser = commands.index("uv run python scripts/browser_preflight.py")
-    tests = commands.index("uv run python -m pytest -m 'not opencode_live' -vv")
+    tests = next(index for index, command in enumerate(commands) if "uv run python -m pytest" in command)
+    assert "-m 'not opencode_live' -vv" in commands[tests]
+    assert "-p scripts.ci_shard_plugin" in commands[tests]
+    assert "--ci-plan=" in commands[tests] and "--ci-shard=" in commands[tests]
     assert fixture < browser < tests
     assert any("uv run playwright install --with-deps chromium" in command for command in commands)
-    assert _assert_workflow_policy([workflow_path]) == {"python-314-compatibility.yml:python314-compatibility"}
+    assert _assert_workflow_policy([workflow_path]) == {"python-314-compatibility.yml:python314-plan", "python-314-compatibility.yml:python314-shard"}
 
 
 @pytest.mark.parametrize(
@@ -229,7 +237,7 @@ def test_python314_advisory_workflow_is_a_real_non_live_compatibility_check() ->
 )
 def test_python314_workflow_cannot_bypass_shared_uv_policy(tmp_path: Path, original: str, replacement: str) -> None:
     workflow = (WORKFLOWS / "python-314-compatibility.yml").read_text(encoding="utf-8")
-    assert workflow.count(original) == 1
+    assert workflow.count(original) == 2
     corrupted = tmp_path / "python-314-compatibility.yml"
     corrupted.write_text(workflow.replace(original, replacement, 1), encoding="utf-8")
     with pytest.raises(AssertionError):

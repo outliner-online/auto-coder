@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
 
 import pytest
 import yaml
@@ -74,12 +77,59 @@ def test_opencode_live_workflow_contract_and_limits():
     assert test_step["env"]["AUTO_CODER_REQUIRE_OPENCODE_LIVE"] == "1"
     assert "-m opencode_live" in test_step["run"]
     assert "-n 2" in test_step["run"], "Dedicated live pytest must execute with two xdist workers"
+    assert "bash scripts/test.sh --ci-tests-only" in test_step["run"]
+    assert "--dist load --maxschedchunk 1" in test_step["run"]
+    assert "--durations=0" in test_step["run"]
+    assert "--junitxml=opencode-live-logs/junit.xml" in test_step["run"]
     for excluder in ("--splits", "--group", " -k ", "test_opencode_noedit_live.py", "test_opencode_container_runtime.py"):
         assert excluder not in test_step["run"], f"Selection must be purely marker-based, not {excluder!r}"
 
     artifact_step = steps[artifact_index]
     assert artifact_step["if"] == "always()", "Diagnostics upload must be attempted after success or failure"
     assert "opencode-live-logs/" in artifact_step["with"]["path"]
+
+
+@pytest.mark.parametrize("bounded_chunks,native_failure", [(False, False), (True, False), (True, True)])
+def test_live_step_preserves_exact_selection_and_native_failure(tmp_path, bounded_chunks, native_failure, _use_real_commands):
+    """Exercise the actual workflow command, script, collector and xdist workers."""
+    probe = tmp_path / "test_live_orchestration_probe.py"
+    required = sorted(MIGRATED_CONTAINER_SCENARIOS)
+    source = "import pytest\n\n"
+    for name in required:
+        source += f"@pytest.mark.opencode_live\ndef {name}():\n    pass\n\n"
+    source += (
+        '@pytest.mark.opencode_live\n@pytest.mark.parametrize("profile", ["a", "b", "c"])\n'
+        'def test_parameterized_profile(profile):\n    assert profile in {"a", "b", "c"}\n\n'
+        "@pytest.mark.opencode_live\ndef test_new_live_case():\n"
+        f"    assert {not native_failure!r}, 'native-live-failure-oracle'\n\n"
+        "def test_ordinary_case_must_be_excluded():\n    assert False\n"
+    )
+    probe.write_text(source, encoding="utf-8")
+    step = next(s for s in _workflow(OPENCODE_LIVE_WORKFLOW)["jobs"]["opencode-live-tests"]["steps"] if s["name"] == "Run opencode_live-marked tests")
+    command = shlex.split(step["run"], comments=True)
+    if not bounded_chunks:
+        chunk_option = command.index("--maxschedchunk")
+        del command[chunk_option : chunk_option + 2]
+    report = tmp_path / "junit.xml"
+    command = [f"--junitxml={report}" if arg.startswith("--junitxml=") else arg for arg in command]
+    command.extend([str(probe), "-p", "tests.conftest"])
+    env = os.environ.copy()
+    env.update({key: value.replace("${{ github.workspace }}", str(ROOT)) for key, value in step["env"].items()})
+    env.update(CI="true", HOME=str(tmp_path / "home"), AUTO_CODER_DISABLE_AUTO_UPDATE="1")
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT), env.get("PYTHONPATH", "")])
+
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=90)
+
+    assert result.returncode == (1 if native_failure else 0), result.stdout + result.stderr
+    expected = required + [f"test_parameterized_profile[{profile}]" for profile in ("a", "b", "c")] + ["test_new_live_case"]
+    cases = ElementTree.parse(report).findall(".//testcase")
+    assert Counter(case.attrib["name"] for case in cases) == Counter(expected)
+    assert len([case for case in cases if case.find("failure") is not None]) == int(native_failure)
+    # An additional native test failure must fail even though completeness passes.
+    assert "FAIL-CLOSED VALIDATION FAILED" not in result.stdout + result.stderr
+    assert "LoadScheduling" in result.stdout
+    if native_failure:
+        assert "native-live-failure-oracle" in result.stdout
 
 
 def test_ordinary_pr_tests_workflow_budgets_preserved():

@@ -115,3 +115,40 @@ selection includes its slotless Dependabot admission and durable retry tests
 alongside checkpoint/native journal and ordinary worker scheduling regressions.
 The unrelated hosted `/proc` observation test remains unchanged. Publication uses
 a normal fast-forward push; the checkpoint PR itself is not merged.
+
+## Main reconciliation on 2026-11-23
+
+Reconciled exact main `354441d9b735bc05f5c46ecaef95f25cfa7644d5` (including
+#2864, #2865, #2881, #2882 and #2901) into published #2889 head
+`ebda421baf6e24e050785352219282a02b177036` by a normal two-parent merge.
+The actual conflicts were the appended observability sections and the review
+handoff block. Both observability contracts are retained. Review handoff keeps
+main's strict GitHub-backed bound-draft origin check/deferred outcome and #2889's
+exact pending delta release and provider-aware checkpoint registration. Engine
+merge review confirms that main's admission preparation, slot/owner and startup
+operational-block semantics coexist with checkpoint scheduler wake/closure.
+Main's workflow, dependency manifest and lockfile content is retained exactly.
+
+The new checkpoint call also forwards the existing GitHub client into main's
+bound-draft origin recheck. The existing same-owner/hourly test now covers both
+Codex Cloud and Claude Routine with and without that context, retaining the
+60-minute spacing, cap, same-task and original no-replay assertions. The focused
+bound-draft/checkpoint plus lifecycle admission selection passed 240 cases.
+
+Whole-package mypy passed 377 source files; full src/tests black, isort and
+flake8 checks passed. The expanded selection reached 1,125 passes; 14 CLI fixture
+failures were caused by inherited CODEX_HOME and all 25 CLI cases passed with
+that variable unset, as in this document's original verification command. Three
+independent cross-Unix-identity slot tests cannot execute locally because sudo
+is unavailable; their code and assertions are unchanged. No permissions, identity
+emulation, skips or credential changes were introduced to bypass this limitation.
+Main's remaining admission/startup/slot/directive, Muse checkout and CI orchestration
+regressions passed. Full native PR CI remains the gate for the hosted identity
+cases. Synthetic providers were used; no live provider continuation or dispatch
+was invoked. #2902 remains at its original exact reviewed head until this parent
+merge is complete; its branch is not updated or retargeted by this reconciliation.
+
+With CODEX_HOME unset, the full original #2889 boundary selection plus the two
+new bound-draft provider cases passed **563 tests in 43.02s**, exit 0. Its command
+is the original selection above, using this merged source via PYTHONPATH and the
+existing managed Python environment without changing project dependencies.

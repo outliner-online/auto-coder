@@ -11,7 +11,7 @@ import pytest
 from auto_coder.adversarial_validator import AdversarialValidationResult
 from auto_coder.github_app_reviewer import GitHubAppReviewer, ReviewerAppConfig
 from auto_coder.logger_config import setup_logger
-from auto_coder.util.gh_cache import ActionsSecretPublisher, GitHubClient, get_ghapi_client
+from auto_coder.util.gh_cache import ActionsSecretPublisher, GitHubClient, InvalidOpenEntitiesObservation, OpenGitHubEntities, get_ghapi_client
 from auto_coder.util.github_request_outcome import (
     DeliveryCertainty,
     DiagnosticTransport,
@@ -34,6 +34,25 @@ class _RaisingStream(httpx.SyncByteStream):
 
     def close(self) -> None:
         pass
+
+
+@pytest.mark.parametrize("response_kind", ["not-list", "entity", "created-at", "json", "pagination-cycle", "available"])
+def test_strict_open_entities_types_only_rejected_observations(monkeypatch, response_kind):
+    def request(method, url, **kwargs):
+        payload = {"not-list": {}, "entity": [{"number": "1"}], "created-at": [{"number": 1, "created_at": 7}]}.get(response_kind, [])
+        headers = {"Link": f'<{url}>; rel="next"'} if response_kind == "pagination-cycle" else {}
+        if response_kind == "json":
+            return httpx.Response(200, content=b"{raw-response-canary", request=httpx.Request(method, url))
+        return httpx.Response(200, json=payload, headers=headers, request=httpx.Request(method, url))
+
+    monkeypatch.setattr("auto_coder.util.gh_cache._strict_request", request)
+    client = GitHubClient("token")
+    if response_kind == "available":
+        assert client.get_open_entities_strict("owner/repo") == OpenGitHubEntities()
+    else:
+        with pytest.raises(InvalidOpenEntitiesObservation) as caught:
+            client.get_open_entities_strict("owner/repo")
+        assert "raw-response-canary" not in str(caught.value)
 
 
 def test_process_boundary_refuses_distinct_production_credentials_without_a_send(tmp_path, monkeypatch):
@@ -86,6 +105,11 @@ def _client(handler, **kwargs):
         (403, {}, {"message": "Resource forbidden"}, GitHubApiOutcome.FORBIDDEN),
         (401, {}, {}, GitHubApiOutcome.AUTHENTICATION_FAILURE),
         (429, {}, {}, GitHubApiOutcome.THROTTLED),
+        (503, {"Retry-After": "60"}, {"errors": [{"message": "upstream unavailable"}]}, GitHubApiOutcome.REMOTE_ERROR),
+        (503, {"X-RateLimit-Remaining": "0"}, {"errors": [{"type": "RATE_LIMITED"}]}, GitHubApiOutcome.REMOTE_ERROR),
+        (404, {"Retry-After": "60", "X-RateLimit-Remaining": "0"}, {"errors": [{"message": "not found"}]}, GitHubApiOutcome.REMOTE_ERROR),
+        (403, {"Retry-After": "60"}, {"errors": [{"message": "limit"}]}, GitHubApiOutcome.SECONDARY_THROTTLED),
+        (429, {"X-RateLimit-Remaining": "0"}, {"errors": [{"message": "limit"}]}, GitHubApiOutcome.PRIMARY_THROTTLED),
     ],
 )
 def test_production_ghapi_rest_classifies_response(status, headers, body, expected):
@@ -102,6 +126,26 @@ def test_production_ghapi_rest_classifies_response(status, headers, body, expect
     assert caught.value.outcome.classification is expected
     assert caught.value.outcome.context.repository == "acme/widgets"
     assert observations[-1].classification is expected
+
+
+@pytest.mark.parametrize(
+    ("headers", "error", "expected"),
+    [
+        ({}, {"type": "RATE_LIMITED"}, GitHubApiOutcome.THROTTLED),
+        ({}, {"extensions": {"code": "RATE_LIMITED"}}, GitHubApiOutcome.THROTTLED),
+        ({"Retry-After": "60"}, {"message": "wait"}, GitHubApiOutcome.SECONDARY_THROTTLED),
+        ({}, {"message": "secondary rate limit"}, GitHubApiOutcome.SECONDARY_THROTTLED),
+        ({"X-RateLimit-Remaining": "0"}, {"message": "limit"}, GitHubApiOutcome.PRIMARY_THROTTLED),
+    ],
+)
+def test_successful_graphql_http_response_retains_real_throttle(headers, error, expected):
+    def handler(request):
+        return httpx.Response(200, headers=headers, json={"data": {}, "errors": [error]}, request=request)
+
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=_client(handler)):
+        with pytest.raises(GitHubRequestError) as caught:
+            get_ghapi_client("token")("/graphql", verb="POST", data={"query": "mutation X { x }"})
+    assert caught.value.outcome.classification is expected
 
 
 def test_graphql_partial_data_never_erases_structured_error():
