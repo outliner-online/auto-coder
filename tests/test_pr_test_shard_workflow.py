@@ -106,11 +106,7 @@ def _run_real_pytest_step(tmp_path: Path, assertion: str) -> subprocess.Complete
 def _environment_linkage_snapshot(environment: Path) -> dict[str, bytes]:
     """Capture files that identify which source tree an environment imports."""
     patterns = ("pyvenv.cfg", "*.pth", "direct_url.json")
-    return {
-        str(path.relative_to(environment)): path.read_bytes()
-        for pattern in patterns
-        for path in environment.rglob(pattern)
-    }
+    return {str(path.relative_to(environment)): path.read_bytes() for pattern in patterns for path in environment.rglob(pattern)}
 
 
 @pytest.mark.parametrize("group", [1, 2, 3, 4])
