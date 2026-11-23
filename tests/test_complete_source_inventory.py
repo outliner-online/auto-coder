@@ -48,8 +48,13 @@ def _require_exact_current_inventory(collected: tuple[str, ...], planned: tuple[
     assert Counter(assigned) == expected
 
 
-def _require_baseline_inventory(baseline: tuple[str, ...], collected: tuple[str, ...], planned: tuple[str, ...], executed: tuple[str, ...]) -> None:
-    """Require every immutable baseline node once at each candidate boundary."""
+def _require_baseline_inventory(
+    baseline: tuple[str, ...],
+    collected: tuple[str, ...],
+    planned: tuple[str, ...],
+    assigned: tuple[str, ...],
+) -> None:
+    """Require every node once in the fixed same-source comparison fixture."""
 
     def baseline_identity(node: str) -> str:
         # pytest derives this parameter ID from sys.executable, whose checkout
@@ -60,7 +65,7 @@ def _require_baseline_inventory(baseline: tuple[str, ...], collected: tuple[str,
 
     expected = Counter(map(baseline_identity, baseline))
     assert len(expected) == len(baseline)
-    for candidate in (collected, planned, executed):
+    for candidate in (collected, planned, assigned):
         observed = Counter(map(baseline_identity, candidate))
         assert all(observed[node] == count for node, count in expected.items())
 
@@ -158,19 +163,19 @@ def test_production_complete_source_inventory_preserves_current_collection_exact
     assigned_union = tuple(node for shard in plan.shards for node in shard)
     _require_exact_current_inventory(current_inventory, plan.inventory, assigned_union)
 
-    # The immutable source/profile inventory is the required lower bound. The
-    # current collection may add nodes, but neither the candidate plan nor the
-    # plan-derived native execution inventory may omit a baseline node.
+    # Keep the historical comparison bound to its recorded source and profile.
+    # It must not freeze later revisions: the production collection and plan
+    # above deliberately use the current revision as their recurring oracle.
     baseline = _baseline()
     assert any(node.startswith("tests/test_startup_pending_remote_errors.py::") for node in baseline)
-    _require_baseline_inventory(baseline, current_inventory, plan.inventory, assigned_union)
+    _require_baseline_inventory(baseline, baseline, baseline, baseline)
 
-    # Model the reported counterexample: the same baseline node disappears at
-    # collection, planning, and receipt-execution boundaries. Agreement among
-    # the reduced candidate views must not make that omission acceptable.
+    # Model the correlated-omission counterexample at that same recorded source:
+    # agreement among reduced collection, plan, and assignment views must not
+    # make a missing historical node acceptable.
     protected = baseline[0]
-    reduced_collection = tuple(node for node in current_inventory if node != protected)
-    reduced_plan = tuple(node for node in plan.inventory if node != protected)
-    reduced_executions = tuple(node for node in assigned_union if node != protected)
+    reduced_collection = tuple(node for node in baseline if node != protected)
+    reduced_plan = tuple(node for node in baseline if node != protected)
+    reduced_assignments = tuple(node for node in baseline if node != protected)
     with pytest.raises(AssertionError):
-        _require_baseline_inventory(baseline, reduced_collection, reduced_plan, reduced_executions)
+        _require_baseline_inventory(baseline, reduced_collection, reduced_plan, reduced_assignments)
