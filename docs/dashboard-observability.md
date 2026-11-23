@@ -978,7 +978,7 @@ implementation, handoff, publication or merge. Start is dispatch evidence, not
 provider liveness. Existing schema version 1, scope propagation, generic diagram
 and decision-log rendering, and the public API fact allowlist are preserved.
 
-Muse individual specification review resolves the exact lifecycle repository's
+Muse individual specification and decomposition review resolve the exact lifecycle repository's
 explicit `issue_review.checkout` before private-workspace preparation. Invalid
 or missing checkout evidence produces an explicit retryable local setup `ERROR`
 with no `llm.local-execution` start or implementation handoff.
@@ -990,9 +990,13 @@ boundary. `test_inherited_origin_cannot_replace_checkout_metadata` additionally
 checks stale controller/global/injected/included origin configuration through
 the same ordinary lane: no host launch, terminal authority, or implementation
 handoff occurs. The scoped-origin repair stays before the existing dispatch
-stage and adds no event or projection. Existing mounted-view dispatch regressions below remain applicable;
+stage and adds no event or projection. Decomposition uses the same pre-dispatch
+checkout binding; `tests/test_decomposition_review_checkout.py` drives actual
+scheduled parent-set analysis and real Muse Git preparation, stopping before
+MSP host launch. Invalid selections emit no local-dispatch start, terminal
+authorization, or implementation handoff. Existing mounted-view dispatch regressions below remain applicable;
 the event schema and projection are unchanged. Run
-`bash scripts/test.sh tests/test_issue_review_checkout.py tests/test_dashboard_observability.py::test_local_llm_preparation_failure_never_emits_start tests/test_dashboard_observability.py::test_local_llm_dispatch_reaches_mounted_detail_before_return`.
+`bash scripts/test.sh tests/test_issue_review_checkout.py tests/test_decomposition_review_checkout.py tests/test_dashboard_observability.py::test_local_llm_preparation_failure_never_emits_start tests/test_dashboard_observability.py::test_local_llm_dispatch_reaches_mounted_detail_before_return`.
 
 Local Issue implementation start comments consume this same production start
 boundary through a context-bound side effect in both durable-runner and
