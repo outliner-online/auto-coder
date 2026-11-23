@@ -213,7 +213,19 @@ def test_large_unread_prompt_does_not_block_cancellation(tmp_path: Path, _use_re
         worker.join(timeout=3)
 
 
-def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep) -> None:
+def _open_fd_padding(minimum_descriptor: int) -> list[int]:
+    descriptors: list[int] = []
+    try:
+        while not descriptors or descriptors[-1] < minimum_descriptor:
+            descriptors.append(os.open(os.devnull, os.O_RDONLY))
+    except BaseException:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise
+    return descriptors
+
+
+def _assert_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, high_descriptor: bool) -> None:
     # Control only the execution clock, not scheduling, Popen or real cleanup.
     # A total wall-time bound also measures pre-deadline startup and CI load.
     budget = 0.05
@@ -228,9 +240,7 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
     controllers = []
     stops = []
     ready = tmp_path / "child-ready"
-    fd_padding = []
-    while not fd_padding or fd_padding[-1] < 1024:
-        fd_padding.append(os.open(os.devnull, os.O_RDONLY))
+    fd_padding = _open_fd_padding(1024) if high_descriptor else []
 
     class Clock:
         now = 0.0
@@ -266,7 +276,7 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
         def is_writable() -> bool:
             poller = select.poll()
             poller.register(descriptor, select.POLLOUT)
-            return bool(poller.poll(0))
+            return any(events & select.POLLOUT for _, events in poller.poll(0))
 
         try:
             assert writer_armed.wait(10), "prompt submission blocked the supervisor"
@@ -304,7 +314,8 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
 
         def _start_writer(self, stream, prompt):
             descriptor = stream.fileno()
-            assert descriptor >= 1024
+            if high_descriptor:
+                assert descriptor >= 1024
             assert len(prompt) > fcntl.fcntl(descriptor, fcntl.F_GETPIPE_SZ)
             streams.append(stream)
             # Start the watchdog before submitting input, so a synchronous-write
@@ -356,6 +367,38 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
             os.close(descriptor)
         if (owner.root / "invocation-one").exists():
             owner.discard(owner.root / "invocation-one")
+
+
+def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep) -> None:
+    _assert_large_unread_prompt_does_not_block_timeout(tmp_path, monkeypatch, high_descriptor=False)
+
+
+def test_large_unread_prompt_timeout_supports_high_descriptor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep) -> None:
+    try:
+        _assert_large_unread_prompt_does_not_block_timeout(tmp_path, monkeypatch, high_descriptor=True)
+    except OSError as error:
+        if error.errno == errno.EMFILE:
+            pytest.skip("process descriptor capacity cannot reach the high-descriptor control")
+        raise
+
+
+def test_fd_padding_closes_descriptors_when_capacity_is_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_open = os.open
+    opened: list[int] = []
+
+    def capacity_limited_open(*args, **kwargs):
+        if len(opened) == 2:
+            raise OSError(errno.EMFILE, "fixture descriptor capacity exhausted")
+        descriptor = real_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", capacity_limited_open)
+    with pytest.raises(OSError, match="fixture descriptor capacity exhausted"):
+        _open_fd_padding(1024)
+    for descriptor in opened:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(descriptor)
 
 
 def test_timeout_and_confirmation_uncertainty_remain_distinct(tmp_path: Path) -> None:
