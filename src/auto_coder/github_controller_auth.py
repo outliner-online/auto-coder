@@ -69,7 +69,7 @@ def _read_config(path: Path, *, missing_ok: bool) -> dict:
     try:
         with path.open("rb") as stream:
             value = tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         failed = True
         value = {}
     if failed:

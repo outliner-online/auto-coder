@@ -37,6 +37,39 @@ def test_present_invalid_config_never_falls_back(tmp_path: Path, section: str) -
         select_controller_auth(REPO, provided_token="must-not-win", home=tmp_path)
 
 
+@pytest.mark.parametrize("invalid_location", ["global", "override"])
+def test_invalid_config_encoding_is_sanitized_without_fallback(tmp_path: Path, invalid_location: str) -> None:
+    config_root = tmp_path / ".auto-coder"
+    global_config = config_root / "config.toml"
+    global_config.parent.mkdir()
+    global_config.write_text("")
+    invalid_config = global_config
+    if invalid_location == "override":
+        invalid_config = config_root / "owner" / "project" / "config.toml"
+        invalid_config.parent.mkdir(parents=True)
+    invalid_config.write_bytes(b"\xff\xfePRIVATE-CONFIG-SENTINEL")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"login": "fallback", "id": 1})
+
+    with pytest.raises(ControllerAuthError) as captured:
+        select_controller_auth(
+            REPO,
+            provided_token="must-not-win",
+            home=tmp_path,
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    error = captured.value
+    assert error.stage == "configuration"
+    assert error.category == "unreadable_or_malformed"
+    assert "PRIVATE-CONFIG-SENTINEL" not in str(error)
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert requests == []
+
+
 def test_app_verifies_identity_scope_renews_and_raced_invalidation(tmp_path: Path) -> None:
     key_path = tmp_path / "controller.pem"
     key(key_path)
