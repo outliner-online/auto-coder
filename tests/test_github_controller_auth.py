@@ -210,7 +210,21 @@ def test_concurrent_renewal_waits_and_shares_valid_snapshot(tmp_path: Path) -> N
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(provider.credential_for, REPO, {})
         assert refresh_started.wait(2)
+        contender_entered = threading.Event()
+        original_bound = provider._bound
+        bound_calls = [0]
+        bound_lock = threading.Lock()
+
+        def observed_bound(repo_name):
+            with bound_lock:
+                bound_calls[0] += 1
+                if bound_calls[0] == 1:
+                    contender_entered.set()
+            original_bound(repo_name)
+
+        provider._bound = observed_bound
         second = executor.submit(provider.credential_for, REPO, {})
+        assert contender_entered.wait(2)
         assert not second.done()
         release_refresh.set()
         first_result = first.result(timeout=2)
@@ -218,3 +232,87 @@ def test_concurrent_renewal_waits_and_shares_valid_snapshot(tmp_path: Path) -> N
     assert first_result is second_result
     assert first_result.token == "token-2"
     assert mint_count == [2]
+
+
+@pytest.mark.parametrize("contradiction_at", [1, 2])
+def test_explicit_broad_selection_without_rows_never_falls_back(tmp_path: Path, contradiction_at: int) -> None:
+    now = [1_800_000_000.0]
+    mint_count = [0]
+    listing_count = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app":
+            return httpx.Response(200, json={"id": 123, "slug": "controller"})
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 456})
+        if request.url.path.endswith("/access_tokens"):
+            mint_count[0] += 1
+            expiry = datetime.fromtimestamp(now[0] + 120, timezone.utc).isoformat()
+            if mint_count[0] == contradiction_at:
+                return httpx.Response(200, json={"token": "broad", "expires_at": expiry, "permissions": {}, "repository_selection": "all"})
+            return httpx.Response(200, json={"token": "exact", "expires_at": expiry, "permissions": {}, "repository_selection": "selected", "repositories": [{"full_name": REPO}]})
+        listing_count[0] += 1
+        return httpx.Response(200, json={"total_count": 1, "repositories": [{"full_name": REPO}]})
+
+    provider = app_provider(tmp_path, handler, lambda: now[0])
+    if contradiction_at == 2:
+        provider.credential_for(REPO, {})
+        now[0] += 61
+    with pytest.raises(ControllerAuthError, match="contradictory"):
+        provider.credential_for(REPO, {})
+    assert listing_count == [0]
+
+
+@pytest.mark.parametrize("account_id", [True, 42.0])
+def test_personal_identity_rejects_non_integer_account_id(tmp_path: Path, account_id) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"login": "person", "id": account_id})
+
+    provider = select_controller_auth(REPO, provided_token="token", home=tmp_path, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(ControllerAuthError, match="personal_identity"):
+        provider.identity_for(REPO)
+
+
+def test_naive_expiry_is_rejected_and_aware_expiry_is_normalized(tmp_path: Path) -> None:
+    expiry_values = ["2027-01-15T08:02:00", "2027-01-15T10:02:00+02:00"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app":
+            return httpx.Response(200, json={"id": 123, "slug": "controller"})
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 456})
+        return httpx.Response(200, json={"token": "minted", "expires_at": expiry_values.pop(0), "permissions": {}, "repository_selection": "selected", "repositories": [{"full_name": REPO}]})
+
+    provider = app_provider(tmp_path, handler)
+    with pytest.raises(ControllerAuthError, match="invalid_expiry"):
+        provider.credential_for(REPO, {})
+    credential = provider.credential_for(REPO, {})
+    assert credential.expires_at == datetime(2027, 1, 15, 8, 2, tzinfo=timezone.utc)
+
+
+def test_transport_failure_has_sanitized_exception_graph_and_log(tmp_path: Path) -> None:
+    import io
+    import traceback
+
+    from loguru import logger
+
+    sentinel = "DISTINCTIVE-TRANSPORT-SENTINEL"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError(sentinel)
+
+    output = io.StringIO()
+    sink = logger.add(output, format="{message}", backtrace=True, diagnose=True)
+    try:
+        provider = app_provider(tmp_path, handler)
+        with pytest.raises(ControllerAuthError) as captured:
+            provider.credential_for(REPO, {})
+        error = captured.value
+        logger.opt(exception=error).error("controller authentication unavailable")
+    finally:
+        logger.remove(sink)
+    assert error.stage == "github_api"
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert sentinel not in "".join(traceback.format_exception(error))
+    assert sentinel not in output.getvalue()
