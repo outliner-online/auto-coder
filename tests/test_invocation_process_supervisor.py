@@ -36,13 +36,20 @@ def _descriptor_is_writable(descriptor: int) -> bool:
 
 def test_descriptor_writability_supports_fd_above_select_ceiling() -> None:
     read_descriptor, write_descriptor = os.pipe()
-    high_descriptor = fcntl.fcntl(write_descriptor, fcntl.F_DUPFD, 2048)
+    high_descriptor = None
     try:
+        try:
+            high_descriptor = fcntl.fcntl(write_descriptor, fcntl.F_DUPFD, 2048)
+        except OSError as error:
+            if error.errno in {errno.EINVAL, errno.EMFILE, errno.ENFILE}:
+                pytest.skip("descriptor limit cannot provide the synthetic high-FD control")
+            raise
         assert _descriptor_is_writable(high_descriptor)
     finally:
         os.close(read_descriptor)
         os.close(write_descriptor)
-        os.close(high_descriptor)
+        if high_descriptor is not None:
+            os.close(high_descriptor)
 
 
 class ProcessGroupOwner:
