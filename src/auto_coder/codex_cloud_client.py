@@ -73,12 +73,14 @@ def _codex_followup_state_path(repo_name: Optional[str]) -> Path:
     return Path.home() / ".auto-coder" / repository / "codex_followups.json"
 
 
-def _load_pending_followups(path: Path) -> dict[str, PendingCodexFollowUp]:
+def _load_pending_followups(path: Path, *, required_key: Optional[str] = None) -> dict[str, PendingCodexFollowUp]:
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Codex follow-up state is not an object")
+    if required_key in data and not isinstance(data[required_key], dict):
+        raise ValueError("Exact Codex follow-up entry is not an object")
     return {key: PendingCodexFollowUp(**value) for key, value in data.items() if isinstance(key, str) and isinstance(value, dict)}
 
 
@@ -120,6 +122,7 @@ class CodexCloudClient(CloudTaskClientBase):
         self.environment_id: Optional[str] = (self.config_backend and (self.config_backend.environment_id or getattr(self.config_backend, "environment", None))) or os.environ.get("CODEX_CLOUD_ENV_ID") or os.environ.get("CODEX_ENVIRONMENT_ID")
         self.attempts = (self.config_backend and self.config_backend.attempts) or 1
         self.wham_client: Optional[CodexWhamClient] = None
+        self._followup_rejection: Optional[tuple[str, tuple[str, ...]]] = None
         self.last_continued_at: Dict[str, float] = {}
 
     def _warn_unsupported_model(self, model_name: Optional[str]) -> None:
@@ -565,7 +568,7 @@ class CodexCloudClient(CloudTaskClientBase):
         key = hashlib.sha256(f"{task_id}\0{logical_identity}".encode("utf-8")).hexdigest()
         with _followup_state_lock:
             try:
-                records = _load_pending_followups(state_path)
+                records = _load_pending_followups(state_path, required_key=key)
             except (OSError, ValueError, TypeError) as exc:
                 logger.warning(f"Cannot read Codex follow-up delivery state; failing closed: {exc}")
                 return FollowUpDeliveryOutcome.INDETERMINATE
@@ -581,7 +584,7 @@ class CodexCloudClient(CloudTaskClientBase):
         record.status = FollowUpDeliveryOutcome.DELIVERED.value
         record.accepted_at = record.accepted_at or time.time()
         with _followup_state_lock:
-            records = _load_pending_followups(state_path)
+            records = _load_pending_followups(state_path, required_key=key)
             records[key] = record
             _save_pending_followups(state_path, records)
         logger.info(f"Reconciled previously ambiguous Codex follow-up '{logical_identity}' as delivered")
@@ -659,8 +662,18 @@ class CodexCloudClient(CloudTaskClientBase):
         """Carry the existing-PR producer contract into the durable sender journal."""
         return self.send_followup(task_id, message, logical_identities, repair_target=target)
 
+    def consume_followup_rejection(self, task_id: str, logical_identities: tuple[str, ...]) -> bool:
+        """Consume positive rejection evidence from this client's latest send only.
+
+        Journal absence is never evidence for releasing a caller's reservation.
+        """
+        rejection = self._followup_rejection
+        self._followup_rejection = None
+        return rejection == (task_id, tuple(sorted(logical_identities)))
+
     def send_followup(self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None) -> bool:
         """Send work once, reconciling any prior ambiguous POST before retrying."""
+        self._followup_rejection = None
         if not is_valid_codex_cloud_task_id(task_id) or not message:
             logger.warning("Codex Cloud follow-up requires a task ID and message")
             return False
@@ -784,6 +797,7 @@ class CodexCloudClient(CloudTaskClientBase):
                         repair_base_branch=pending[key].repair_base_branch,
                     )
             elif result.outcome is FollowUpDeliveryOutcome.NOT_DELIVERED:
+                self._followup_rejection = (task_id, tuple(sorted(identities)))
                 for key in keys:
                     pending.pop(key, None)
             _save_pending_followups(state_path, pending)

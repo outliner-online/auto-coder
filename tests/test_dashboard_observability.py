@@ -1521,3 +1521,60 @@ def test_explicit_cached_discovery_reaches_mounted_detail(mock_ui):
     assert len(events) == 1
     assert events[0].facts == {"discovery_source": "cache-aware-open-issue-list", "discovery_payload": "issue-bodies", "relationship_reads": "http-cache-freshness", "live_scope": "target-and-related-family", "authorizes_execution": False}
     _assert_required_stage_visible(_mounted_detail(mock_ui, "issue", 100), "explicit relationship discovery")
+
+
+@patch("auto_coder.dashboard.ui")
+def test_pr_no_commit_checkpoint_reaches_mounted_detail(mock_ui, tmp_path, monkeypatch):
+    """Passing CI reaches shared correction recovery; active CI remains a wait."""
+    from auto_coder.cloud_manager import CloudTaskBinding
+    from auto_coder.pr_processor import ClaimedReviewThreadGateState, _handle_pr_merge
+    from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
+
+    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
+    clock = [1000.0]
+    data = {
+        "number": 5993,
+        "state": "open",
+        "body": "Fixes #5980",
+        "head": {"ref": "claude/navigation-race", "sha": "1" * 40},
+        "base": {"ref": "main", "sha": "2" * 40},
+        "labels": [],
+        "user": {"login": "maintainer"},
+    }
+    github = MagicMock()
+    github.get_pr_comments.return_value = []
+    github.get_pull_request_metadata_strict.return_value = data
+    github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(data["head"]["ref"], data["head"]["sha"], "main")
+    native = MagicMock()
+    native.send_followup.return_value = True
+    thread = ReviewThread(id="navigation", comments=[ReviewThreadComment(database_id=101, author_login="reviewer", body="Fix the navigation race")])
+    config = AutomationConfig()
+    config.AUTO_MERGE = True
+    passing = [True]
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=tmp_path / "repairs.json"),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"}),
+        patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", side_effect=lambda *_args, **_kwargs: passing[0]),
+        patch("auto_coder.pr_processor._check_github_actions_status", side_effect=lambda *_args, **_kwargs: authoritative_ci_status(success=passing[0], in_progress=not passing[0], ids=[1])(*_args, **_kwargs)),
+        patch("auto_coder.pr_processor._get_claimed_review_thread_state", return_value=ClaimedReviewThreadGateState(unresolved=(thread,), blocking_unresolved=(thread,), has_blocking_unresolved=True)),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-navigation")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+        get_trace_collector().start_execution(repository="owner/repo", item_type="pr", item_number=5993, origin="durable-invalidation-worker"),
+    ):
+        _handle_pr_merge(github, "owner/repo", data, config, {})
+        assert native.send_followup.call_count == 1
+        clock[0] += 3600
+        passing[0] = False
+        _handle_pr_merge(github, "owner/repo", data, config, {})
+        assert native.send_followup.call_count == 1
+        passing[0] = True
+        _handle_pr_merge(github, "owner/repo", data, config, {})
+        assert native.send_followup.call_count == 2
+    snapshot = get_trace_collector().get_snapshot(repository="owner/repo", item_type="pr", item_number=5993)
+    checkpoint = next(event for event in snapshot.events if event.stage_id == "pr.no-commit-recovery" and event.facts.get("reason") == "accepted")
+    assert checkpoint.outcome == Outcome.ACCEPTED_HANDOFF.value
+    assert checkpoint.facts["ordinal"] == 1
+    assert checkpoint.facts["provider"] == "claude-routine"
+    assert checkpoint.facts["head_sha"] == "1" * 40
+    _assert_required_stage_visible(_mounted_detail(mock_ui, "pr", 5993), "no-commit recovery")

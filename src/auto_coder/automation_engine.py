@@ -5268,6 +5268,11 @@ class AutomationEngine:
                     self.queue.task_done()
                     if decision_completed:
                         await self._enqueue_pending_invalidations(repo_name)
+                        # PR processing may have registered the first CI watch
+                        # after the scheduler parked with no timer. Recompute its
+                        # durable deadlines, including all later checkpoint wakes.
+                        if candidate.type == "pr" and self._invalidation_wake_event is not None:
+                            self._invalidation_wake_event.set()
                 if self.is_draining:
                     logger.info(f"Worker {worker_id} reached its graceful drain checkpoint")
                     return
@@ -8810,6 +8815,15 @@ class AutomationEngine:
         swallowed -- this is a best-effort scheduling hint, never a blocker
         for the caller's own (already-authorized) completion.
         """
+        try:
+            from .pr_processor import _retire_closed_cloud_checkpoint
+
+            number = pr_data["number"]
+            if type(number) is not int or number <= 0:
+                raise ValueError("Terminal PR checkpoint retirement requires a positive PR number")
+            _retire_closed_cloud_checkpoint(repo_name, number)
+        except Exception as exc:
+            logger.warning(f"Could not retire closed-PR checkpoint series in {repo_name}: {exc}")
         try:
             slots = self._get_implementation_slots(repo_name)
             schedule_reevaluation_for_pr_owner(pr_data, slots, self.github, reason=reason)
