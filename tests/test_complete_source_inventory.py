@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -44,6 +45,7 @@ def _require_exact_baseline(candidate: tuple[str, ...]) -> None:
     assert Counter(candidate) == Counter(expected)
 
 
+@pytest.mark.skipif(sys.version_info[:2] != (3, 12), reason="complete-source inventory is locked to Python 3.12")
 def test_production_complete_source_inventory_preserves_baseline_exactly_once(tmp_path: Path) -> None:
     """Run the workflow planner and reject omission of any immutable baseline node."""
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
