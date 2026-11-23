@@ -349,3 +349,65 @@ def test_transport_failure_has_sanitized_exception_graph_and_log(tmp_path: Path)
     assert error.__cause__ is None
     assert sentinel not in "".join(traceback.format_exception(error))
     assert sentinel not in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("granted", "required"),
+    [({"issues": "read"}, {"issues": "write"}), ({}, {"issues": "read"})],
+)
+def test_mint_rejects_insufficient_granted_permissions_without_publication(tmp_path: Path, granted, required) -> None:
+    mint_count = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app":
+            return httpx.Response(200, json={"id": 123, "slug": "controller"})
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 456})
+        mint_count[0] += 1
+        return httpx.Response(
+            200,
+            json={
+                "token": f"insufficient-{mint_count[0]}",
+                "expires_at": "2027-01-15T08:02:00Z",
+                "permissions": granted,
+                "repository_selection": "selected",
+                "repositories": [{"full_name": REPO}],
+            },
+        )
+
+    provider = app_provider(tmp_path, handler)
+    for expected_mint_count in (1, 2):
+        with pytest.raises(ControllerAuthError) as captured:
+            provider.credential_for(REPO, required)
+        assert captured.value.stage == "token"
+        assert captured.value.category == "invalid_or_insufficient"
+        assert mint_count == [expected_mint_count]
+
+
+@pytest.mark.parametrize("total_count", [2, None])
+def test_incomplete_mint_rejects_unproven_fallback_total(tmp_path: Path, total_count) -> None:
+    mint_count = [0]
+    listing_count = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app":
+            return httpx.Response(200, json={"id": 123, "slug": "controller"})
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 456})
+        if request.url.path.endswith("/access_tokens"):
+            mint_count[0] += 1
+            return httpx.Response(200, json={"token": f"minted-{mint_count[0]}", "expires_at": "2027-01-15T08:02:00Z", "permissions": {}})
+        listing_count[0] += 1
+        body = {"repositories": [{"full_name": REPO}]}
+        if total_count is not None:
+            body["total_count"] = total_count
+        return httpx.Response(200, json=body)
+
+    provider = app_provider(tmp_path, handler)
+    for expected_count in (1, 2):
+        with pytest.raises(ControllerAuthError) as captured:
+            provider.credential_for(REPO, {})
+        assert captured.value.stage == "repository_grant"
+        assert captured.value.category == "broader_or_unproven"
+        assert mint_count == [expected_count]
+        assert listing_count == [expected_count]
