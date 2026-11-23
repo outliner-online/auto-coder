@@ -228,6 +228,9 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
     controllers = []
     stops = []
     ready = tmp_path / "child-ready"
+    fd_padding = []
+    while not fd_padding or fd_padding[-1] < 1024:
+        fd_padding.append(os.open(os.devnull, os.O_RDONLY))
 
     class Clock:
         now = 0.0
@@ -260,11 +263,16 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
             super().stop_and_confirm(group, deadline)
 
     def drive_deadline(descriptor):
+        def is_writable() -> bool:
+            poller = select.poll()
+            poller.register(descriptor, select.POLLOUT)
+            return bool(poller.poll(0))
+
         try:
             assert writer_armed.wait(10), "prompt submission blocked the supervisor"
             assert polls[0].wait(10), "supervisor never checked its deadline"
             guard = time.monotonic() + 10
-            while not ready.exists() or select.select([], [descriptor], [], 0)[1]:
+            while not ready.exists() or is_writable():
                 assert children[0].poll() is None
                 assert time.monotonic() < guard, "unread stdin pipe never filled"
                 threading.Event().wait(0.01)
@@ -274,7 +282,7 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
             assert polls[1].wait(10), "supervisor did not recheck the deadline"
             assert supervisor.state("invocation-one") is WriterState.ACTIVE
             assert children[0].poll() is None and writers[0].is_alive()
-            assert not select.select([], [descriptor], [], 0)[1]
+            assert not is_writable()
             assert stops == []
             clock.now = budget
             releases[1].set()
@@ -296,6 +304,7 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
 
         def _start_writer(self, stream, prompt):
             descriptor = stream.fileno()
+            assert descriptor >= 1024
             assert len(prompt) > fcntl.fcntl(descriptor, fcntl.F_GETPIPE_SZ)
             streams.append(stream)
             # Start the watchdog before submitting input, so a synchronous-write
@@ -343,6 +352,8 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
             if thread is not None:
                 thread.join(15)
                 assert not thread.is_alive(), "fixture I/O or deadline controller leaked"
+        for descriptor in fd_padding:
+            os.close(descriptor)
         if (owner.root / "invocation-one").exists():
             owner.discard(owner.root / "invocation-one")
 
