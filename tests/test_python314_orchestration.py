@@ -118,6 +118,7 @@ def test_workflow_native_shards_preserve_exact_non_live_selection_and_failures(t
     project, runner, output, environment, sha = _planned_project(tmp_path, fail_value)
     plan, _raw = read_plan(runner / "python314-plan/plan.json")
     assert plan.context.profile_id == "python314-advisory-v1"
+    assert json.loads(_raw)["semantic"]["source_floor_ms"] == 5_000
     expected = [f"tests/test_sample.py::test_parameterized[{value}]" for value in range(85)] + [f"tests/test_sample.py::test_{profile}_profile" for profile in ("browser", "muse", "supervisor")]
     assert list(plan.inventory) == expected
     matrix = dict(line.split("=", 1) for line in output.read_text().splitlines())

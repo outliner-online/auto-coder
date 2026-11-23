@@ -97,6 +97,8 @@ def main() -> int:
             str(context_path),
             "--duration-policy",
             "source-required-v1",
+            "--cold-start-estimate-seconds",
+            "5",
             "--bootstrap-duration-snapshot",
             "tests/data/pr-test-durations.json",
             "--bootstrap-duration-provenance",
