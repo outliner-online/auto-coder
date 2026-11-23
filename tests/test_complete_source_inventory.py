@@ -15,6 +15,8 @@ import pytest
 
 from auto_coder.ci_shard_plan import read_plan
 
+pytestmark = pytest.mark.usefixtures("_use_real_commands")
+
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "tests/data/complete-source-baseline-nodeids.txt.gz"
 PROVENANCE = ROOT / "tests/data/complete-source-baseline-nodeids.provenance.json"
