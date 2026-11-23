@@ -266,7 +266,10 @@ def classify_response(status: int, metadata: GitHubResponseMetadata, errors: obj
             return GitHubApiOutcome.SECONDARY_THROTTLED
         return GitHubApiOutcome.THROTTLED
     if error_entries:
-        if graphql_throttle:
+        # A successful HTTP response can still carry a GraphQL throttle.
+        # On other HTTP failures, generic errors/quota/Retry-After metadata
+        # must not override the status (403/429 were handled above).
+        if 200 <= status < 300 and graphql_throttle:
             return GitHubApiOutcome.PRIMARY_THROTTLED if primary else GitHubApiOutcome.SECONDARY_THROTTLED if secondary else GitHubApiOutcome.THROTTLED
         return GitHubApiOutcome.REMOTE_ERROR
     return GitHubApiOutcome.SUCCESS if status < 400 else GitHubApiOutcome.REMOTE_ERROR

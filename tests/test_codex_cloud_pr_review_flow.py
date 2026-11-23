@@ -198,16 +198,28 @@ def test_distinct_findings_with_identical_text_are_each_delivered_once(tmp_path)
     assert "Thread `PRRT_thread_1`" not in send_followup.call_args.args[1]
 
 
-def test_failed_review_feedback_delivery_remains_retryable(tmp_path) -> None:
+@pytest.mark.parametrize("receipt_unavailable", [False, True])
+def test_unconfirmed_review_feedback_delivery_is_not_blindly_retried(tmp_path, receipt_unavailable) -> None:
+    from auto_coder.codex_wham_client import FollowUpDeliveryOutcome
+
     state_path = tmp_path / "review-repairs.json"
     with (
         patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.get_followup_delivery") as delivery,
         patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", side_effect=[False, True]) as send_followup,
     ):
+
+        def read_receipt(_task_id, _identity):
+            if receipt_unavailable and send_followup.call_count:
+                raise OSError("receipt unavailable after POST")
+            return FollowUpDeliveryOutcome.INDETERMINATE
+
+        delivery.side_effect = read_receipt
         _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=_github_client(), unresolved_threads=(_thread(),))
         _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=_github_client(), unresolved_threads=(_thread(),))
 
-    assert send_followup.call_count == 2
+    assert send_followup.call_count == 1
+    assert json.loads(state_path.read_text())["pending_feedback"]
     assert state_path.exists()
 
 
@@ -751,3 +763,558 @@ def test_review_delivery_reason_reaches_public_projection_without_changing_effec
     merge.assert_not_called()
     client.resolve_review_thread.assert_not_called()
     client.reply_to_review_thread.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["codex-cloud", "claude-routine"])
+@pytest.mark.parametrize("bound_draft", [False, True])
+def test_accepted_review_handoff_reaches_hourly_checkpoint_on_same_owner(tmp_path, provider, bound_draft):
+    """Production receipt creation and duplicate-wait path share one policy."""
+    from auto_coder.pr_processor import DraftPRRepairAuthority, draft_pr_repair_authority_scope
+
+    state_path = tmp_path / "review-repairs.json"
+    clock = [1000.0]
+    client = _github_client()
+    live_pr = {**_pr_data(), "state": "open"}
+    client.get_pull_request_metadata_strict.return_value = live_pr
+    task_id = "task_e_review5262" if provider == "codex-cloud" else "session-5262"
+    sender = MagicMock()
+    sender.send_followup.return_value = True
+    # Native Codex has an identity-aware API; Claude accepts task/text.
+    if provider == "codex-cloud":
+        provider_patch = patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", return_value=True)
+    else:
+        provider_patch = patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=sender)
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding(provider, task_id)),
+        provider_patch as native,
+    ):
+
+        def evaluate():
+            return _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=client, unresolved_threads=(_thread(),))
+
+        assert evaluate().delivered
+        native_sender = native if provider == "codex-cloud" else sender.send_followup
+        assert native_sender.call_count == 1
+        source = json.loads(state_path.read_text())
+        assert source["delivered_feedback"]
+        assert len(source["no_commit_series"]) == 1
+        clock[0] = 1000 + 59 * 60
+        evaluate()
+        assert native_sender.call_count == 1
+        client.get_pull_request_metadata_strict.assert_not_called()
+        authority = DraftPRRepairAuthority("owner/repo", 5262, "codex/review-5262", "head-1", (42,), provider, task_id) if bound_draft else None
+        with draft_pr_repair_authority_scope(authority):
+            for ordinal in range(1, 4):
+                clock[0] = 1000 + ordinal * 3600
+                evaluate()
+                assert native_sender.call_count == ordinal + 1
+                args = native_sender.call_args.args
+                assert args[0] == task_id
+                assert "independently" in args[1]
+                assert "Never make an empty commit" in args[1]
+                assert "existing pull request #5262" in args[1]
+                assert "codex/review-5262" in args[1]
+                if provider == "codex-cloud":
+                    assert args[2][0].startswith("no-commit:")
+                else:
+                    assert len(args) == 2
+        clock[0] += 36000
+        evaluate()
+        assert native_sender.call_count == 4
+        assert list(json.loads(state_path.read_text())["no_commit_series"].values())[0]["ordinal"] == 3
+
+
+@pytest.mark.parametrize("change", ["commit", "closed", "unavailable", "local", "owner"])
+def test_due_review_checkpoint_refreshes_scope_before_any_send(tmp_path, change):
+    state_path = tmp_path / "review-repairs.json"
+    clock = [1000.0]
+    github = _github_client()
+    live = {**_pr_data(), "state": "open"}
+    github.get_pull_request_metadata_strict.return_value = live
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", return_value=True) as sender,
+    ):
+        _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        if change == "commit":
+            live["head"] = {**live["head"], "sha": "head-2"}
+        elif change == "closed":
+            live["state"] = "closed"
+        elif change == "unavailable":
+            github.get_pull_request_metadata_strict.side_effect = RuntimeError("partial observation")
+        elif change == "local":
+            live["body"] += "\n<!-- auto-coder:local -->"
+        else:
+            # Ownership changes in the native durable binding during fresh read.
+            github.get_pull_request_metadata_strict.side_effect = lambda *_: live
+            from auto_coder.pr_processor import CloudTaskOrigin, CloudTaskOriginResolution
+
+            original = __import__("auto_coder.pr_processor", fromlist=["_resolve_cloud_task_origin"])._resolve_cloud_task_origin
+            calls = [0]
+
+            def resolve(*args, **kwargs):
+                calls[0] += 1
+                if calls[0] > 1:
+                    return CloudTaskOriginResolution(CloudTaskOrigin("jules", "new-owner", MagicMock()))
+                return original(*args, **kwargs)
+
+        clock[0] += 3600
+        if change == "owner":
+            with patch("auto_coder.pr_processor._resolve_cloud_task_origin", side_effect=resolve):
+                _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        else:
+            _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        assert sender.call_count == 1
+
+
+def test_explicit_addressed_outcome_waits_for_validation_instead_of_checkpoint(tmp_path):
+    state_path = tmp_path / "review-repairs.json"
+    clock = [1000.0]
+    github = _github_client()
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", return_value=True) as sender,
+    ):
+        _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        clock[0] += 3600
+        _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread("<!-- auto-coder-review-addressed:v1 --> No change is needed; the guard covers this case."),))
+        assert sender.call_count == 1
+        record = next(iter(json.loads(state_path.read_text())["no_commit_series"].values()))
+        assert (record["status"], record["outcome"], record["ordinal"]) == ("ended", "acknowledged_outcome", 0)
+        github.get_pull_request_metadata_strict.assert_not_called()
+
+
+def test_other_pr_unknown_post_does_not_hold_eligible_checkpoint(tmp_path):
+    class Interrupted(BaseException):
+        pass
+
+    path = tmp_path / "repairs.json"
+    clock = [1000.0]
+    github = _github_client()
+    github.get_pull_request_metadata_strict.return_value = {**_pr_data(), "state": "open"}
+    native = MagicMock()
+    native.send_followup.side_effect = [Interrupted(), True, True]
+    other = {**_pr_data(), "number": 5263}
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", side_effect=lambda number: CloudTaskBinding("claude-routine", f"session-{number}")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+    ):
+        # B's real pre-send reservation survives an interrupted, unknown POST.
+        with pytest.raises(Interrupted):
+            _delegate_cloud_review_thread_repair("owner/repo", other, github_client=github, unresolved_threads=(_thread(),))
+        held = set(json.loads(path.read_text())["pending_feedback"])
+        assert held and all(identity.startswith("owner/repo#5263:") for identity in held)
+        assert _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),)).delivered
+        clock[0] += 3600
+        _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        assert native.send_followup.call_count == 3
+        assert native.send_followup.call_args.args[0] == "session-5262"
+        # Reobserving B preserves its fence and never replays the unknown POST.
+        result = _delegate_cloud_review_thread_repair("owner/repo", other, github_client=github, unresolved_threads=(_thread(),))
+        assert not result.delivered
+        assert native.send_followup.call_count == 3
+        document = json.loads(path.read_text())
+        assert set(document["pending_feedback"]) == held
+        assert not held.intersection(document["delivered_feedback"])
+
+
+@pytest.mark.parametrize("crash", [True, False])
+def test_confirmed_original_receipt_and_clock_survive_crash_before_later_promotion(tmp_path, crash):
+    class Interrupted(BaseException):
+        pass
+
+    path = tmp_path / "repairs.json"
+    clock = [1000.0]
+    github = _github_client()
+    github.get_pull_request_metadata_strict.return_value = {**_pr_data(), "state": "open"}
+    native = MagicMock()
+    native.send_followup.return_value = True
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-5262")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+    ):
+        with (
+            patch("auto_coder.pr_processor._record_delivered_review_feedback", side_effect=Interrupted() if crash else OSError("later receipt write lost")),
+            patch("auto_coder.pr_processor._record_pr_delivered_review_feedback", side_effect=RuntimeError("GitHub receipt unavailable")),
+        ):
+            if crash:
+                with pytest.raises(Interrupted):
+                    _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+            else:
+                assert _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),)).delivered
+        document = json.loads(path.read_text())
+        assert document["delivered_feedback"]
+        assert document["pending_feedback"] == []
+        assert next(iter(document["no_commit_series"].values()))["accepted_at"] == 1000.0
+        assert native.send_followup.call_count == 1
+        # All in-memory request objects are recreated; native reconciliation is
+        # unnecessary for the exact original identities already confirmed.
+        clock[0] += 3600
+        _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert native.send_followup.call_count == 2
+        assert "independently" in native.send_followup.call_args.args[1]
+        assert next(iter(json.loads(path.read_text())["no_commit_series"].values()))["ordinal"] == 1
+
+
+def test_idle_invalidation_scheduler_reaches_all_three_checkpoints_without_webhooks(tmp_path, monkeypatch):
+    import asyncio
+
+    from auto_coder.automation_config import Candidate
+    from auto_coder.automation_engine import AutomationEngine, CandidateProcessingResult
+    from auto_coder.entity_invalidation import EntityIdentity
+
+    path = tmp_path / "repairs.json"
+    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
+    clock = [1000.0]
+    github = _github_client()
+    data = {**_pr_data(), "state": "open"}
+    github.get_pull_request_metadata_strict.return_value = data
+    config = AutomationConfig()
+    config.AUTO_MERGE = True
+    engine = AutomationEngine(github, config)
+    native = MagicMock()
+    send_times = []
+    native.send_followup.side_effect = lambda *_: send_times.append(clock[0]) or True
+    thread = _thread()
+    no_timer = []
+    deadline_reader = engine.invalidations.seconds_until_next_ci
+
+    def expire_existing_timer(repository):
+        delay = deadline_reader(repository)
+        if delay is None:
+            no_timer.append(True)
+            return None
+        # Deterministically expire the ordinary scheduler's timer at its real
+        # durable deadline. No webhook, wake event or candidate scan is injected.
+        clock[0] += delay
+        return 0.0
+
+    def process(_repository, candidate, **_kwargs):
+        actions = _handle_pr_merge(github, "owner/repo", candidate.data, config, {})
+        return CandidateProcessingResult(type="pr", number=5262, success=True, actions=actions, outcome=PRProcessingOutcome.DEFERRED)
+
+    monkeypatch.setattr(engine.invalidations, "seconds_until_next_ci", expire_existing_timer)
+    monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args, **_kwargs: Candidate("pr", dict(data), 0))
+    monkeypatch.setattr(engine, "_process_single_candidate", process)
+    monkeypatch.setattr(engine, "_check_if_pr_merged_or_closed", lambda *_: False)
+
+    async def wait_until(predicate):
+        async with asyncio.timeout(5):
+            while not predicate():
+                await asyncio.sleep(0.001)
+
+    async def scenario():
+        assert engine.invalidations._connection.execute("SELECT count(*) FROM ci_watches").fetchone() == (0,)
+        engine.invalidations.invalidate(EntityIdentity("owner/repo", "pr", 5262))
+        scheduler = asyncio.create_task(engine._invalidation_loop("owner/repo"))
+        worker = None
+        try:
+            # The scheduler enqueues the initial request, then finds no timers
+            # before the worker has had a chance to register the very first watch.
+            await wait_until(lambda: no_timer and engine.queue.qsize() == 1)
+            worker = asyncio.create_task(engine._worker_loop("owner/repo", 0))
+            await wait_until(lambda: len(send_times) == 4 and next(iter(json.loads(path.read_text())["no_commit_series"].values()))["status"] == "accepted")
+        finally:
+            scheduler.cancel()
+            if worker is not None:
+                worker.cancel()
+            await asyncio.gather(scheduler, *([worker] if worker is not None else []), return_exceptions=True)
+
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"}),
+        patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True),
+        patch("auto_coder.pr_processor._check_github_actions_status", side_effect=authoritative_ci_status(success=True, ids=[1])),
+        patch("auto_coder.pr_processor._get_claimed_review_thread_state", return_value=ClaimedReviewThreadGateState(unresolved=(thread,), blocking_unresolved=(thread,), has_blocking_unresolved=True)),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-5262")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+    ):
+        asyncio.run(scenario())
+    assert len(send_times) == 4
+    assert all(later - earlier >= 3600 for earlier, later in zip(send_times, send_times[1:]))
+    assert next(iter(json.loads(path.read_text())["no_commit_series"].values()))["ordinal"] == 3
+
+
+def test_jules_is_not_enrolled_in_no_commit_recovery(tmp_path):
+    path = tmp_path / "repairs.json"
+    clock = [1000.0]
+    github = _github_client()
+    native = MagicMock()
+    native.send_followup.return_value = True
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("jules", "existing-jules-session")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+    ):
+        assert _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),)).delivered
+        for _ in range(4):
+            clock[0] += 3600
+            _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+    native.send_followup.assert_called_once()
+    assert json.loads(path.read_text()).get("no_commit_series", {}) == {}
+    github.get_pull_request_metadata_strict.assert_not_called()
+
+
+def test_stale_peer_write_cannot_erase_accepted_claude_receipt_after_restart(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from auto_coder.pr_no_commit_recovery import NoCommitRecovery
+    from auto_coder.pr_processor import _load_delivered_review_feedback, _load_pending_review_feedback, _record_review_feedback_state
+
+    class Interrupted(BaseException):
+        pass
+
+    path = tmp_path / "repairs.json"
+    clock = [1000.0]
+    other_pending = {"owner/repo#5263:claude-routine:session-B:unknown-post"}
+    _record_review_feedback_state(path, set(), other_pending)
+    entered, peer_loaded, release_peer = Event(), Event(), Event()
+
+    def stale_peer():
+        assert entered.wait(5), "A never entered its original POST"
+        delivered = _load_delivered_review_feedback(path)
+        pending = _load_pending_review_feedback(path)
+        peer_loaded.set()
+        assert release_peer.wait(5), "peer write was never released"
+        _record_review_feedback_state(path, delivered, pending)
+
+    native = MagicMock()
+
+    def accept(_task, _message):
+        if native.send_followup.call_count == 1:
+            entered.set()
+            assert peer_loaded.wait(5), "B never captured the pre-acceptance snapshot"
+        return True
+
+    native.send_followup.side_effect = accept
+    github = _github_client()
+    github.get_pull_request_metadata_strict.return_value = {**_pr_data(), "state": "open"}
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.time.time", side_effect=lambda: clock[0]),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-5262")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+        ThreadPoolExecutor(max_workers=1) as workers,
+    ):
+        peer = workers.submit(stale_peer)
+        try:
+            with patch("auto_coder.pr_processor._record_delivered_review_feedback", side_effect=Interrupted()):
+                with pytest.raises(Interrupted):
+                    _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+            accepted = _load_delivered_review_feedback(path)
+            assert accepted and all(identity.startswith("owner/repo#5262:") for identity in accepted)
+            # Reconstruct A from its durable acceptance before B resumes writing
+            # the snapshot captured while A's original POST was still pending.
+            assert not NoCommitRecovery(path).has_due_request(5262, clock[0])
+        finally:
+            release_peer.set()
+            peer.result(timeout=5)
+        document = json.loads(path.read_text())
+        assert set(document["delivered_feedback"]) == accepted
+        assert set(document["pending_feedback"]) == other_pending
+        assert not other_pending.intersection(document["delivered_feedback"])
+        assert next(iter(document["no_commit_series"].values()))["accepted_at"] == 1000.0
+        clock[0] += 59 * 60
+        _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert native.send_followup.call_count == 1
+        clock[0] += 60
+        _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert native.send_followup.call_count == 2
+        assert "independently" in native.send_followup.call_args.args[1]
+        assert next(iter(json.loads(path.read_text())["no_commit_series"].values()))["ordinal"] == 1
+
+
+@pytest.mark.parametrize("failure", ["crash", "exception", "false"])
+def test_stale_peer_snapshot_before_reservation_cannot_erase_unknown_claude_post(tmp_path, failure):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from auto_coder.pr_processor import _load_delivered_review_feedback, _load_pending_review_feedback, _record_review_feedback_state
+
+    class Interrupted(BaseException):
+        pass
+
+    path = tmp_path / "repairs.json"
+    _record_review_feedback_state(path, set(), set())
+    loaded, release_peer = Event(), Event()
+
+    def stale_peer():
+        delivered = _load_delivered_review_feedback(path)
+        pending = _load_pending_review_feedback(path)
+        assert pending == set()  # B's snapshot strictly precedes A's reservation.
+        loaded.set()
+        assert release_peer.wait(5), "B's stale write was never released"
+        _record_review_feedback_state(path, delivered, pending)
+
+    def unknown_post(*_args):
+        if failure == "crash":
+            raise Interrupted()
+        if failure == "exception":
+            raise RuntimeError("POST response lost")
+        return False
+
+    native = MagicMock()
+    native.send_followup.side_effect = unknown_post
+    github = _github_client()
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-5262")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+        ThreadPoolExecutor(max_workers=1) as workers,
+    ):
+        peer = workers.submit(stale_peer)
+        assert loaded.wait(5), "B never loaded the older snapshot"
+        try:
+            if failure == "crash":
+                with pytest.raises(Interrupted):
+                    _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+            else:
+                assert not _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),)).delivered
+            unknown = _load_pending_review_feedback(path)
+            assert unknown and all(identity.startswith("owner/repo#5262:") for identity in unknown)
+        finally:
+            release_peer.set()
+            peer.result(timeout=5)
+        assert _load_pending_review_feedback(path) == unknown
+        assert _load_delivered_review_feedback(path) == set()
+        # Recreate ordinary processing from disk after A's interruption and B's
+        # stale write. A's unknown original must not acquire a second POST.
+        result = _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert not result.delivered
+        assert "unconfirmed durable receipt" in result[0]
+        native.send_followup.assert_called_once()
+        assert not json.loads(path.read_text()).get("no_commit_series")
+
+
+def test_pre_send_refusal_clears_only_its_own_reservation_and_remains_retryable(tmp_path):
+    from auto_coder.pr_processor import _load_delivered_review_feedback, _load_pending_review_feedback, _record_review_feedback_state
+
+    path = tmp_path / "repairs.json"
+    peer_pending = {"owner/repo#5263:claude-routine:session-B:unknown-post"}
+    github = _github_client()
+
+    def unavailable_metadata(*_args):
+        # B reserves after A loaded its snapshot. A's known pre-send cleanup
+        # must remove only A's own identifiers, leaving this new claim intact.
+        _record_review_feedback_state(path, _load_delivered_review_feedback(path), peer_pending)
+        raise RuntimeError("current PR metadata unavailable")
+
+    github.get_pull_request_repair_metadata_strict.side_effect = unavailable_metadata
+    native = MagicMock()
+    native.send_followup.return_value = True
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("claude-routine", "session-5262")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+    ):
+        refused = _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        assert not refused.delivered
+        native.send_followup.assert_not_called()
+        assert _load_pending_review_feedback(path) == peer_pending
+        github.get_pull_request_repair_metadata_strict.side_effect = None
+        assert _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),)).delivered
+        native.send_followup.assert_called_once()
+        assert _load_pending_review_feedback(path) == peer_pending
+        assert not peer_pending.intersection(_load_delivered_review_feedback(path))
+
+
+@pytest.mark.parametrize("failure", [False, RuntimeError("legacy send failed")])
+def test_legacy_jules_false_and_exception_remain_retryable_without_enrollment(tmp_path, failure):
+    from auto_coder.pr_processor import _load_pending_review_feedback, _record_review_feedback_state
+
+    path = tmp_path / "repairs.json"
+    peer_pending = {"owner/repo#5263:claude-routine:session-B:unknown-post"}
+    _record_review_feedback_state(path, set(), peer_pending)
+    github = _github_client()
+    native = MagicMock()
+    native.send_followup.side_effect = [failure, True]
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=path),
+        patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding("jules", "existing-jules-session")),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=native),
+    ):
+        first = _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(_thread(),))
+        assert not first.delivered
+        assert _load_pending_review_feedback(path) == peer_pending
+        second = _delegate_cloud_review_thread_repair("owner/repo", dict(_pr_data()), github_client=github, unresolved_threads=(_thread(),))
+        assert second.delivered
+        assert native.send_followup.call_count == 2
+        assert all(len(call.args) == 2 for call in native.send_followup.call_args_list)
+        assert _load_pending_review_feedback(path) == peer_pending
+        assert not json.loads(path.read_text()).get("no_commit_series")
+
+
+@pytest.mark.parametrize("outcome", ["rejected", "indeterminate", "lost", "malformed", "mixed"])
+def test_native_review_rejection_requires_positive_current_send_evidence(tmp_path, outcome):
+    """A native journal lost write or unreadable entry cannot release the shared claim."""
+    import hashlib
+
+    from auto_coder.codex_cloud_client import CodexCloudClient
+    from auto_coder.codex_wham_client import FollowUpDeliveryOutcome, FollowUpDeliveryResult
+
+    shared_path = tmp_path / "review.json"
+    native_path = tmp_path / "native.json"
+    wham = MagicMock()
+    wham.resolve_latest_assistant_turn.return_value = "task_e_review5262~assttrn_1"
+    wham.reconcile_follow_up.return_value = False
+    wham.send_follow_up.side_effect = [
+        FollowUpDeliveryResult(FollowUpDeliveryOutcome.NOT_DELIVERED if outcome == "rejected" else FollowUpDeliveryOutcome.INDETERMINATE, 400 if outcome == "rejected" else 502),
+        FollowUpDeliveryResult(FollowUpDeliveryOutcome.DELIVERED, 200),
+    ]
+    native_send = CodexCloudClient.send_followup
+    sent_identities = []
+
+    def send_then_interleave(client, task_id, message, logical_identities=(), *args, **kwargs):
+        result = native_send(client, task_id, message, logical_identities, *args, **kwargs)
+        sent_identities.extend(logical_identities)
+        if outcome == "lost":
+            # Another process replaces a whole-file snapshot missing this key.
+            native_path.write_text("{}")
+        elif outcome in {"malformed", "mixed"}:
+            records = json.loads(native_path.read_text())
+            key = hashlib.sha256(f"{task_id}\0{logical_identities[-1]}".encode()).hexdigest()
+            records[key] = None
+            if outcome == "mixed":
+                first_key = hashlib.sha256(f"{task_id}\0{logical_identities[0]}".encode()).hexdigest()
+                records[first_key]["status"] = "delivered"
+            native_path.write_text(json.dumps(records))
+        return result
+
+    threads = (_thread(),)
+    if outcome == "mixed":
+        threads += (ReviewThread(id="PRRT_second", comments=[ReviewThreadComment(database_id=203, body="Second finding", author_login="reviewer")]),)
+    pr_data = _pr_data(head_sha="a" * 40)
+    github = _github_client()
+    github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata("codex/review-5262", "a" * 40, "main")
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=shared_path),
+        patch("auto_coder.codex_cloud_client._codex_followup_state_path", return_value=native_path),
+        patch("auto_coder.codex_cloud_client.CodexWhamClient", return_value=wham),
+        patch.object(CodexCloudClient, "send_followup", autospec=True, side_effect=send_then_interleave),
+    ):
+        first = _delegate_cloud_review_thread_repair("owner/repo", pr_data, github, threads)
+        assert first.delivered is False
+        second = _delegate_cloud_review_thread_repair("owner/repo", pr_data, github, threads)
+
+    if outcome == "rejected":
+        assert "rejected follow-up delivery" in first[0]
+        assert second.delivered is True
+        assert wham.send_follow_up.call_count == 2
+    else:
+        assert "unconfirmed follow-up delivery" in first[0]
+        assert second.delivered is False
+        wham.send_follow_up.assert_called_once()
+        assert json.loads(shared_path.read_text())["pending_feedback"]
+    if outcome == "mixed":
+        assert len(sent_identities) == 2

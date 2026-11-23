@@ -1,0 +1,154 @@
+# Cloud no-commit recovery preflight
+
+Inspected 2026-11-22 against `outliner-online/auto-coder` main
+`630d38c11b9d5aca2300b969d1c155cdb41e8294`, before behavioral edits.
+Objective: recover accepted cloud implementation requests that demonstrably
+produced no relevant implementation commit, without duplicating owned work.
+
+The owner's subsequent scope decision selects existing PR-bound review-thread
+and adversarial corrective handoffs as the first vertical slice. Running or
+unknown provider execution is permitted; no execution-state detector is added.
+
+## Traced authorities and selected boundary
+
+| Boundary | Existing owner/source and decision |
+| --- | --- |
+| Initial Issue starts | `IssueDispatchService`, three `_process_issue_*_mode` producers, CloudRun/CloudManager and implementation slots. No uniform frozen acceptance clock plus proven branch baseline exists. Initial Issue and initial PR task launches are a separate slice, even if a PR later appears. |
+| Review/adversarial PR corrections | `pr_processor` resolves exact ownership, checks correction allowance, renders a bounded PR/head/branch prompt and retains delivery identities in `cloud_review_repairs.json`. Extend this producer/file; never invent an old acceptance clock from observation time. |
+| Delivery | Codex's logical-identity-aware native journal and Claude's existing-session CLI/OAuth quota admission. Jules is excluded from this feature and the next initial-task slice; its existing behavior stays intact. Use the existing send abstraction with typed native-signature capabilities; For supported providers, Boolean False remains unknown; excluded Jules retains its legacy failure/retry cleanup. |
+| Correction generation (#2141/#2142) | Keep existing owner, canonical bundle/generation and exhaustion gates. Checkpoints never create failed corrections, spend/reset their allowance or re-open exhausted blockers. |
+| Publication (#1864) | `CodexPRRecoveryMonitor` retains its completed/no-PR Create PR reminder and 120-second grace. This slice requires an existing PR and an accepted correction, so neither initial task nor publication reminder is registered. |
+| Jules checkpoint/recovery (#2092) | Initial prompt guidance is not runtime commit evidence. Live session reconciliation, approvals, failed-session recovery and no-PR messages remain unchanged. |
+| Retirement (#2335/#2725) | Existing owner/incarnation/source fences remain in actual senders. Codex checkpoints use its ordinary retirement-accounted follow-up journal. |
+| CI/review/availability | Ordinary PR processing and existing periodic exact-head CI invalidations revisit the handoff. Preserve CI, review, approval, scope, governor and Claude quota gates. Refresh target/head and ownership only when a checkpoint is due. |
+
+`CloudTaskEngine.check_and_resume_tasks` had no production callers, only two unit
+tests. Remove its sweep-only discovery/state helpers and constructor state-file
+argument; retain live provider resolution, CI continuation and the manual CLI.
+
+## Implementation decision
+
+Retain original request identity, PR/head/branch/provider/task, acceptance clock,
+ordinal and send reservation alongside review receipts. Atomically promote the
+exact confirmed original identities with the clock; retain all other unknown
+POST reservations. Scope pending-source holds to the same PR. Shared receipt
+writers merge latest confirmed identities under the existing file lock so
+stale snapshots cannot erase or re-pend those accepted sources. Pending writes
+apply explicit additions and exact known-no-effect releases to the latest
+document, preserving reservations absent from an older caller snapshot. Use one cross-process
+file guard for source writes, new acceptance and checkpoints. Persist the exact
+ordinal before sending. Lost responses/crashes retain that reservation. Typed
+pre-send quota refusals retry the same ordinal through existing quota admission.
+
+At normal reevaluation, an unchanged bound target can receive one checkpoint
+when 3600 seconds have passed since confirmed acceptance, at most three additional
+sends. New review requests and other existing PR corrective sends invalidate the
+old series under the same guard. Other origins do not become registration
+producers. Closure, changed owner/baseline, an explicit addressed outcome or the
+cap stops recovery. Known terminal PR callbacks persist closure so reopening
+does not revive that old series. A head change invalidates the baseline; it does not classify
+an empty, bot, base-merge or unrelated commit as implementation progress.
+
+No new engine, DB, slot model, provider execution reader or live selection/timeout
+is introduced. No duplicate open Issue/PR owner or numbered-Issue publication gate
+was found. The supplied #5993 incident demonstrates a useful checkpoint prompt,
+not why prior execution stopped. Ordinary completed PR workers signal the
+existing scheduler wake so its first newly registered watch cannot be lost
+while it is parked with no prior timer. See [operator behavior and verification](client-features/pr-bound-no-commit-checkpoints.md)
+for delivered scope and limitations.
+
+## Focused verification
+
+The final production-boundary selection passed **561 tests in 37.39s**, exit 0:
+
+```bash
+env -u CODEX_HOME CI=true UV_CACHE_DIR=/workspace/.uv-cache \
+  AUTO_CODER_LOG_FILE=/workspace/auto-coder-runtime/logs/auto-coder.log \
+  AUTO_CODER_DISABLE_AUTO_UPDATE=1 PATH=/workspace/auto-coder/.venv/bin:$PATH \
+  bash scripts/test.sh --ci-tests-only \
+  tests/test_dependabot_slotless_admission.py \
+  tests/test_codex_cloud_client.py \
+  tests/test_pr_no_commit_recovery.py \
+  tests/test_codex_cloud_pr_review_flow.py \
+  tests/test_pr_repair_bootstrap_policy_no_replay.py \
+  tests/test_adversarial_validation_pr_flow.py \
+  tests/test_cloud_conflict_delegation.py \
+  tests/test_claude_followup_admission.py \
+  tests/test_claude_followup_waits.py \
+  tests/test_pr_repair_exhaustion.py \
+  tests/test_dashboard_observability.py::test_pr_no_commit_checkpoint_reaches_mounted_detail \
+  tests/test_cloud_task_engine.py \
+  tests/test_verified_codex_pr_repair_routing.py \
+  tests/test_codex_cloud_pr_ci_flow.py \
+  tests/test_codex_cloud_followup_script.py \
+  tests/test_pr_worker_observation_status.py \
+  tests/test_ci_watch_own_batch.py \
+  tests/test_ci_webhook_intake.py \
+  tests/test_entity_invalidation.py \
+  tests/test_invalidation_failure_backoff.py -q --timeout=120
+```
+
+`.venv/bin/mypy --config-file pyproject.toml -p auto_coder` passed across **376
+source files**. Black check, isort check, flake8 on all twelve integration-relevant Python
+files, and `git diff --check`, passed. Test transports were local controlled
+boundaries; no live provider follow-up was run. The test collector could not
+save its redundant JSON log under the read-only home directory; test execution
+itself completed with exit 0. Unsetting inherited `CODEX_HOME` lets the manual
+CLI tests use their own temporary test credentials; credentials were unchanged.
+
+The separate CI-reported worktree-preparation retry test was inspected without
+changing its implementation or test. Running
+`bash scripts/test.sh --ci-tests-only tests/test_pr_correction_job.py::test_worktree_preparation_failure_retries_same_job_and_invokes_model_once -q --timeout=120`
+with the same environment passed **1 test in 3.57s**. The CI job log download
+returned Forbidden, so that clock failure was not reproduced or fixed here.
+
+The rejection-release regression now exercises the real native sender/journal.
+Only a positive, single-use rejection result from the latest send can release the
+exact shared source claim. Missing keys, a simulated peer whole-file overwrite,
+malformed exact entries and mixed confirmed/unknown identities stay fenced.
+Native delivery queries distinguish an absent key from a malformed exact entry;
+neither query is used as positive current-send rejection evidence.
+
+Latest main `b89c31f7ec3c124907a4cc7ffbad21d87950848d` (#2900) was
+merged normally into the existing feature branch without conflicts. The bounded
+selection includes its slotless Dependabot admission and durable retry tests
+alongside checkpoint/native journal and ordinary worker scheduling regressions.
+The unrelated hosted `/proc` observation test remains unchanged. Publication uses
+a normal fast-forward push; the checkpoint PR itself is not merged.
+
+## Main reconciliation on 2026-11-23
+
+Reconciled exact main `354441d9b735bc05f5c46ecaef95f25cfa7644d5` (including
+#2864, #2865, #2881, #2882 and #2901) into published #2889 head
+`ebda421baf6e24e050785352219282a02b177036` by a normal two-parent merge.
+The actual conflicts were the appended observability sections and the review
+handoff block. Both observability contracts are retained. Review handoff keeps
+main's strict GitHub-backed bound-draft origin check/deferred outcome and #2889's
+exact pending delta release and provider-aware checkpoint registration. Engine
+merge review confirms that main's admission preparation, slot/owner and startup
+operational-block semantics coexist with checkpoint scheduler wake/closure.
+Main's workflow, dependency manifest and lockfile content is retained exactly.
+
+The new checkpoint call also forwards the existing GitHub client into main's
+bound-draft origin recheck. The existing same-owner/hourly test now covers both
+Codex Cloud and Claude Routine with and without that context, retaining the
+60-minute spacing, cap, same-task and original no-replay assertions. The focused
+bound-draft/checkpoint plus lifecycle admission selection passed 240 cases.
+
+Whole-package mypy passed 377 source files; full src/tests black, isort and
+flake8 checks passed. The expanded selection reached 1,125 passes; 14 CLI fixture
+failures were caused by inherited CODEX_HOME and all 25 CLI cases passed with
+that variable unset, as in this document's original verification command. Three
+independent cross-Unix-identity slot tests cannot execute locally because sudo
+is unavailable; their code and assertions are unchanged. No permissions, identity
+emulation, skips or credential changes were introduced to bypass this limitation.
+Main's remaining admission/startup/slot/directive, Muse checkout and CI orchestration
+regressions passed. Full native PR CI remains the gate for the hosted identity
+cases. Synthetic providers were used; no live provider continuation or dispatch
+was invoked. #2902 remains at its original exact reviewed head until this parent
+merge is complete; its branch is not updated or retargeted by this reconciliation.
+
+With CODEX_HOME unset, the full original #2889 boundary selection plus the two
+new bound-draft provider cases passed **563 tests in 43.02s**, exit 0. Its command
+is the original selection above, using this merged source via PYTHONPATH and the
+existing managed Python environment without changing project dependencies.

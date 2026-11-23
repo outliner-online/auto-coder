@@ -462,3 +462,40 @@ Protected invocations/checkpoints remain owned until ordinary graceful drain;
 a successful terminal receipt alone does not prove the OS process has exited.
 See the release source-deployment and private worker-observation feature fragments
 for exact recovery evidence and the operator-owned attention boundary on expiry.
+
+Codex Cloud and Claude Routine PR corrections may show a **no-commit recovery**
+stage. Jules is not enrolled in this feature. It displays the
+original task/provider, bound head, checkpoint ordinal, eligibility deadline and
+reason. An accepted checkpoint means the same task received another bounded
+implementation request; it does not establish completion or an implementation
+commit. Unknown delivery stays reserved across restart. Changed baseline/owner,
+closure, explicit addressed outcome or the three-checkpoint limit stops that
+series. Initial/no-PR recovery is outside this stage. See
+[PR-bound checkpoint behavior](client-features/pr-bound-no-commit-checkpoints.md).
+
+Confirmed correction receipts survive stale writes from other PR workers. The
+existing no-commit recovery stage keeps its ordinary eligibility and assignment
+meaning after restart; no new dashboard event or provider-state inference is
+introduced by this receipt-preservation fix.
+
+Pending-source writes also preserve reservations absent from an older worker
+snapshot. Codex Cloud and Claude Routine unknown POST outcomes remain fenced across
+restart; confirmed identities and proven pre-send no-effect claims release their
+exact pending identities. Excluded Jules retains its ordinary failure/retry
+cleanup, which releases only its own reservation. The existing indeterminate-
+delivery wait continues to report supported-provider uncertainty.
+
+Ordinary Codex review repair preserves the native journal's definite rejection
+outcome: a positive current-send rejection receipt must match the exact task and
+complete identity set before their claims are released for retry. A missing key,
+unknown or unreadable receipt retains the existing shared wait; native malformed
+exact entries report indeterminate. Journal absence cannot prove rejection.
+The existing repair result distinguishes rejection from unconfirmed delivery;
+this restores transport outcome reporting without a new event schema or stage.
+The bootstrap-policy retry regression and review-flow unknown-receipt regression
+exercise these outcomes; Claude uncertainty and excluded Jules handling are unchanged.
+
+The native-journal regression exercises definite refusal, indeterminate delivery,
+a lost-key peer write, a malformed exact entry and mixed identities through the
+ordinary review producer. This hardens existing outcome reporting; it adds no
+processing origin or event schema and leaves Jules unchanged.

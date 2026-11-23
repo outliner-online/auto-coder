@@ -1501,6 +1501,50 @@ handler for both closing directives and branch markers, checking incomplete
 recovery, retained capacity, and successful membership discovery on retry.
 Run `bash scripts/test.sh tests/test_pending_work_resumption.py tests/test_implementation_slots.py`.
 
+The non-throttle startup error regression additionally enters the actual
+`start_automation` lifecycle, production ownership discovery, strict enumeration,
+registered startup handler and durable scheduler using controlled HTTP 404/503,
+429 and secondary-limit 403 responses. Non-throttle observations retain the
+existing `evaluation_failed` operational block without spending throttle retries;
+the startup warning truthfully reports no automatic retry and safe operator
+guidance. `pending-work list` retains the sanitized classification/status in
+`last_error`; the existing dashboard pending-work snapshot reports the blocked
+reason and zero deadline. The reachable dashboard never implies that startup is
+complete or that occupied capacity was released. Available and malformed-page
+controls preserve the success and fail-closed paths, and the official selected
+retry restores startup after correction without altering another obligation.
+These are repository lifecycle diagnostics, so no entity trace emission, origin,
+stage, outcome or schema changes are needed. Run
+`bash scripts/test.sh tests/test_startup_pending_remote_errors.py tests/test_github_pending_work.py`.
+
+The same lifecycle regression now reopens retained startup rows before boot:
+remote/authentication/forbidden/indeterminate/exhausted blocks and future
+deadlines send no new request merely because the controller restarted. Due,
+interrupted and officially selected work still reaches the registered recovery
+handler without duplicate enumeration, including a barrier-controlled completion
+during the initial pending-row read. The last permitted throttle attempt retains
+the prior count and exhausts without another automatic attempt. Existing status,
+occupied capacity and startup warnings remain the repository-level evidence;
+there is no new entity trace or dashboard schema. Controlled 503 responses with
+ordinary `errors` and Retry-After now stay `remote_error` in the existing request
+diagnostic event rather than claiming secondary throttling. Successful-HTTP
+GraphQL throttle and true HTTP 403/429 controls are in
+`tests/test_github_request_outcomes.py`.
+
+The due and selected-malformed cases in
+`tests/test_startup_pending_remote_errors.py` drive an actual HTTP-200 invalid
+listing through the strict reader, registered startup handler, scheduler and
+durable store. Repeated due scans and generic wakes send no further requests
+after the same obligation becomes `evaluation_failed`; startup remains
+incomplete, worker lanes stay closed and capacity remains owned. The HTTP
+diagnostic correctly remains `success`, while the semantic pending-work block
+keeps the unfinished effect and throttle count with a zero deadline and safe
+operator guidance. Correction plus the official selected retry completes a fresh
+enumeration. Fresh-inline invalid listings still propagate; handler controls in
+`tests/test_worker_startup_failure.py` prove that unrelated implementation,
+storage, transport and governor errors retain their existing paths. No new
+event schema, entity execution or dashboard projection is introduced.
+
 ## Codex quota transport
 
 Codex quota reads use the app-server account API. This transport change does not
@@ -3791,6 +3835,84 @@ tests/test_pr_worker_observation_status.py` exercises real SQLite/controller/wor
 processing, canonical CI reads and the existing skip-to-dashboard contract.
 The deterministic 0/1/1.5-second burst reduces two evaluations to one; it does not
 prove progress or authorize a merge in a live worker.
+
+## PR-bound no-commit checkpoints
+
+The normal accepted cloud review/adversarial handoff records its exact source,
+PR/head/branch/owner, acceptance clock and checkpoint ordinal in the existing
+review-delivery document. Normal PR reevaluation reaches
+`pr.no-commit-recovery` only for this correction scope. Its stage-result facts
+contain `provider`, `task_id`, `head_sha`, `ordinal`, `reason` and
+`next_check_at`; unavailable observations additionally name `error_type` without
+claiming receipt or completion. `accepted` emits `ACCEPTED_HANDOFF`; held or
+unknown evidence emits `DEFERRED`; terminal/cap/baseline outcomes emit `SKIPPED`.
+The existing generic stage timeline renders these events without a schema change.
+No execution-status inference or new polling origin is introduced.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_pr_no_commit_recovery.py
+ tests/test_codex_cloud_pr_review_flow.py
+ tests/test_dashboard_observability.py::test_pr_no_commit_checkpoint_reaches_mounted_detail`.
+The first two suites cover durable source generation, hour/cap/unknown-delivery
+admission and native sender boundaries. The mounted-detail regression begins at
+ordinary passing-CI `_handle_pr_merge`, creates the accepted source and receipt,
+then exercises an active-CI wait followed by a due Claude checkpoint and asserts
+the actual stage facts and visible diagram label. This is assignment evidence,
+not a reviewer verdict, observed implementation commit or merge authority.
+
+Receipt recovery and scheduling use the same stage schema: confirmed original
+source identities and their clock now commit atomically, and pending sources
+are scoped to their PR. Completed PR workers wake the existing scheduler to
+recompute its first watch deadline. No new origin or provider-state read is
+added. `tests/test_codex_cloud_pr_review_flow.py` exercises a held POST on a
+second PR, a Claude acceptance interrupted before later receipt promotion,
+Jules non-enrollment, and the ordinary scheduler/worker loops starting with zero
+watches and reaching all three checkpoints using only existing timer deadlines.
+The mounted-detail checkpoint regression now uses Claude Routine.
+
+`tests/test_codex_cloud_pr_review_flow.py::test_stale_peer_write_cannot_erase_accepted_claude_receipt_after_restart`
+pauses a peer writer across Claude acceptance and restart, then reaches a due
+checkpoint through ordinary review processing. Shared-file writers now merge
+latest confirmed receipts under the existing file lock, preventing that stale
+snapshot from erasing the accepted source or returning it to pending. This is
+observability-neutral receipt preservation: the existing assignment/hold/terminal
+stage facts and mounted timeline remain unchanged, and no unknown POST is
+promoted by the merge. Run the regression with `bash scripts/test.sh
+--ci-tests-only tests/test_codex_cloud_pr_review_flow.py::test_stale_peer_write_cannot_erase_accepted_claude_receipt_after_restart`.
+
+The inverse interleaving is covered by
+`tests/test_codex_cloud_pr_review_flow.py::test_stale_peer_snapshot_before_reservation_cannot_erase_unknown_claude_post`:
+a peer snapshot predates the original reservation, and its later write must
+preserve the unknown POST across restart. The writer now accepts explicit
+pending additions and exact known-no-effect removals against the latest document;
+bookkeeping updates add no pending claims. For Codex Cloud and Claude Routine, generic exception/False outcomes
+retain the pending source, while the pre-send-refusal regression proves cleanup
+removes only the current request's identities and remains retryable. No event
+schema or processing origin changes: the existing indeterminate-delivery wait
+remains the observable outcome, without another provider call.
+
+The unknown-outcome retention policy applies only to the checkpoint capability
+set (Codex Cloud and Claude Routine). Excluded Jules keeps the legacy ordinary
+repair failure/retry path: False or exception cleanup releases exactly its own
+reserved identities while preserving peer claims.
+`tests/test_codex_cloud_pr_review_flow.py::test_legacy_jules_false_and_exception_remain_retryable_without_enrollment`
+verifies both cases without a recovery series. Existing ordinary repair-result
+events report failure followed by a normal accepted retry; no new checkpoint
+event, event schema or processing origin is introduced for Jules.
+
+Ordinary Codex review repair preserves the native journal's definite rejection
+outcome: a positive current-send rejection receipt must match the exact task and
+complete identity set before their claims are released for retry. A missing key,
+unknown or unreadable receipt retains the existing shared wait; native malformed
+exact entries report indeterminate. Journal absence cannot prove rejection.
+The existing repair result distinguishes rejection from unconfirmed delivery;
+this restores transport outcome reporting without a new event schema or stage.
+The bootstrap-policy retry regression and review-flow unknown-receipt regression
+exercise these outcomes; Claude uncertainty and excluded Jules handling are unchanged.
+
+The native-journal regression exercises definite refusal, indeterminate delivery,
+a lost-key peer write, a malformed exact entry and mixed identities through the
+ordinary review producer. This hardens existing outcome reporting; it adds no
+processing origin or event schema and leaves Jules unchanged.
 
 ## Fresh autonomous draft implementation refusal
 

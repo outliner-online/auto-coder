@@ -443,8 +443,16 @@ class PendingWorkStore:
             reason = PendingReason.FORBIDDEN
         elif error.outcome.delivery.value == "indeterminate_after_possible_send":
             reason = PendingReason.INDETERMINATE
-        else:
+        elif classification in {GitHubApiOutcome.PRIMARY_THROTTLED, GitHubApiOutcome.SECONDARY_THROTTLED, GitHubApiOutcome.THROTTLED}:
             reason = PendingReason.THROTTLED
+        else:
+            reason = PendingReason.EVALUATION_FAILED
+        last_error = str(error)
+        if reason is PendingReason.EVALUATION_FAILED:
+            # Only typed classification/status are safe diagnostic evidence;
+            # request context and provider messages may contain raw data.
+            status = f" (HTTP {error.outcome.status})" if error.outcome.status is not None else ""
+            last_error = f"GitHub request failed: {classification.value}{status}. Check the referenced resource, repository and access; correct the cause, then use pending-work retry for this obligation."
         retry_after = error.outcome.metadata.retry_after_seconds or 0.0
         # A local admission deferral (e.g. GitHubRequestDeferred) carries the
         # governor's own computed retry_at, derived from real cooldown/queue
@@ -474,7 +482,7 @@ class PendingWorkStore:
                 prior_due = float(row[1]) if row else 0.0
                 prior_effects = tuple(json.loads(row[2])) if row else ()
                 effects = tuple(dict.fromkeys((*prior_effects, *unfinished_effects)))
-                # Authentication, forbidden, ambiguity and exhausted retries are
+                # Evaluation failures, auth, forbidden, ambiguity and exhausted retries are
                 # operational blocks: they are never timer-driven.
                 if reason not in {PendingReason.THROTTLED, PendingReason.ADMISSION_DEFERRED}:
                     due = 0.0
@@ -482,7 +490,7 @@ class PendingWorkStore:
                 # A defer() call always follows work that is no longer actively
                 # dispatched (either newly retained or re-armed after a stage
                 # handler reported an error), so it releases any running claim.
-                obligation = PendingObligation(identity, reason, scheduled_for, effects, attempts, str(error), ObligationStatus.WAITING.value)
+                obligation = PendingObligation(identity, reason, scheduled_for, effects, attempts, last_error, ObligationStatus.WAITING.value)
                 connection.execute(
                     "INSERT OR REPLACE INTO github_pending_work VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
