@@ -82,6 +82,8 @@ from .implementation_reclamation_scheduler import (
 )
 from .implementation_skip_diagnostic import duplicate_suppression_guidance, explain_already_owned
 from .implementation_slots import (
+    ImplementationAdmissionPreparationRequired,
+    ImplementationAdmissionRefused,
     ImplementationHierarchyConflict,
     ImplementationHierarchyUnavailable,
     ImplementationOwner,
@@ -134,10 +136,10 @@ from .merge_operation_scheduler import get_merge_operation_scheduler
 from .merge_operation_state import MergeOperation
 from .open_target_observations import OpenTarget, OpenTargetObservations
 from .parent_issue_reconciliation import ParentDeclarationStatus, ParentOperationalError, ParentSpecificationError, parse_parent_declaration
-from .pr_processor import PR_PROCESSING_STAGE, LocalPRRepairContext
+from .pr_processor import PR_PROCESSING_STAGE, DraftPRAdmissionEvidence, DraftPRRepairAuthority, LocalPRRepairContext
 from .pr_processor import _create_pr_analysis_prompt as _engine_pr_prompt
 from .pr_processor import _get_pr_diff as _pr_get_diff
-from .pr_processor import _should_skip_waiting_for_jules, process_pull_request
+from .pr_processor import _should_skip_waiting_for_jules, draft_pr_repair_authority_scope, process_pull_request
 from .progress_footer import ProgressStage
 from .prompt_loader import render_prompt
 from .reissue_required_store import ReissueRequiredStore
@@ -183,7 +185,7 @@ from .test_log_utils import extract_important_errors
 from .test_result import TestResult
 from .trace_logger import get_trace_logger
 from .update_manager import check_for_updates_and_restart
-from .util.gh_cache import IMPLEMENTATION_READY_LABEL, GitHubClient, InvalidSubIssueRelationshipError, get_ghapi_client, is_implementation_ready, parse_parent_issue_number, parse_parent_issue_url_number, resolve_authoritative_item_type
+from .util.gh_cache import IMPLEMENTATION_READY_LABEL, GitHubClient, InvalidOpenEntitiesObservation, InvalidSubIssueRelationshipError, get_ghapi_client, is_implementation_ready, parse_parent_issue_number, parse_parent_issue_url_number, resolve_authoritative_item_type
 from .util.github_action import check_and_handle_closed_state, get_github_actions_logs_from_url, is_item_closed_on_github
 from .util.github_cache import get_github_cache
 from .util.github_request_outcome import DeliveryCertainty, GitHubApiOutcome, GitHubReadCancelled, GitHubRequestError, cancel_github_reads_when, configure_github_request_boundary, is_issue_resource_read
@@ -406,6 +408,11 @@ class _StartupReconciliationHandler:
             asyncio.run_coroutine_threadsafe(engine._attempt_startup_reconciliation(self._repo_name), loop).result()
         except GitHubRequestError as exc:
             return StageOutcome(error=exc)
+        except InvalidOpenEntitiesObservation:
+            # Only explicit enumeration validation failures become this block;
+            # unrelated defects and operational errors keep their own paths.
+            logger.error("Startup GitHub enumeration for {} returned invalid or incomplete observations; retaining an evaluation-failed operational block", self._repo_name)
+            return StageOutcome(blocked_reason=PendingReason.EVALUATION_FAILED, blocked_error="Startup GitHub enumeration returned invalid or incomplete observations; inspect the response, correct the cause, then use pending-work retry for this obligation.")
         assert engine._startup_reconciliation_event is not None
         loop.call_soon_threadsafe(engine._startup_reconciliation_event.set)
         return StageOutcome(completed_effects=(STARTUP_RECONCILIATION_EFFECT,))
@@ -3258,13 +3265,16 @@ class AutomationEngine:
     async def _perform_startup_reconciliation(self, repo_name: str) -> None:
         """Complete startup recovery, retrying governed admission failures durably.
 
-        The first attempt runs inline. A ``GitHubRequestError`` -- a local
-        admission deferral or an actual GitHub throttle, authentication, or
-        forbidden response -- does not terminate the daemon: the attempt is
-        retained as a durable pending-work obligation with a stable
-        repository-scoped identity (stable across restarts, since it is keyed
-        only by repository and stage) and retried by the already-running
-        pending-work scheduler, independent of the ordinary worker pool. This
+        A fresh cycle's first attempt runs inline. A retained cycle resumes only
+        through the scheduler, preserving its deadline and operational block.
+        A ``GitHubRequestError`` -- a local
+        admission deferral or a provider failure -- does not terminate the
+        daemon: the attempt is retained as a durable pending-work obligation
+        with a stable repository-scoped identity (stable across restarts, since it is keyed
+        only by repository and stage). Only admission deferrals and actual
+        throttles are retried automatically by the already-running pending-work
+        scheduler, independent of the ordinary worker pool. Operational blocks
+        require a selected operator retry after correcting the cause. This
         method then waits for that obligation to resolve -- or for shutdown --
         without blocking the event loop, so webhook receipt, status, and
         graceful shutdown remain responsive while recovery is incomplete. Any
@@ -3274,17 +3284,30 @@ class AutomationEngine:
         self.dependency_observations = DependencyObservationCache()
         identity = WorkIdentity(repo_name, "startup", STARTUP_RECONCILIATION_STAGE)
         try:
-            await self._attempt_startup_reconciliation(repo_name)
-            # A prior process may have left this identity retained (waiting on
-            # a not-yet-due retry, or blocked on an operational failure) before
-            # this fresh inline attempt succeeded outright; clear it so the
-            # scheduler never repeats a full enumeration for already-completed
-            # recovery merely because that old obligation's deadline arrives.
-            await asyncio.to_thread(get_pending_work_store(repo_name).supersede, identity)
-            return
+            retained = await asyncio.to_thread(get_pending_work_store(repo_name).get, identity)
+            if retained is not None:
+                logger.warning("Startup reconciliation for {} waits for its retained {} obligation (not_before={}); {}", repo_name, retained.reason.value, retained.not_before, retained.last_error)
+                self._wake_pending_work()
+            elif self._startup_reconciliation_event is None or not self._startup_reconciliation_event.is_set():
+                # Recovery may have completed and retired the row while get()
+                # was in flight. Its success event forbids a duplicate inline
+                # scan; otherwise absence permits the first fresh attempt.
+                await self._attempt_startup_reconciliation(repo_name)
+                await asyncio.to_thread(get_pending_work_store(repo_name).supersede, identity)
+                return
         except GitHubRequestError as exc:
             obligation = await asyncio.to_thread(get_pending_work_store(repo_name).defer, identity, exc, (STARTUP_RECONCILIATION_EFFECT,))
-            logger.warning(f"Startup GitHub reconciliation for {repo_name} deferred ({obligation.reason.value}); " f"the daemon stays up and the pending-work scheduler will retry automatically " f"(next eligible at {obligation.not_before})")
+            if obligation.automatically_retryable:
+                logger.warning("Startup GitHub reconciliation for {} deferred ({}); the daemon stays up and the pending-work scheduler will retry automatically (next eligible at {})", repo_name, obligation.reason.value, obligation.not_before)
+            else:
+                logger.warning(
+                    "Startup GitHub reconciliation for {} blocked ({}); the daemon stays up with startup incomplete; no automatic retry is scheduled. {} Use pending-work retry --repository {} --entity startup --stage {} after correcting the cause.",
+                    repo_name,
+                    obligation.reason.value,
+                    obligation.last_error,
+                    repo_name,
+                    STARTUP_RECONCILIATION_STAGE,
+                )
             self._wake_pending_work()
         except LocalJobStoreUnavailable as exc:
             await asyncio.to_thread(
@@ -7768,6 +7791,30 @@ class AutomationEngine:
             result.error = str(exc)
             return result
 
+        draft_evidence = DraftPRAdmissionEvidence()
+        head = candidate.data.get("head") or {}
+        expected_draft_head = (str(head.get("ref") or ""), str(head.get("sha") or ""))
+        draft_authority = DraftPRRepairAuthority(repo_name, item_number, *expected_draft_head, (owner.number,) if owner.kind == "issue" else ()) if candidate.type == "pr" and candidate.data.get("draft") is True and not explicit_only else None
+
+        def check_fresh_pr_admission() -> Optional[str]:
+            if not draft_evidence.prepared:
+                raise ImplementationAdmissionPreparationRequired("Fresh draft evidence must be prepared outside the store lock")
+            return draft_evidence.blocker
+
+        fresh_pr_admission = {"fresh_admission_check": check_fresh_pr_admission} if draft_authority is not None else {}
+
+        def start_reserved_execution(generation: Optional[str], **start_kwargs: Any) -> tuple[Optional[str], bool]:
+            try:
+                return self._start_issue_implementation_execution(repo_name, slots, owner, generation, **start_kwargs)
+            except ImplementationAdmissionPreparationRequired:
+                from .pr_processor import draft_pr_implementation_blocker
+
+                # start_execution has unwound its store lock. Strict GitHub and
+                # provider reads must not serialize unrelated slot writers.
+                draft_evidence.blocker = draft_pr_implementation_blocker(repo_name, item_number, self.github, owner.number if owner.kind == "issue" else None, expected_head=expected_draft_head, evidence=draft_evidence)
+                draft_evidence.prepared = True
+                return self._start_issue_implementation_execution(repo_name, slots, owner, generation, **start_kwargs)
+
         implementation_pr = item_number if candidate.type == "pr" and owner.kind != "pr" else None
         labels = candidate.data.get("labels", [])
         urgent_issue = candidate.type == "issue" and isinstance(labels, list) and any(label == "urgent" or (isinstance(label, dict) and label.get("name") == "urgent") for label in labels)
@@ -8082,12 +8129,10 @@ class AutomationEngine:
                             retry_authority = admission.authority if admission.disposition is IssueRetryDisposition.OWNED else None
                             auto_retry_deferred = admission.disposition in {IssueRetryDisposition.DEFERRED, IssueRetryDisposition.STALE}
                         else:
-                            execution_id, already_owned = self._start_issue_implementation_execution(
-                                repo_name,
-                                slots,
-                                owner,
+                            execution_id, already_owned = start_reserved_execution(
                                 implementation_key,
                                 implementation_pr=implementation_pr,
+                                **fresh_pr_admission,
                                 bypass_capacity=explicit_only,
                                 bypass_active_execution=explicit_only and force and candidate.type == "pr",
                                 allow_urgent_emergency=urgent_issue,
@@ -8109,15 +8154,20 @@ class AutomationEngine:
                         result.actions = ["Skipped - validated Issue generation changed during capacity reconciliation"]
                         return result
                     implementation_key = self._compute_implementation_generation(repo_name, generation_context["snapshot"], generation_context.get("family_set")) if candidate.type == "issue" else None
-                    execution_id, already_owned = self._start_issue_implementation_execution(
-                        repo_name,
-                        slots,
-                        owner,
+                    execution_id, already_owned = start_reserved_execution(
                         implementation_key,
                         implementation_pr=implementation_pr,
+                        **fresh_pr_admission,
                         allow_urgent_emergency=urgent_issue,
                         github_client=self.github if owner.kind == "issue" and isinstance(self.github, GitHubClient) else None,
                     )
+            except ImplementationAdmissionRefused as exc:
+                result.outcome = PRProcessingOutcome.DEFERRED
+                result.target_outcome = ExplicitTargetOutcome.DEFERRED
+                result.target_reason = str(exc)
+                result.actions = [str(exc)]
+                _record_pr_stage_result(item_number, "pr.implementation-admission", f"pr#{item_number} implementation admission", Outcome.DEFERRED, {"owner": owner.key, "reason": str(exc)})
+                return result
             except ImplementationHierarchyConflict as exc:
                 result.target_outcome = ExplicitTargetOutcome.DEFERRED
                 result.actions = [f"Deferred - direct parent/child implementation conflict ({exc})"]
@@ -8196,7 +8246,7 @@ class AutomationEngine:
                 else:
                     result = self._process_single_candidate_reserved(repo_name, candidate, config, jules_mode, force_adversarial_validation=True)
             else:
-                with slots.serialize(owner):
+                with slots.serialize(owner), draft_pr_repair_authority_scope(draft_evidence.authority or draft_authority):
                     if retry_authority is not None:
                         _record_issue_stage_result(
                             item_number,

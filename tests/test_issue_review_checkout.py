@@ -318,7 +318,7 @@ def test_old_ambient_directory_path_fails_the_ordinary_positive_case(tmp_path, m
 
 @pytest.mark.parametrize(
     "backend,stage,noedit",
-    [("claude", "specification_validation", True), ("muse", "pr_review", True), ("muse", "decomposition_validation", True), ("muse", "specification_validation", False)],
+    [("claude", "specification_validation", True), ("claude", "decomposition_validation", True), ("muse", "pr_review", True), ("muse", "specification_validation", False), ("muse", "decomposition_validation", False)],
 )
 def test_other_providers_and_review_kinds_keep_their_existing_directory(backend, stage, noedit, tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG", str(tmp_path / "unrelated-controller-config"))

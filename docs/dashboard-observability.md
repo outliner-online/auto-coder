@@ -978,7 +978,7 @@ implementation, handoff, publication or merge. Start is dispatch evidence, not
 provider liveness. Existing schema version 1, scope propagation, generic diagram
 and decision-log rendering, and the public API fact allowlist are preserved.
 
-Muse individual specification review resolves the exact lifecycle repository's
+Muse individual specification and decomposition review resolve the exact lifecycle repository's
 explicit `issue_review.checkout` before private-workspace preparation. Invalid
 or missing checkout evidence produces an explicit retryable local setup `ERROR`
 with no `llm.local-execution` start or implementation handoff.
@@ -990,9 +990,13 @@ boundary. `test_inherited_origin_cannot_replace_checkout_metadata` additionally
 checks stale controller/global/injected/included origin configuration through
 the same ordinary lane: no host launch, terminal authority, or implementation
 handoff occurs. The scoped-origin repair stays before the existing dispatch
-stage and adds no event or projection. Existing mounted-view dispatch regressions below remain applicable;
+stage and adds no event or projection. Decomposition uses the same pre-dispatch
+checkout binding; `tests/test_decomposition_review_checkout.py` drives actual
+scheduled parent-set analysis and real Muse Git preparation, stopping before
+MSP host launch. Invalid selections emit no local-dispatch start, terminal
+authorization, or implementation handoff. Existing mounted-view dispatch regressions below remain applicable;
 the event schema and projection are unchanged. Run
-`bash scripts/test.sh tests/test_issue_review_checkout.py tests/test_dashboard_observability.py::test_local_llm_preparation_failure_never_emits_start tests/test_dashboard_observability.py::test_local_llm_dispatch_reaches_mounted_detail_before_return`.
+`bash scripts/test.sh tests/test_issue_review_checkout.py tests/test_decomposition_review_checkout.py tests/test_dashboard_observability.py::test_local_llm_preparation_failure_never_emits_start tests/test_dashboard_observability.py::test_local_llm_dispatch_reaches_mounted_detail_before_return`.
 
 Local Issue implementation start comments consume this same production start
 boundary through a context-bound side effect in both durable-runner and
@@ -1496,6 +1500,50 @@ drives real owner resolution, durable startup deferral, and the startup stage
 handler for both closing directives and branch markers, checking incomplete
 recovery, retained capacity, and successful membership discovery on retry.
 Run `bash scripts/test.sh tests/test_pending_work_resumption.py tests/test_implementation_slots.py`.
+
+The non-throttle startup error regression additionally enters the actual
+`start_automation` lifecycle, production ownership discovery, strict enumeration,
+registered startup handler and durable scheduler using controlled HTTP 404/503,
+429 and secondary-limit 403 responses. Non-throttle observations retain the
+existing `evaluation_failed` operational block without spending throttle retries;
+the startup warning truthfully reports no automatic retry and safe operator
+guidance. `pending-work list` retains the sanitized classification/status in
+`last_error`; the existing dashboard pending-work snapshot reports the blocked
+reason and zero deadline. The reachable dashboard never implies that startup is
+complete or that occupied capacity was released. Available and malformed-page
+controls preserve the success and fail-closed paths, and the official selected
+retry restores startup after correction without altering another obligation.
+These are repository lifecycle diagnostics, so no entity trace emission, origin,
+stage, outcome or schema changes are needed. Run
+`bash scripts/test.sh tests/test_startup_pending_remote_errors.py tests/test_github_pending_work.py`.
+
+The same lifecycle regression now reopens retained startup rows before boot:
+remote/authentication/forbidden/indeterminate/exhausted blocks and future
+deadlines send no new request merely because the controller restarted. Due,
+interrupted and officially selected work still reaches the registered recovery
+handler without duplicate enumeration, including a barrier-controlled completion
+during the initial pending-row read. The last permitted throttle attempt retains
+the prior count and exhausts without another automatic attempt. Existing status,
+occupied capacity and startup warnings remain the repository-level evidence;
+there is no new entity trace or dashboard schema. Controlled 503 responses with
+ordinary `errors` and Retry-After now stay `remote_error` in the existing request
+diagnostic event rather than claiming secondary throttling. Successful-HTTP
+GraphQL throttle and true HTTP 403/429 controls are in
+`tests/test_github_request_outcomes.py`.
+
+The due and selected-malformed cases in
+`tests/test_startup_pending_remote_errors.py` drive an actual HTTP-200 invalid
+listing through the strict reader, registered startup handler, scheduler and
+durable store. Repeated due scans and generic wakes send no further requests
+after the same obligation becomes `evaluation_failed`; startup remains
+incomplete, worker lanes stay closed and capacity remains owned. The HTTP
+diagnostic correctly remains `success`, while the semantic pending-work block
+keeps the unfinished effect and throttle count with a zero deadline and safe
+operator guidance. Correction plus the official selected retry completes a fresh
+enumeration. Fresh-inline invalid listings still propagate; handler controls in
+`tests/test_worker_startup_failure.py` prove that unrelated implementation,
+storage, transport and governor errors retain their existing paths. No new
+event schema, entity execution or dashboard projection is introduced.
 
 ## Codex quota transport
 
@@ -4054,3 +4102,64 @@ document. Existing unavailable/deferred diagnostics apply; ordinary tasks withou
 Strong provenance and the legacy journal reader/writer are unchanged. The extra-row
 controls in `tests/test_strong_correction_scope.py` cover even a would-succeed
 reconciliation without new POSTs or journal normalization.
+
+## Fresh autonomous draft implementation refusal
+
+A draft with no configured local repair backend and no usable existing cloud
+origin is refused before a new durable implementation reservation. Production
+emits the existing `pr.implementation-admission` stage with `deferred`, resolved
+owner and reason, and returns the same deferred worker outcome. An uncertain
+strict GitHub/provider read also defers without inventing free/occupied state.
+The existing detail projection displays this reason; the read-only slot panel
+continues to display only actual durable owners. Retained reservations are
+never removed by this preflight or by reparsing current PR text.
+
+Run `bash scripts/test.sh tests/test_lifecycle_admission_regression.py
+ tests/test_issue_context.py tests/test_implementation_slots.py` for the exact
+production narrative, startup reconciliation/restart, backend refusal before
+admission, next eligible Issue admission with duplicate suppression, historical
+membership retention and existing branch/native/provider/active-work cases.
+The directive parser changes only evidence feeding existing ownership decisions;
+no trace schema, origin, or renderer changes are needed.
+
+
+The fresh-draft policy is evaluated atomically with owner absence and creation
+under the slot-store lock, including admission retried after reconciliation.
+A retirement racing an earlier owner snapshot still yields the existing
+`pr.implementation-admission` deferred event and creates no fresh slot or
+execution. A current head-reference/SHA mismatch also defers. The event schema,
+owner/reason fields and renderer remain unchanged. The barrier regression
+`tests/test_lifecycle_admission_regression.py::test_reconciliation_after_active_sample_cannot_recreate_unsupported_draft`
+and capacity-retry case exercise actual reconciliation and admission; the
+retained-execution case verifies that this refusal does not erase active work.
+The Markdown-region extraction shares existing structural filtering without
+changing role-assessment decisions; run `tests/test_role_structural_assessment.py`
+alongside the lifecycle admission regressions.
+
+
+### Draft repair origin continuity and lock scope
+
+Fresh draft preparation now performs strict PR/provider reads outside the
+shared slot-store lock. The atomic creation callback consumes only prepared
+evidence, then rechecks owner absence; it does not hold capacity coordination
+while waiting for GitHub. `test_strict_draft_preflight_does_not_hold_slot_store_lock`
+pauses the strict read and proves an independent real store writer can finish.
+The prior retirement-race, capacity-retry and retained-execution cases remain.
+
+The bound draft's lifecycle Issue, provider/task, attribution token and head
+constrain downstream origin resolution and final send validation. A changed
+or unavailable origin yields the existing deferred repair outcome, never an
+accepted handoff. The joined cases in
+`tests/test_lifecycle_admission_regression.py` drive actual review/conflict
+repair to captured transport, with related-Issue context unchanged, and cover
+wrong-task prevention and binding/head/read failures. These outcomes reuse the
+existing admission and `pr.repair-delegation` projection; no stage, schema or
+renderer additions are required. CommonMark documentary-region filtering is
+pure evidence extraction and emits no invented execution or completion.
+
+Preparation requests also unwind before existing hierarchy reads; the regression
+`test_draft_preparation_does_not_repeat_locked_hierarchy_reads` confirms zero
+hierarchy reads for the preparation request and the normal three after evidence
+is ready. The deployment registry's existing dispatch-authority guard remains
+in place, so the independent-writer proof is specifically about the slot-store
+mutex, not a claim that every admission guard is absent during preparation.

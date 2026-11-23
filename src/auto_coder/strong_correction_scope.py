@@ -522,7 +522,7 @@ def deliver_ordinary(repository, pr_data, github, origin, pending, state_path, d
     prompt = instruction(repository, source, row)
 
     def current() -> bool:
-        if processor._revalidate_cloud_origin(repository, pr_number, origin) or not processor.new_work_allowed():
+        if processor._revalidate_cloud_origin(repository, pr_number, origin, github_client=github) or not processor.new_work_allowed():
             return False
         if processor._get_adjudication_effect_store().force_revalidation_needed(repository, pr_number):
             return False

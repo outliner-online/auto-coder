@@ -1,7 +1,9 @@
 """Regression guards for pull-request-only workflow supersession (Issue #2728)."""
 
+import shlex
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests.support.ci_browser_install import assert_conditional_chromium_install
@@ -93,8 +95,16 @@ def test_required_profiles_and_fail_closed_prerequisites_are_unchanged() -> None
     opencode_steps = {step.get("name", ""): step for step in _load("OpenCode Live Tests")["jobs"]["opencode-live-tests"]["steps"]}
     assert "opencode-ai@1.18.31" in opencode_steps["Install pinned OpenCode CLI"]["run"]
     assert "scripts/prepare_opencode_image.py" in opencode_steps["Prepare OpenCode runtime image"]["run"]
-    assert opencode_steps["Run opencode_live-marked tests"]["env"]["AUTO_CODER_REQUIRE_OPENCODE_LIVE"] == "1"
-    assert "pytest -m opencode_live" in opencode_steps["Run opencode_live-marked tests"]["run"]
+    opencode_test = opencode_steps["Run opencode_live-marked tests"]
+    assert opencode_test["env"]["AUTO_CODER_REQUIRE_OPENCODE_LIVE"] == "1"
+    command = shlex.split(opencode_test["run"], comments=True)
+    assert command[:3] == ["bash", "scripts/test.sh", "--ci-tests-only"]
+    assert command.count("-m") == 1
+    assert command[command.index("-m") + 1] == "opencode_live"
+    # The supported entry point must retain the complete live profile and its
+    # native status rather than applying a second filter or swallowing failure.
+    assert not {"-k", "--keyword", "--deselect", "--splits", "--group", "--lf", "--last-failed"}.intersection(arg.split("=", 1)[0] for arg in command)
+    assert not {"||", "&&", ";", "|"}.intersection(command)
 
     muse_steps = {step.get("name", ""): step for step in _load("Muse Live Tests")["jobs"]["muse-live-tests"]["steps"]}
     assert "version=1.4.6-R6000.1" in muse_steps["Install pinned Muse Code host"]["run"]
@@ -119,3 +129,23 @@ def test_required_profiles_and_fail_closed_prerequisites_are_unchanged() -> None
     assert "os.killpg(pgid, signal.SIGKILL)" in runner
     assert 'result = "cancelled" if _stop_group(process, pgid, grace) else "cleanup-failure"' in runner
     assert 'if outcome != "timeout" or attempt == args.max_attempts or cancel_signal is not None:' in runner
+
+
+@pytest.mark.parametrize("mutation", ["marker", "required-live", "narrow-selection", "masked-failure"])
+def test_required_live_profile_guard_rejects_weakened_workflow(tmp_path, monkeypatch, mutation):
+    workflow = _load("OpenCode Live Tests")
+    step = next(step for step in workflow["jobs"]["opencode-live-tests"]["steps"] if step.get("name") == "Run opencode_live-marked tests")
+    if mutation == "marker":
+        step["run"] = step["run"].replace("-m opencode_live", "-m 'not opencode_live'")
+    elif mutation == "required-live":
+        step["env"]["AUTO_CODER_REQUIRE_OPENCODE_LIVE"] = "0"
+    elif mutation == "narrow-selection":
+        step["run"] = step["run"].rstrip() + " -k test_one\n"
+    else:
+        step["run"] = step["run"].rstrip() + " || true\n"
+    mutated = tmp_path / "opencode-live-tests.yml"
+    mutated.write_text(yaml.safe_dump(workflow), encoding="utf-8")
+    monkeypatch.setitem(WORKFLOWS, "OpenCode Live Tests", mutated)
+
+    with pytest.raises(AssertionError):
+        test_required_profiles_and_fail_closed_prerequisites_are_unchanged()

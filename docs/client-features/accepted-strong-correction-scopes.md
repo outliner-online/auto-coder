@@ -129,3 +129,11 @@ Run `bash scripts/test.sh --ci-tests-only tests/test_strong_correction_scope.py`
 The common contested-lock and unrelated-subject controls remain in
 `tests/test_scoped_final_authority.py` and `tests/test_codex_subject_separation.py`.
 These are controlled production-entry integration tests, not live-service e2e tests.
+
+After #2889 merged, integration with main's bound-draft repair authority retains
+the same private final callback and passes its existing strict GitHub client into
+origin revalidation. The scoped adjudication callback does the same. Missing or
+changed authority remains held; this introduces no caller role, send privilege,
+force path or legacy adoption. The real Strong producer/ordinary-intake positive
+also runs inside a draft-authority context captured from the existing verified
+origin, while preserving the old unknown's source, native and pending evidence.

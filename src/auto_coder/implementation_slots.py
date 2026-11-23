@@ -14,7 +14,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterator, NoReturn, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, NoReturn, Optional, cast
 
 from .cloud_manager import claude_session_alias
 from .issue_context import extract_lifecycle_branch_issue_number, extract_lifecycle_directive_issue_references
@@ -43,6 +43,14 @@ class ImplementationOwner:
 
 class ImplementationSlotUnavailable(RuntimeError):
     """Raised when an independent implementation cannot reserve a slot."""
+
+
+class ImplementationAdmissionRefused(ImplementationSlotUnavailable):
+    """A fresh reservation was refused before ownership or execution existed."""
+
+
+class ImplementationAdmissionPreparationRequired(ImplementationSlotUnavailable):
+    """Fresh admission needs evidence prepared outside the store lock."""
 
 
 class ImplementationSlotLockTimeout(ImplementationSlotUnavailable):
@@ -652,8 +660,13 @@ class ImplementationSlotRepository:
         generation: Optional[str] = None,
         retry_request_id: Optional[str] = None,
         implementation_attempt_id: Optional[str] = None,
+        fresh_admission_check: Optional[Callable[[], Optional[str]]] = None,
     ) -> Optional[str]:
         """Atomically admit and durably identify one mutating execution.
+
+        ``fresh_admission_check`` runs only for an absent owner, under the
+        same store lock that serializes reconciliation and owner creation. A
+        refusal raises before creating ownership or attaching a PR/execution.
 
         Capacity and duplicate-execution admission are deliberately independent:
         explicit ``--only`` work may bypass the former, while only the additional
@@ -698,6 +711,14 @@ class ImplementationSlotRepository:
                     raise ImplementationHierarchyUnavailable(f"Interrupted hierarchy admission for {owner.key} requires authoritative GitHub evidence")
                 admission_hierarchy = self._parse_stored_hierarchy(record)
             if record is None:
+                normal_usage, emergency_in_use = self._capacity_usage(owners)
+                capacity_available = normal_usage < self.max_implementations or bypass_capacity or (allow_urgent_emergency and not emergency_in_use)
+                # Preparation requests must unwind before even the existing
+                # hierarchy reads, avoiding extra network work on re-entry.
+                if fresh_admission_check is not None and capacity_available:
+                    refusal = fresh_admission_check()
+                    if refusal is not None:
+                        raise ImplementationAdmissionRefused(refusal)
                 if owner.kind == "issue":
                     if github_client is not None:
                         first_hierarchy = self._read_issue_hierarchy(github_client, owner.number)
@@ -706,7 +727,6 @@ class ImplementationSlotRepository:
                             raise ImplementationHierarchyUnavailable(f"Direct hierarchy changed while admitting issue:{owner.number}")
                         self._raise_hierarchy_conflict(owner, owners, second_hierarchy)
                         admission_hierarchy = second_hierarchy
-                normal_usage, emergency_in_use = self._capacity_usage(owners)
                 use_emergency = False
                 if normal_usage >= self.max_implementations and not bypass_capacity:
                     if not allow_urgent_emergency or emergency_in_use:

@@ -768,8 +768,11 @@ def test_review_delivery_reason_reaches_public_projection_without_changing_effec
 
 
 @pytest.mark.parametrize("provider", ["codex-cloud", "claude-routine"])
-def test_accepted_review_handoff_reaches_hourly_checkpoint_on_same_owner(tmp_path, provider):
+@pytest.mark.parametrize("bound_draft", [False, True])
+def test_accepted_review_handoff_reaches_hourly_checkpoint_on_same_owner(tmp_path, provider, bound_draft):
     """Production receipt creation and duplicate-wait path share one policy."""
+    from auto_coder.pr_processor import DraftPRRepairAuthority, draft_pr_repair_authority_scope
+
     state_path = tmp_path / "review-repairs.json"
     clock = [1000.0]
     client = _github_client()
@@ -803,20 +806,22 @@ def test_accepted_review_handoff_reaches_hourly_checkpoint_on_same_owner(tmp_pat
         evaluate()
         assert native_sender.call_count == 1
         client.get_pull_request_metadata_strict.assert_not_called()
-        for ordinal in range(1, 4):
-            clock[0] = 1000 + ordinal * 3600
-            evaluate()
-            assert native_sender.call_count == ordinal + 1
-            args = native_sender.call_args.args
-            assert args[0] == task_id
-            assert "independently" in args[1]
-            assert "Never make an empty commit" in args[1]
-            assert "existing pull request #5262" in args[1]
-            assert "codex/review-5262" in args[1]
-            if provider == "codex-cloud":
-                assert args[2][0].startswith("no-commit:")
-            else:
-                assert len(args) == 2
+        authority = DraftPRRepairAuthority("owner/repo", 5262, "codex/review-5262", "head-1", (42,), provider, task_id) if bound_draft else None
+        with draft_pr_repair_authority_scope(authority):
+            for ordinal in range(1, 4):
+                clock[0] = 1000 + ordinal * 3600
+                evaluate()
+                assert native_sender.call_count == ordinal + 1
+                args = native_sender.call_args.args
+                assert args[0] == task_id
+                assert "independently" in args[1]
+                assert "Never make an empty commit" in args[1]
+                assert "existing pull request #5262" in args[1]
+                assert "codex/review-5262" in args[1]
+                if provider == "codex-cloud":
+                    assert args[2][0].startswith("no-commit:")
+                else:
+                    assert len(args) == 2
         clock[0] += 36000
         evaluate()
         assert native_sender.call_count == 4

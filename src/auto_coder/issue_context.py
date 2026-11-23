@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from .logger_config import get_logger
+from .markdown_regions import authored_lifecycle_markdown
 
 logger = get_logger(__name__)
 
@@ -69,7 +70,9 @@ def extract_linked_issues_from_pr_body(pr_body: str) -> List[int]:
 # extraction above, "related issue", "relates to" and similar prose are never
 # lifecycle-ownership evidence (see resolve_owner in implementation_slots.py).
 _LIFECYCLE_DIRECTIVE_KEYWORDS = r"(?:close|closes|closed|closing|fix|fixes|fixed|resolve|resolves|resolved|resolving)"
-_LIFECYCLE_DIRECTIVE_PATTERN = rf"\b{_LIFECYCLE_DIRECTIVE_KEYWORDS}\b:?\s+([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)?#(\d+)"
+# A directive starts a line/list item or a sentence. A keyword embedded in
+# narrative ("existing closed #5459/REQ-007") is not an ownership declaration.
+_LIFECYCLE_DIRECTIVE_PATTERN = r"(?:^|[.!?;,:][ \t]+)[ \t]*(?:(?:[-*+]|\d+[.)]|\#{1,6})[ \t]+)?" rf"(?:also[ \t]+)?(?:this[ \t]+(?:(?:pr|pull request|change)[ \t]+)?)?" rf"{_LIFECYCLE_DIRECTIVE_KEYWORDS}\b:?\s+([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)?#(\d+)(?!\w|/REQ-)"
 
 
 def extract_lifecycle_directive_issue_references(pr_body: str) -> List[Tuple[Optional[str], int]]:
@@ -82,7 +85,8 @@ def extract_lifecycle_directive_issue_references(pr_body: str) -> List[Tuple[Opt
     """
     if not pr_body:
         return []
-    return [(match.group(1), int(match.group(2))) for match in re.finditer(_LIFECYCLE_DIRECTIVE_PATTERN, pr_body, re.IGNORECASE)]
+    authored = authored_lifecycle_markdown(pr_body)
+    return [(match.group(1), int(match.group(2))) for match in re.finditer(_LIFECYCLE_DIRECTIVE_PATTERN, authored, re.IGNORECASE | re.MULTILINE)]
 
 
 def extract_lifecycle_branch_issue_number(branch_name: str) -> Optional[int]:

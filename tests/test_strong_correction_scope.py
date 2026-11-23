@@ -48,6 +48,7 @@ def sources(slots):
     "control",
     [
         "fresh",
+        "bound_draft",
         "alternate_first",
         "legacy_old",
         "edited_root",
@@ -377,7 +378,14 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
             monkeypatch.setattr("auto_coder.pr_processor._get_adjudication_effect_store", lambda: MagicMock(force_revalidation_needed=lambda *_args: True))
         if control == "exhausted":
             monkeypatch.setattr("auto_coder.pr_processor.check_pr_repair_exhaustion", lambda *_args: MagicMock(is_exhausted=True))
-        with patch("auto_coder.pr_processor._two_tier_gate_inputs", return_value=second_inputs):
+        from auto_coder.pr_processor import DraftPRRepairAuthority, _resolve_cloud_task_origin, draft_pr_repair_authority_scope
+
+        authority = None
+        if control == "bound_draft":
+            origin = _resolve_cloud_task_origin(REPO, data(), github).origin
+            assert origin is not None and origin.task_id == TASK
+            authority = DraftPRRepairAuthority(REPO, PR, "work-branch", NEXT, (9,), origin.provider, origin.task_id, origin.attribution_token)
+        with patch("auto_coder.pr_processor._two_tier_gate_inputs", return_value=second_inputs), draft_pr_repair_authority_scope(authority):
             if control == "crash_before_wire":
                 with patch("auto_coder.codex_cloud_client._save_pending_followups", side_effect=OSError("Controlled failure after durable operation claim")):
                     result = _delegate_cloud_review_thread_repair(REPO, data(), github, (old, new))
@@ -402,7 +410,7 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
                 result = _delegate_cloud_review_thread_repair(REPO, data(), github, (old, new))
             _delegate_cloud_review_thread_repair(REPO, data(), github, (old, new))
             _delegate_cloud_review_thread_repair(REPO, data(), github, (old, new))
-        expected = 2 if control in {"fresh", "alternate_first", "cross_lane_duplicate", "missing_run", "crash_after_wire", "remote_rejected", "accepted_bookkeeping", "ambiguous_bookkeeping"} else 1
+        expected = 2 if control in {"fresh", "bound_draft", "alternate_first", "cross_lane_duplicate", "missing_run", "crash_after_wire", "remote_rejected", "accepted_bookkeeping", "ambiguous_bookkeeping"} else 1
         assert wham.send_follow_up.call_count == expected, result
         assert sources(slots)[first_source] == old_scope
         if control.startswith("old_native_extra_"):
@@ -413,7 +421,7 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
         if control != "native_lost":
             current = json.loads(_codex_followup_state_path(REPO).read_text())
             assert all(current[key] == value for key, value in json.loads(old_native).items())
-        if control in {"fresh", "alternate_first", "cross_lane_duplicate", "missing_run"}:
+        if control in {"fresh", "bound_draft", "alternate_first", "cross_lane_duplicate", "missing_run"}:
             assert result.delivered
             prompt = wham.send_follow_up.call_args.kwargs["prompt"]
             assert SHARDS in prompt and COVERAGE not in prompt

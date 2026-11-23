@@ -112,8 +112,9 @@
         {
           "key": "python314",
           "name": "Python 3.14 compatibility",
-          "job_pattern": "Python 3\\.14 source quality and non-live tests \\(advisory\\)",
+          "job_pattern": "Python 3\\.14 (?:non-live tests \\(\\d+/\\d+\\)|source quality and (?:non-live tests \\(advisory\\)|complete test plan))",
           "test_step_pattern": "^Run complete non-live test selection$",
+          "require_test_step": true,
           "source_paths": [
             ".github/workflows/python-314-compatibility.yml",
             "tests/test_ci_uv_lock_policy.py",
