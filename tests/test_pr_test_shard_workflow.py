@@ -74,17 +74,29 @@ def _run_real_pytest_step(tmp_path: Path, assertion: str) -> subprocess.Complete
         "CI": "true",
         "REPO_NAME": "outliner-online/auto-coder",
         "HOME": str(tmp_path / "home"),
-        # The copied lock and project metadata describe this checkout exactly;
-        # reuse its already locked environment instead of syncing in the fixture.
-        "UV_PROJECT_ENVIRONMENT": str(ROOT / ".venv"),
     }
+    environment.pop("VIRTUAL_ENV", None)
+    uv_executable = next(str(Path(directory) / "uv") for directory in environment["PATH"].split(os.pathsep) if (Path(directory) / "uv").is_file())
+    sync = subprocess.Popen(
+        [uv_executable, "sync", "--locked", "--dev", "--extra", "test"],
+        cwd=tmp_path,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    sync_stdout, sync_stderr = sync.communicate(timeout=120)
+    assert sync.returncode == 0, sync_stdout + sync_stderr
+    # The workflow has just completed the locked sync represented above;
+    # prevent nested uv invocations from narrowing that prepared profile.
+    environment["UV_NO_SYNC"] = "1"
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", run],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
 
 
