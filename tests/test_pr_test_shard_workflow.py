@@ -46,7 +46,49 @@ def _run_step(tmp_path, group, test_script, timeout="0.25", grace="0.1"):
     )
 
 
-@pytest.mark.parametrize("group", [1, 2, 3, 4, 5, 6])
+def _run_real_pytest_step(tmp_path: Path, assertion: str) -> subprocess.CompletedProcess[str]:
+    """Run workflow -> supervisor -> real test.sh -> native pytest."""
+    tmp_path.mkdir()
+    run = _prepare_step(tmp_path, 1, "unused", timeout="10", grace="1")
+    scripts = tmp_path / "scripts"
+    shutil.copy(ROOT / "scripts/test.sh", scripts)
+    shutil.copytree(ROOT / "src", tmp_path / "src")
+    package = tmp_path / "src/auto_coder"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "git_info.py").write_text(
+        "def get_current_repo_name():\n    return 'outliner-online/auto-coder'\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    node_id = "tests/test_sample.py::test_outcome"
+    (tests / "test_sample.py").write_text(f"def test_outcome():\n    assert {assertion}\n", encoding="utf-8")
+    data = tests / "data"
+    (data / "pr-test-durations.json").write_text(f'{{"{node_id}": 1.0}}\n', encoding="utf-8")
+
+    # Excluding uv makes test.sh use its documented system-Python fallback;
+    # pytest itself and every production orchestration layer remain real.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for command in ("bash", "python3", "pytest"):
+        (bin_dir / command).symlink_to(shutil.which(command))
+    environment = {
+        **os.environ,
+        "PATH": str(bin_dir),
+        "CI": "true",
+        "REPO_NAME": "outliner-online/auto-coder",
+        "HOME": str(tmp_path / "home"),
+    }
+    return subprocess.run(
+        [str(bin_dir / "bash"), "--noprofile", "--norc", "-eo", "pipefail", "-c", run],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize("group", [1, 2, 3, 4])
 def test_production_step_passes_correct_shard_once(tmp_path, group):
     result = _run_step(
         tmp_path,
@@ -56,7 +98,7 @@ def test_production_step_passes_correct_shard_once(tmp_path, group):
 
     assert result.returncode == 0
     assert (tmp_path / "invocations").read_text().splitlines() == [
-        f"--ci-tests-only --splits 6 --group {group} --splitting-algorithm duration_based_chunks --durations-path pr-test-logs/shard-{group}/normalized-durations.json -m not browser and not opencode_live and not muse_live and not supervisor_integration -vv -o faulthandler_timeout=30"
+        f"--ci-tests-only --splits 4 --group {group} --splitting-algorithm duration_based_chunks --durations-path pr-test-logs/shard-{group}/normalized-durations.json -m not browser and not opencode_live and not muse_live and not supervisor_integration -vv -o faulthandler_timeout=30"
     ]
     assert "shard-output" in result.stdout
     assert (tmp_path / f"pr-test-logs/shard-{group}/attempt-1.stdout.log").exists()
@@ -76,6 +118,23 @@ def test_completed_nonzero_status_is_not_retried(tmp_path, status):
     assert (tmp_path / "invocations").read_text().splitlines() == ["invoked"]
     assert "ordinary failure" in result.stderr
     assert "starting retry" not in result.stderr
+
+
+def test_actual_pytest_assertion_propagates_without_retry_and_passing_control_passes(tmp_path):
+    passing = _run_real_pytest_step(tmp_path / "passing", "True")
+    assert passing.returncode == 0, passing.stdout + passing.stderr
+
+    failing = _run_real_pytest_step(tmp_path / "failing", "False")
+    assert failing.returncode != 0
+    assert "1 failed" in failing.stdout
+    assert "ordinary failure" in failing.stderr
+    assert "starting retry" not in failing.stderr
+    assert not (tmp_path / "failing/pr-test-logs/shard-1/attempt-2.stdout.log").exists()
+
+    aggregate = _workflow()["jobs"]["tests"]["steps"][0]["run"]
+    aggregate = aggregate.replace("${{ needs.lint.result }}", "success").replace("${{ needs.tests-shard.result }}", "failure")
+    aggregate_result = subprocess.run(["bash", "-c", aggregate], capture_output=True, text=True)
+    assert aggregate_result.returncode != 0
 
 
 def test_completed_failure_observed_after_deadline_is_not_a_timeout(tmp_path, monkeypatch):
@@ -395,7 +454,7 @@ def test_workflow_contract_and_aggregate_shell():
     assert workflow["permissions"] == {"contents": "read"}
     assert set(workflow["jobs"]) >= {"lint", "tests-shard", "tests"}
     shard = workflow["jobs"]["tests-shard"]
-    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4, 5, 6]}}
+    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4]}}
     test_step = next(step for step in shard["steps"] if step["name"].startswith("Run tests"))
     assert test_step["timeout-minutes"] == 24
     assert "--attempt-timeout 480" in test_step["run"]

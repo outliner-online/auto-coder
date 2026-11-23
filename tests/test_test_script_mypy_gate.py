@@ -534,7 +534,7 @@ def test_workflow_shard_reaches_real_test_script_without_weakening_default(fixtu
 
     expected = [
         "--splits",
-        "6",
+        "4",
         "--group",
         "2",
         "--splitting-algorithm",

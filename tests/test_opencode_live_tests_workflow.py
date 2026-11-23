@@ -87,7 +87,7 @@ def test_ordinary_pr_tests_workflow_budgets_preserved():
     pr_workflow = _workflow(PR_WORKFLOW)
     assert pr_workflow["name"] == "PR Tests"
     shard = pr_workflow["jobs"]["tests-shard"]
-    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4, 5, 6]}}
+    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4]}}
 
     test_step = next(s for s in shard["steps"] if s["name"].startswith("Run tests with coverage"))
     assert test_step["timeout-minutes"] == 24

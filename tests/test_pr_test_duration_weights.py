@@ -64,10 +64,10 @@ def _collect(directory: Path, snapshot: Path, group: int | None) -> list[str]:
 
 
 def test_real_plugin_partition_unknown_stale_and_empty_weights(tmp_path: Path) -> None:
-    (tmp_path / "test_sample.py").write_text("\n".join(f"def test_case_{i}(): pass" for i in range(24)))
+    (tmp_path / "test_sample.py").write_text("\n".join(f"def test_case_{i}(): pass" for i in range(8)))
     snapshot = tmp_path / "weights.json"
     names = _collect(tmp_path, snapshot, None)
-    assert len(names) == 24
+    assert len(names) == 8
 
     def groups(weights: dict[str, float]) -> list[list[str]]:
         snapshot.write_text(json.dumps(weights))
@@ -77,10 +77,10 @@ def test_real_plugin_partition_unknown_stale_and_empty_weights(tmp_path: Path) -
     assert baseline == groups({names[0]: 2.0, names[1]: 4.0, "removed.py::test_old": 10000.0})
     assert baseline == groups({names[0]: 2.0, names[1]: 4.0, **{name: 3.0 for name in names[2:]}})
     empty = groups({})
-    assert [len(group) for group in empty] == [4] * PR_TEST_SHARDS
+    assert [len(group) for group in empty] == [2] * PR_TEST_SHARDS
     snapshot.write_text(json.dumps({name: 0 for name in names}))
     zero = groups(_normalized_durations(snapshot))
-    assert [len(group) for group in zero] == [4] * PR_TEST_SHARDS
+    assert [len(group) for group in zero] == [2] * PR_TEST_SHARDS
     for partition in (baseline, empty, zero):
         assert Counter(names) == Counter(item for group in partition for item in group)
         assert sum(len(set(group)) for group in partition) == len(set().union(*map(set, partition)))

@@ -1,6 +1,6 @@
 # Duration-weighted PR test shards
 
-PR Tests uses six contiguous pytest-split groups and the
+PR Tests uses four contiguous pytest-split groups and the
 original test selection and within-group order. Before starting an attempt,
 `scripts/run_pr_test_shard.py` validates the reviewed duration snapshot at
 `tests/data/pr-test-durations.json`, floors zero durations to one millisecond,
@@ -29,3 +29,11 @@ Each attempt enables the native pytest timing recorder in an attempt-specific
 directory beneath the shard diagnostics artifact. This keeps setup, call and
 teardown phase evidence separate across the single timeout-only retry and makes
 like-for-like job comparisons possible without changing test outcomes.
+
+The six-shard experiment in PR run
+`https://github.com/outliner-online/auto-coder/actions/runs/45101592400` was
+inconclusive and was not adopted: it had no identically instrumented four-shard
+baseline and three candidate shards exhausted both timeout attempts. The
+production matrix therefore remains at four shards until comparable repeated
+measurements establish native-work dominance, independence, and an improvement
+beyond run-to-run variation.

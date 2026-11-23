@@ -25,7 +25,7 @@ KILL_CONFIRM_SECONDS = 2.0
 cancel_signal: int | None = None
 DURATION_SNAPSHOT = Path("tests/data/pr-test-durations.json")
 MIN_DURATION_SECONDS = 0.001
-PR_TEST_SHARDS = 6
+PR_TEST_SHARDS = 4
 
 
 def _duration_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
