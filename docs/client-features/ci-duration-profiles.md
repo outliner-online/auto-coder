@@ -160,3 +160,10 @@ GitHub, change CI required checks, or wire a scheduling algorithm. Consumers
 may use `nodes[exact_nodeid].p95_seconds` as an *optional measured estimate*
 and must retain their own unknown-node fallback, without treating a duration
 profile as a test-result cache.
+
+The complete-source planner uses a one-second estimate for a current node with
+neither native history nor an exact or same-file bootstrap estimate. This
+keeps large sets of new, usually fast parametrizations from overwhelming the
+measured long-test weights and collapsing those tests into one slow shard. The
+fallback affects assignment only: native collection remains the complete
+inventory, and receipts still verify every selected node exactly once.

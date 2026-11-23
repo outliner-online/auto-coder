@@ -350,7 +350,11 @@ def source_duration_estimates(
         # Lexical tie-break keeps the plan independent of input dictionary order.
         if prior is None or (cast(int, entry["estimated_ms"]), node) > (cast(int, prior["estimated_ms"]), cast(str, prior["nodeid"])):
             file_max[file_name] = entry
-    floor = max(5000, cold_start_fallback_ms)
+    # Unknown nodes should not outweigh the measured bootstrap inventory merely
+    # because a source revision added many fast parametrizations. The CLI's
+    # one-second cold-start default remains conservative while allowing
+    # measured long tests to form their own shards.
+    floor = max(1000, cold_start_fallback_ms)
     estimates: list[dict[str, object]] = []
     for node in inventory:
         if node in exact:
@@ -376,8 +380,8 @@ def _verify_source_estimates(semantic: dict[str, object], estimates: list[dict[s
         elif value.get("digest") is not None or not isinstance(value.get("reason"), str):
             raise ShardPlanError(f"{name} has invalid unavailable evidence")
     floor = _number(semantic.get("source_floor_ms"), "source_floor_ms")
-    if floor < 5000:
-        raise ShardPlanError("source floor is below five seconds")
+    if floor < 1000:
+        raise ShardPlanError("source floor is below one second")
     if len(estimates) != len(inventory):
         raise ShardPlanError("source estimate count differs from inventory")
     exact: dict[str, dict[str, object]] = {}
@@ -497,7 +501,7 @@ def build_plan(
     if duration_policy == SOURCE_POLICY:
         semantic["duration_policy"] = SOURCE_POLICY
         semantic["snapshot_source"] = snapshot_source
-        semantic["source_floor_ms"] = max(5000, cold_start_fallback_ms)
+        semantic["source_floor_ms"] = max(1000, cold_start_fallback_ms)
     return {"schema_version": PLAN_SCHEMA, "semantic": semantic, "digest_sha256": _digest(semantic), "origin": context.origin}
 
 
