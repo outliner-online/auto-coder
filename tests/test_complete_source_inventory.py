@@ -20,6 +20,7 @@ pytestmark = pytest.mark.usefixtures("_use_real_commands")
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "tests/data/complete-source-baseline-nodeids.txt.gz"
 PROVENANCE = ROOT / "tests/data/complete-source-baseline-nodeids.provenance.json"
+PYTHON_EXECUTABLE_CASE = "tests/test_management_containment_executable_aliases.py::test_absolute_alias_cannot_hide_resolved_dispatcher_family["
 
 
 def _baseline() -> tuple[str, ...]:
@@ -49,10 +50,18 @@ def _require_exact_current_inventory(collected: tuple[str, ...], planned: tuple[
 
 def _require_baseline_inventory(baseline: tuple[str, ...], collected: tuple[str, ...], planned: tuple[str, ...], executed: tuple[str, ...]) -> None:
     """Require every immutable baseline node once at each candidate boundary."""
-    expected = Counter(baseline)
+
+    def baseline_identity(node: str) -> str:
+        # pytest derives this parameter ID from sys.executable, whose checkout
+        # prefix differs between the captured baseline and a GitHub runner.
+        if node.startswith(PYTHON_EXECUTABLE_CASE) and node.endswith("/.venv/bin/python3]"):
+            return PYTHON_EXECUTABLE_CASE + "<python-executable>]"
+        return node
+
+    expected = Counter(map(baseline_identity, baseline))
     assert len(expected) == len(baseline)
     for candidate in (collected, planned, executed):
-        observed = Counter(candidate)
+        observed = Counter(map(baseline_identity, candidate))
         assert all(observed[node] == count for node, count in expected.items())
 
 
