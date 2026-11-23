@@ -47,6 +47,15 @@ def _require_exact_current_inventory(collected: tuple[str, ...], planned: tuple[
     assert Counter(assigned) == expected
 
 
+def _require_baseline_inventory(baseline: tuple[str, ...], collected: tuple[str, ...], planned: tuple[str, ...], executed: tuple[str, ...]) -> None:
+    """Require every immutable baseline node once at each candidate boundary."""
+    expected = Counter(baseline)
+    assert len(expected) == len(baseline)
+    for candidate in (collected, planned, executed):
+        observed = Counter(candidate)
+        assert all(observed[node] == count for node, count in expected.items())
+
+
 @pytest.mark.skipif(sys.version_info[:2] != (3, 12), reason="complete-source inventory is locked to Python 3.12")
 def test_production_complete_source_inventory_preserves_current_collection_exactly_once(tmp_path: Path) -> None:
     """Run the workflow planner and reject omission of a current-profile node."""
@@ -140,12 +149,19 @@ def test_production_complete_source_inventory_preserves_current_collection_exact
     assigned_union = tuple(node for shard in plan.shards for node in shard)
     _require_exact_current_inventory(current_inventory, plan.inventory, assigned_union)
 
-    # The historical inventory remains immutable comparison evidence for this
-    # change, but future legitimate additions, renames, and removals do not make
-    # the permanent current-revision oracle stale.
+    # The immutable source/profile inventory is the required lower bound. The
+    # current collection may add nodes, but neither the candidate plan nor the
+    # plan-derived native execution inventory may omit a baseline node.
     baseline = _baseline()
     assert any(node.startswith("tests/test_startup_pending_remote_errors.py::") for node in baseline)
-    protected = current_inventory[0]
-    without_protected_node = tuple(node for node in plan.inventory if node != protected)
+    _require_baseline_inventory(baseline, current_inventory, plan.inventory, assigned_union)
+
+    # Model the reported counterexample: the same baseline node disappears at
+    # collection, planning, and receipt-execution boundaries. Agreement among
+    # the reduced candidate views must not make that omission acceptable.
+    protected = baseline[0]
+    reduced_collection = tuple(node for node in current_inventory if node != protected)
+    reduced_plan = tuple(node for node in plan.inventory if node != protected)
+    reduced_executions = tuple(node for node in assigned_union if node != protected)
     with pytest.raises(AssertionError):
-        _require_exact_current_inventory(current_inventory, without_protected_node, assigned_union)
+        _require_baseline_inventory(baseline, reduced_collection, reduced_plan, reduced_executions)
