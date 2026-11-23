@@ -20,7 +20,6 @@ pytestmark = pytest.mark.usefixtures("_use_real_commands")
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "tests/data/complete-source-baseline-nodeids.txt.gz"
 PROVENANCE = ROOT / "tests/data/complete-source-baseline-nodeids.provenance.json"
-THIS_NODE = "tests/test_complete_source_inventory.py::test_production_complete_source_inventory_preserves_baseline_exactly_once"
 
 
 def _baseline() -> tuple[str, ...]:
@@ -40,14 +39,17 @@ def _baseline() -> tuple[str, ...]:
     return nodes
 
 
-def _require_exact_baseline(candidate: tuple[str, ...]) -> None:
-    expected = (*_baseline(), THIS_NODE)
-    assert Counter(candidate) == Counter(expected)
+def _require_exact_current_inventory(collected: tuple[str, ...], planned: tuple[str, ...], assigned: tuple[str, ...]) -> None:
+    """Require each independently collected current node once at both boundaries."""
+    expected = Counter(collected)
+    assert len(expected) == len(collected)
+    assert Counter(planned) == expected
+    assert Counter(assigned) == expected
 
 
 @pytest.mark.skipif(sys.version_info[:2] != (3, 12), reason="complete-source inventory is locked to Python 3.12")
-def test_production_complete_source_inventory_preserves_baseline_exactly_once(tmp_path: Path) -> None:
-    """Run the workflow planner and reject omission of any immutable baseline node."""
+def test_production_complete_source_inventory_preserves_current_collection_exactly_once(tmp_path: Path) -> None:
+    """Run the workflow planner and reject omission of a current-profile node."""
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     context = tmp_path / "context.json"
     plan_path = tmp_path / "plan.json"
@@ -81,6 +83,30 @@ def test_production_complete_source_inventory_preserves_baseline_exactly_once(tm
         check=False,
     )
     assert context_result.returncode == 0, context_result.stdout + context_result.stderr
+    collection_path = tmp_path / "independent-inventory.json"
+    collected = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "pytest",
+            "-p",
+            "scripts.ci_shard_plugin",
+            "--collect-only",
+            f"--ci-context={context.resolve()}",
+            f"--ci-collect-output={collection_path.resolve()}",
+            "-m",
+            "not opencode_live",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert collected.returncode == 0, collected.stdout + collected.stderr
+    current_inventory = tuple(json.loads(collection_path.read_text(encoding="utf-8"))["nodeids"])
     planned = subprocess.run(
         [
             "uv",
@@ -111,9 +137,15 @@ def test_production_complete_source_inventory_preserves_baseline_exactly_once(tm
     )
     assert planned.returncode == 0, planned.stdout + planned.stderr
     plan, _raw = read_plan(plan_path)
-    _require_exact_baseline(plan.inventory)
+    assigned_union = tuple(node for shard in plan.shards for node in shard)
+    _require_exact_current_inventory(current_inventory, plan.inventory, assigned_union)
 
-    protected = next(node for node in plan.inventory if node.startswith("tests/test_startup_pending_remote_errors.py::"))
+    # The historical inventory remains immutable comparison evidence for this
+    # change, but future legitimate additions, renames, and removals do not make
+    # the permanent current-revision oracle stale.
+    baseline = _baseline()
+    assert any(node.startswith("tests/test_startup_pending_remote_errors.py::") for node in baseline)
+    protected = next(node for node in current_inventory if node.startswith("tests/test_startup_pending_remote_errors.py::"))
     without_protected_node = tuple(node for node in plan.inventory if node != protected)
     with pytest.raises(AssertionError):
-        _require_exact_baseline(without_protected_node)
+        _require_exact_current_inventory(current_inventory, without_protected_node, assigned_union)
