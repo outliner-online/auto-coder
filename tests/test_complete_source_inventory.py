@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 from collections import Counter
 from pathlib import Path
 
@@ -53,7 +52,9 @@ def test_production_complete_source_inventory_preserves_baseline_exactly_once(tm
     environment = {**os.environ, "AUTO_CODER_REQUIRE_BROWSER": "1", "AUTO_CODER_IMMEDIATE_TEST_FAILURES": "1"}
     context_result = subprocess.run(
         [
-            sys.executable,
+            "uv",
+            "run",
+            "python",
             "scripts/source_ci_runtime.py",
             "--log-dir",
             str(tmp_path / "context-logs"),
@@ -80,7 +81,9 @@ def test_production_complete_source_inventory_preserves_baseline_exactly_once(tm
     assert context_result.returncode == 0, context_result.stdout + context_result.stderr
     planned = subprocess.run(
         [
-            sys.executable,
+            "uv",
+            "run",
+            "python",
             "scripts/plan_ci_shards.py",
             "--context",
             str(context),
