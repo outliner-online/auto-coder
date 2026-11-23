@@ -20,7 +20,7 @@ def _workflow():
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
 
-def _prepare_step(tmp_path, group, test_script, timeout="0.25", grace="0.1"):
+def _prepare_step(tmp_path, group, test_script, timeout="0.25", grace="0.1", *, retain_workflow_uv=False):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     shutil.copy(ROOT / "scripts/run_pr_test_shard.py", scripts)
@@ -31,7 +31,8 @@ def _prepare_step(tmp_path, group, test_script, timeout="0.25", grace="0.1"):
     run = next(step["run"] for step in _workflow()["jobs"]["tests-shard"]["steps"] if step["name"].startswith("Run tests with coverage"))
     run = re.sub(r"--attempt-timeout\s+\S+", f"--attempt-timeout {timeout}", run)
     run = re.sub(r"--termination-grace\s+\S+", f"--termination-grace {grace}", run)
-    return run.replace("${{ matrix.group }}", str(group)).replace("uv run python", f"{shutil.which('python')} ")
+    run = run.replace("${{ matrix.group }}", str(group))
+    return run if retain_workflow_uv else run.replace("uv run python", f"{shutil.which('python')} ")
 
 
 def _run_step(tmp_path, group, test_script, timeout="0.25", grace="0.1"):
@@ -49,9 +50,12 @@ def _run_step(tmp_path, group, test_script, timeout="0.25", grace="0.1"):
 def _run_real_pytest_step(tmp_path: Path, assertion: str) -> subprocess.CompletedProcess[str]:
     """Run workflow -> supervisor -> real test.sh -> native pytest."""
     tmp_path.mkdir()
-    run = _prepare_step(tmp_path, 1, "unused", timeout="10", grace="1")
+    run = _prepare_step(tmp_path, 1, "unused", timeout="10", grace="1", retain_workflow_uv=True)
     scripts = tmp_path / "scripts"
     shutil.copy(ROOT / "scripts/test.sh", scripts)
+    shutil.copy(ROOT / "pyproject.toml", tmp_path)
+    shutil.copy(ROOT / "uv.lock", tmp_path)
+    shutil.copytree(ROOT / "build_backend", tmp_path / "build_backend")
     shutil.copytree(ROOT / "src", tmp_path / "src")
     package = tmp_path / "src/auto_coder"
     (package / "__init__.py").write_text("", encoding="utf-8")
@@ -65,21 +69,17 @@ def _run_real_pytest_step(tmp_path: Path, assertion: str) -> subprocess.Complete
     data = tests / "data"
     (data / "pr-test-durations.json").write_text(f'{{"{node_id}": 1.0}}\n', encoding="utf-8")
 
-    # Excluding uv makes test.sh use its documented system-Python fallback;
-    # pytest itself and every production orchestration layer remain real.
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for command in ("bash", "python3", "pytest"):
-        (bin_dir / command).symlink_to(shutil.which(command))
     environment = {
         **os.environ,
-        "PATH": str(bin_dir),
         "CI": "true",
         "REPO_NAME": "outliner-online/auto-coder",
         "HOME": str(tmp_path / "home"),
+        # The copied lock and project metadata describe this checkout exactly;
+        # reuse its already locked environment instead of syncing in the fixture.
+        "UV_PROJECT_ENVIRONMENT": str(ROOT / ".venv"),
     }
     return subprocess.run(
-        [str(bin_dir / "bash"), "--noprofile", "--norc", "-eo", "pipefail", "-c", run],
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", run],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -121,6 +121,7 @@ def test_completed_nonzero_status_is_not_retried(tmp_path, status):
 
 def test_actual_pytest_assertion_propagates_without_retry_and_passing_control_passes(tmp_path):
     passing = _run_real_pytest_step(tmp_path / "passing", "True")
+    assert "uv run python scripts/run_pr_test_shard.py" in passing.args[-1]
     assert passing.returncode == 0, passing.stdout + passing.stderr
 
     failing = _run_real_pytest_step(tmp_path / "failing", "False")
@@ -131,9 +132,14 @@ def test_actual_pytest_assertion_propagates_without_retry_and_passing_control_pa
     assert not (tmp_path / "failing/pr-test-logs/shard-1/attempt-2.stdout.log").exists()
 
     aggregate = _workflow()["jobs"]["tests"]["steps"][0]["run"]
-    aggregate = aggregate.replace("${{ needs.lint.result }}", "success").replace("${{ needs.tests-shard.result }}", "failure")
-    aggregate_result = subprocess.run(["bash", "-c", aggregate], capture_output=True, text=True)
-    assert aggregate_result.returncode != 0
+
+    def run_aggregate(shard: subprocess.CompletedProcess[str]) -> subprocess.CompletedProcess[str]:
+        shard_conclusion = "success" if shard.returncode == 0 else "failure"
+        command = aggregate.replace("${{ needs.lint.result }}", "success").replace("${{ needs.tests-shard.result }}", shard_conclusion)
+        return subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+
+    assert run_aggregate(passing).returncode == 0
+    assert run_aggregate(failing).returncode != 0
 
 
 def test_completed_failure_observed_after_deadline_is_not_a_timeout(tmp_path, monkeypatch):
