@@ -1501,6 +1501,50 @@ handler for both closing directives and branch markers, checking incomplete
 recovery, retained capacity, and successful membership discovery on retry.
 Run `bash scripts/test.sh tests/test_pending_work_resumption.py tests/test_implementation_slots.py`.
 
+The non-throttle startup error regression additionally enters the actual
+`start_automation` lifecycle, production ownership discovery, strict enumeration,
+registered startup handler and durable scheduler using controlled HTTP 404/503,
+429 and secondary-limit 403 responses. Non-throttle observations retain the
+existing `evaluation_failed` operational block without spending throttle retries;
+the startup warning truthfully reports no automatic retry and safe operator
+guidance. `pending-work list` retains the sanitized classification/status in
+`last_error`; the existing dashboard pending-work snapshot reports the blocked
+reason and zero deadline. The reachable dashboard never implies that startup is
+complete or that occupied capacity was released. Available and malformed-page
+controls preserve the success and fail-closed paths, and the official selected
+retry restores startup after correction without altering another obligation.
+These are repository lifecycle diagnostics, so no entity trace emission, origin,
+stage, outcome or schema changes are needed. Run
+`bash scripts/test.sh tests/test_startup_pending_remote_errors.py tests/test_github_pending_work.py`.
+
+The same lifecycle regression now reopens retained startup rows before boot:
+remote/authentication/forbidden/indeterminate/exhausted blocks and future
+deadlines send no new request merely because the controller restarted. Due,
+interrupted and officially selected work still reaches the registered recovery
+handler without duplicate enumeration, including a barrier-controlled completion
+during the initial pending-row read. The last permitted throttle attempt retains
+the prior count and exhausts without another automatic attempt. Existing status,
+occupied capacity and startup warnings remain the repository-level evidence;
+there is no new entity trace or dashboard schema. Controlled 503 responses with
+ordinary `errors` and Retry-After now stay `remote_error` in the existing request
+diagnostic event rather than claiming secondary throttling. Successful-HTTP
+GraphQL throttle and true HTTP 403/429 controls are in
+`tests/test_github_request_outcomes.py`.
+
+The due and selected-malformed cases in
+`tests/test_startup_pending_remote_errors.py` drive an actual HTTP-200 invalid
+listing through the strict reader, registered startup handler, scheduler and
+durable store. Repeated due scans and generic wakes send no further requests
+after the same obligation becomes `evaluation_failed`; startup remains
+incomplete, worker lanes stay closed and capacity remains owned. The HTTP
+diagnostic correctly remains `success`, while the semantic pending-work block
+keeps the unfinished effect and throttle count with a zero deadline and safe
+operator guidance. Correction plus the official selected retry completes a fresh
+enumeration. Fresh-inline invalid listings still propagate; handler controls in
+`tests/test_worker_startup_failure.py` prove that unrelated implementation,
+storage, transport and governor errors retain their existing paths. No new
+event schema, entity execution or dashboard projection is introduced.
+
 ## Codex quota transport
 
 Codex quota reads use the app-server account API. This transport change does not

@@ -185,7 +185,7 @@ from .test_log_utils import extract_important_errors
 from .test_result import TestResult
 from .trace_logger import get_trace_logger
 from .update_manager import check_for_updates_and_restart
-from .util.gh_cache import IMPLEMENTATION_READY_LABEL, GitHubClient, InvalidSubIssueRelationshipError, get_ghapi_client, is_implementation_ready, parse_parent_issue_number, parse_parent_issue_url_number, resolve_authoritative_item_type
+from .util.gh_cache import IMPLEMENTATION_READY_LABEL, GitHubClient, InvalidOpenEntitiesObservation, InvalidSubIssueRelationshipError, get_ghapi_client, is_implementation_ready, parse_parent_issue_number, parse_parent_issue_url_number, resolve_authoritative_item_type
 from .util.github_action import check_and_handle_closed_state, get_github_actions_logs_from_url, is_item_closed_on_github
 from .util.github_cache import get_github_cache
 from .util.github_request_outcome import DeliveryCertainty, GitHubApiOutcome, GitHubReadCancelled, GitHubRequestError, cancel_github_reads_when, configure_github_request_boundary, is_issue_resource_read
@@ -408,6 +408,11 @@ class _StartupReconciliationHandler:
             asyncio.run_coroutine_threadsafe(engine._attempt_startup_reconciliation(self._repo_name), loop).result()
         except GitHubRequestError as exc:
             return StageOutcome(error=exc)
+        except InvalidOpenEntitiesObservation:
+            # Only explicit enumeration validation failures become this block;
+            # unrelated defects and operational errors keep their own paths.
+            logger.error("Startup GitHub enumeration for {} returned invalid or incomplete observations; retaining an evaluation-failed operational block", self._repo_name)
+            return StageOutcome(blocked_reason=PendingReason.EVALUATION_FAILED, blocked_error="Startup GitHub enumeration returned invalid or incomplete observations; inspect the response, correct the cause, then use pending-work retry for this obligation.")
         assert engine._startup_reconciliation_event is not None
         loop.call_soon_threadsafe(engine._startup_reconciliation_event.set)
         return StageOutcome(completed_effects=(STARTUP_RECONCILIATION_EFFECT,))
@@ -3260,13 +3265,16 @@ class AutomationEngine:
     async def _perform_startup_reconciliation(self, repo_name: str) -> None:
         """Complete startup recovery, retrying governed admission failures durably.
 
-        The first attempt runs inline. A ``GitHubRequestError`` -- a local
-        admission deferral or an actual GitHub throttle, authentication, or
-        forbidden response -- does not terminate the daemon: the attempt is
-        retained as a durable pending-work obligation with a stable
-        repository-scoped identity (stable across restarts, since it is keyed
-        only by repository and stage) and retried by the already-running
-        pending-work scheduler, independent of the ordinary worker pool. This
+        A fresh cycle's first attempt runs inline. A retained cycle resumes only
+        through the scheduler, preserving its deadline and operational block.
+        A ``GitHubRequestError`` -- a local
+        admission deferral or a provider failure -- does not terminate the
+        daemon: the attempt is retained as a durable pending-work obligation
+        with a stable repository-scoped identity (stable across restarts, since it is keyed
+        only by repository and stage). Only admission deferrals and actual
+        throttles are retried automatically by the already-running pending-work
+        scheduler, independent of the ordinary worker pool. Operational blocks
+        require a selected operator retry after correcting the cause. This
         method then waits for that obligation to resolve -- or for shutdown --
         without blocking the event loop, so webhook receipt, status, and
         graceful shutdown remain responsive while recovery is incomplete. Any
@@ -3276,17 +3284,30 @@ class AutomationEngine:
         self.dependency_observations = DependencyObservationCache()
         identity = WorkIdentity(repo_name, "startup", STARTUP_RECONCILIATION_STAGE)
         try:
-            await self._attempt_startup_reconciliation(repo_name)
-            # A prior process may have left this identity retained (waiting on
-            # a not-yet-due retry, or blocked on an operational failure) before
-            # this fresh inline attempt succeeded outright; clear it so the
-            # scheduler never repeats a full enumeration for already-completed
-            # recovery merely because that old obligation's deadline arrives.
-            await asyncio.to_thread(get_pending_work_store(repo_name).supersede, identity)
-            return
+            retained = await asyncio.to_thread(get_pending_work_store(repo_name).get, identity)
+            if retained is not None:
+                logger.warning("Startup reconciliation for {} waits for its retained {} obligation (not_before={}); {}", repo_name, retained.reason.value, retained.not_before, retained.last_error)
+                self._wake_pending_work()
+            elif self._startup_reconciliation_event is None or not self._startup_reconciliation_event.is_set():
+                # Recovery may have completed and retired the row while get()
+                # was in flight. Its success event forbids a duplicate inline
+                # scan; otherwise absence permits the first fresh attempt.
+                await self._attempt_startup_reconciliation(repo_name)
+                await asyncio.to_thread(get_pending_work_store(repo_name).supersede, identity)
+                return
         except GitHubRequestError as exc:
             obligation = await asyncio.to_thread(get_pending_work_store(repo_name).defer, identity, exc, (STARTUP_RECONCILIATION_EFFECT,))
-            logger.warning(f"Startup GitHub reconciliation for {repo_name} deferred ({obligation.reason.value}); " f"the daemon stays up and the pending-work scheduler will retry automatically " f"(next eligible at {obligation.not_before})")
+            if obligation.automatically_retryable:
+                logger.warning("Startup GitHub reconciliation for {} deferred ({}); the daemon stays up and the pending-work scheduler will retry automatically (next eligible at {})", repo_name, obligation.reason.value, obligation.not_before)
+            else:
+                logger.warning(
+                    "Startup GitHub reconciliation for {} blocked ({}); the daemon stays up with startup incomplete; no automatic retry is scheduled. {} Use pending-work retry --repository {} --entity startup --stage {} after correcting the cause.",
+                    repo_name,
+                    obligation.reason.value,
+                    obligation.last_error,
+                    repo_name,
+                    STARTUP_RECONCILIATION_STAGE,
+                )
             self._wake_pending_work()
         except LocalJobStoreUnavailable as exc:
             await asyncio.to_thread(
