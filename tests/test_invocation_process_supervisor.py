@@ -1,7 +1,7 @@
 import errno
 import fcntl
 import os
-import select
+import selectors
 import signal
 import subprocess
 import sys
@@ -25,6 +25,24 @@ from src.auto_coder.invocation_process_supervisor import (
     WriterState,
 )
 from tests.test_local_conflict_repair_job import sparse_thread_switches  # noqa: F401
+
+
+def _descriptor_is_writable(descriptor: int) -> bool:
+    """Probe a pipe without select(2)'s platform descriptor-number ceiling."""
+    with selectors.DefaultSelector() as selector:
+        selector.register(descriptor, selectors.EVENT_WRITE)
+        return bool(selector.select(0))
+
+
+def test_descriptor_writability_supports_fd_above_select_ceiling() -> None:
+    read_descriptor, write_descriptor = os.pipe()
+    high_descriptor = fcntl.fcntl(write_descriptor, fcntl.F_DUPFD, 2048)
+    try:
+        assert _descriptor_is_writable(high_descriptor)
+    finally:
+        os.close(read_descriptor)
+        os.close(write_descriptor)
+        os.close(high_descriptor)
 
 
 class ProcessGroupOwner:
@@ -264,7 +282,7 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
             assert writer_armed.wait(10), "prompt submission blocked the supervisor"
             assert polls[0].wait(10), "supervisor never checked its deadline"
             guard = time.monotonic() + 10
-            while not ready.exists() or select.select([], [descriptor], [], 0)[1]:
+            while not ready.exists() or _descriptor_is_writable(descriptor):
                 assert children[0].poll() is None
                 assert time.monotonic() < guard, "unread stdin pipe never filled"
                 threading.Event().wait(0.01)
@@ -274,7 +292,7 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
             assert polls[1].wait(10), "supervisor did not recheck the deadline"
             assert supervisor.state("invocation-one") is WriterState.ACTIVE
             assert children[0].poll() is None and writers[0].is_alive()
-            assert not select.select([], [descriptor], [], 0)[1]
+            assert not _descriptor_is_writable(descriptor)
             assert stops == []
             clock.now = budget
             releases[1].set()

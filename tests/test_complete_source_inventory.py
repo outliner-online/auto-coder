@@ -145,7 +145,7 @@ def test_production_complete_source_inventory_preserves_current_collection_exact
     # the permanent current-revision oracle stale.
     baseline = _baseline()
     assert any(node.startswith("tests/test_startup_pending_remote_errors.py::") for node in baseline)
-    protected = next(node for node in current_inventory if node.startswith("tests/test_startup_pending_remote_errors.py::"))
+    protected = current_inventory[0]
     without_protected_node = tuple(node for node in plan.inventory if node != protected)
     with pytest.raises(AssertionError):
         _require_exact_current_inventory(current_inventory, without_protected_node, assigned_union)
