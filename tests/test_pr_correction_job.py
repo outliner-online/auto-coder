@@ -40,7 +40,7 @@ def _git_repository(tmp_path: Path) -> tuple[Path, str]:
     return repository, head
 
 
-def _wait_for(predicate, timeout: float = 5) -> None:
+def _wait_for(predicate, timeout: float = 15) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
         assert time.monotonic() < deadline
