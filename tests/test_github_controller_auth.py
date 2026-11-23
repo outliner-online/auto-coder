@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from auto_coder.github_controller_auth import ControllerAuthError, select_controller_auth
+from auto_coder.util.github_request_outcome import configure_github_request_boundary
 
 REPO = "owner/project"
 
@@ -329,7 +330,7 @@ def test_transport_failure_has_sanitized_exception_graph_and_log(tmp_path: Path)
 
     from loguru import logger
 
-    sentinel = "DISTINCTIVE-TRANSPORT-SENTINEL"
+    sentinel = "token=DISTINCTIVE-TRANSPORT-SENTINEL"
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise RuntimeError(sentinel)
@@ -411,3 +412,68 @@ def test_incomplete_mint_rejects_unproven_fallback_total(tmp_path: Path, total_c
         assert captured.value.category == "broader_or_unproven"
         assert mint_count == [expected_count]
         assert listing_count == [expected_count]
+
+
+def test_app_authentication_uses_shared_request_boundary(tmp_path: Path) -> None:
+    admitted = []
+    observed = []
+    sends = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sends.append(request.url.path)
+        if request.url.path == "/app":
+            return httpx.Response(200, json={"id": 123, "slug": "controller"})
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 456})
+        return httpx.Response(200, json={"token": "minted", "expires_at": "2027-01-15T08:02:00Z", "permissions": {}, "repository_selection": "selected", "repositories": [{"full_name": REPO}]})
+
+    configure_github_request_boundary(lambda context: (admitted.append(context), False)[1], observed.append)
+    try:
+        with pytest.raises(ControllerAuthError):
+            app_provider(tmp_path, handler).credential_for(REPO, {})
+        assert sends == []
+        assert len(admitted) == len(observed) == 1
+        admitted.clear()
+        observed.clear()
+        configure_github_request_boundary(lambda context: admitted.append(context) or True, observed.append)
+        credential = app_provider(tmp_path, handler).credential_for(REPO, {})
+    finally:
+        configure_github_request_boundary()
+    assert credential.token == "minted"
+    assert [context.subsystem for context in admitted] == ["controller-auth"] * 3
+    assert [context.endpoint_template for context in admitted] == ["/app", "/repos/owner/project/installation", "/app/installations/{id}/access_tokens"]
+    assert [outcome.context.endpoint_template for outcome in observed] == [context.endpoint_template for context in admitted]
+
+
+@pytest.mark.parametrize("failure_stage", ["identity", "grant"])
+def test_diagnostic_traceback_does_not_expose_wire_credentials(tmp_path: Path, failure_stage: str) -> None:
+    import io
+
+    from loguru import logger
+
+    observed_jwt = [""]
+    minted_secret = "DISTINCTIVE-MINTED-TOKEN"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app":
+            observed_jwt[0] = request.headers["Authorization"].removeprefix("Bearer ")
+            if failure_stage == "identity":
+                return httpx.Response(503, json={"message": "unavailable"})
+            return httpx.Response(200, json={"id": 123, "slug": "controller"})
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 456})
+        return httpx.Response(200, json={"token": minted_secret, "expires_at": "2027-01-15T08:02:00Z", "permissions": {}, "repository_selection": "all"})
+
+    output = io.StringIO()
+    sink = logger.add(output, format="{message}", backtrace=True, diagnose=True)
+    try:
+        with pytest.raises(ControllerAuthError) as captured:
+            app_provider(tmp_path, handler).credential_for(REPO, {})
+        logger.opt(exception=captured.value).error("controller authentication unavailable")
+    finally:
+        logger.remove(sink)
+    rendered = output.getvalue()
+    assert observed_jwt[0]
+    assert observed_jwt[0] not in rendered
+    assert minted_secret not in rendered
+    assert captured.value.stage in {"github_api", "repository_grant"}

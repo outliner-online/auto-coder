@@ -18,6 +18,7 @@ import jwt
 
 from .auth_utils import get_github_token
 from .llm_backend_config import deep_merge_config_dict, resolve_repo_override_path
+from .util.github_request_outcome import instrument_github_client
 
 
 class ControllerAuthError(RuntimeError):
@@ -159,6 +160,7 @@ class GitHubAppControllerAuth:
 
     def _jwt(self) -> str:
         failed = False
+        key = ""
         try:
             key = self.config.private_key_path.read_text()
             now = int(self._clock())
@@ -166,6 +168,8 @@ class GitHubAppControllerAuth:
         except Exception:
             failed = True
             encoded = ""
+        finally:
+            key = ""
         if failed:
             raise ControllerAuthError("private_key", "unavailable_or_invalid")
         return encoded
@@ -182,15 +186,20 @@ class GitHubAppControllerAuth:
             failed = True
             body = {}
         if failed:
+            token = ""
+            response = httpx.Response(599)
             raise ControllerAuthError("github_api", "rejected_or_malformed")
         return body
 
     def _verify_identity(self, app_jwt: str) -> ControllerIdentity:
-        body = self._request("GET", "/app", app_jwt)
-        app_id, slug = body.get("id"), body.get("slug")
-        if type(app_id) is not int or app_id <= 0 or app_id != self.config.app_id or not isinstance(slug, str) or not slug.strip():
-            raise ControllerAuthError("app_identity", "missing_or_mismatched")
-        return ControllerIdentity(f"{slug}[bot]", app_id=app_id)
+        try:
+            body = self._request("GET", "/app", app_jwt)
+            app_id, slug = body.get("id"), body.get("slug")
+            if type(app_id) is not int or app_id <= 0 or app_id != self.config.app_id or not isinstance(slug, str) or not slug.strip():
+                raise ControllerAuthError("app_identity", "missing_or_mismatched")
+            return ControllerIdentity(f"{slug}[bot]", app_id=app_id)
+        finally:
+            app_jwt = ""
 
     @staticmethod
     def _permissions_sufficient(granted: object, required: tuple[tuple[str, str], ...]) -> bool:
@@ -202,44 +211,69 @@ class GitHubAppControllerAuth:
     def credential_for(self, repo_name: str, required_permissions: Mapping[str, str]) -> ControllerCredential:
         self._bound(repo_name)
         scope = tuple(sorted((str(k), str(v)) for k, v in required_permissions.items()))
-        with self._lock:
-            if self._credential and self._credential.permissions == scope and self._credential.expires_at and self._credential.expires_at.timestamp() - self._clock() > 60:
-                return self._credential
-            app_jwt = self._jwt()
-            self._identity = self._verify_identity(app_jwt)
-            installation = self._request("GET", f"/repos/{repo_name}/installation", app_jwt)
-            installation_id = installation.get("id")
-            if type(installation_id) is not int or installation_id <= 0:
-                raise ControllerAuthError("installation")
-            minted = self._request("POST", f"/app/installations/{installation_id}/access_tokens", app_jwt, json_body={"repositories": [repo_name.split("/", 1)[1]], "permissions": dict(scope)})
-            token, expires_raw = minted.get("token"), minted.get("expires_at")
-            try:
-                expires = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
-            except ValueError:
-                expires = None
-            if expires is None or expires.tzinfo is None or expires.utcoffset() is None:
-                raise ControllerAuthError("token", "invalid_expiry")
-            expires = expires.astimezone(timezone.utc)
-            if not isinstance(token, str) or not token or expires.timestamp() - self._clock() <= 60 or not self._permissions_sufficient(minted.get("permissions"), scope):
-                raise ControllerAuthError("token", "invalid_or_insufficient")
-            selection = minted.get("repository_selection")
-            if selection is not None and selection != "selected":
-                raise ControllerAuthError("repository_grant", "contradictory")
-            if "repositories" in minted:
-                repositories = minted["repositories"]
-                if minted.get("repository_selection") != "selected" or not isinstance(repositories, list) or len(repositories) != 1 or not isinstance(repositories[0], dict) or repositories[0].get("full_name") != repo_name:
+        app_jwt = ""
+        token = ""
+        minted: dict = {}
+        try:
+            return self._credential_for_locked(repo_name, scope)
+        finally:
+            # Traceback diagnostics may inspect frame locals. Never retain wire
+            # credentials or response bodies in a failing public frame.
+            app_jwt = ""
+            token = ""
+            minted = {}
+
+    def _credential_for_locked(self, repo_name: str, scope: tuple[tuple[str, str], ...]) -> ControllerCredential:
+        app_jwt = ""
+        token: object = ""
+        minted: dict = {}
+        installation: dict = {}
+        listing: dict = {}
+        try:
+            with self._lock:
+                if self._credential and self._credential.permissions == scope and self._credential.expires_at and self._credential.expires_at.timestamp() - self._clock() > 60:
+                    return self._credential
+                app_jwt = self._jwt()
+                self._identity = self._verify_identity(app_jwt)
+                installation = self._request("GET", f"/repos/{repo_name}/installation", app_jwt)
+                installation_id = installation.get("id")
+                if type(installation_id) is not int or installation_id <= 0:
+                    raise ControllerAuthError("installation")
+                minted = self._request("POST", f"/app/installations/{installation_id}/access_tokens", app_jwt, json_body={"repositories": [repo_name.split("/", 1)[1]], "permissions": dict(scope)})
+                token, expires_raw = minted.get("token"), minted.get("expires_at")
+                try:
+                    expires = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
+                except ValueError:
+                    expires = None
+                if expires is None or expires.tzinfo is None or expires.utcoffset() is None:
+                    raise ControllerAuthError("token", "invalid_expiry")
+                expires = expires.astimezone(timezone.utc)
+                if not isinstance(token, str) or not token or expires.timestamp() - self._clock() <= 60 or not self._permissions_sufficient(minted.get("permissions"), scope):
+                    raise ControllerAuthError("token", "invalid_or_insufficient")
+                selection = minted.get("repository_selection")
+                if selection is not None and selection != "selected":
                     raise ControllerAuthError("repository_grant", "contradictory")
-            else:
-                listing = self._request("GET", "/installation/repositories?per_page=100", token)
-                repos = listing.get("repositories")
-                total_count = listing.get("total_count")
-                if type(total_count) is not int or total_count != 1 or not isinstance(repos, list) or len(repos) != 1 or not isinstance(repos[0], dict) or repos[0].get("full_name") != repo_name:
-                    raise ControllerAuthError("repository_grant", "broader_or_unproven")
-            if expires.timestamp() - self._clock() <= 60:
-                raise ControllerAuthError("token", "insufficient_lifetime")
-            authority = hashlib.sha256(json.dumps(["app", self.api_origin, self.config.app_id, installation_id, repo_name, scope]).encode()).hexdigest()
-            self._credential = ControllerCredential(token, "app", self.api_origin, repo_name, scope, authority, expires, self.config.app_id, installation_id, uuid.uuid4().hex)
-            return self._credential
+                if "repositories" in minted:
+                    repositories = minted["repositories"]
+                    if minted.get("repository_selection") != "selected" or not isinstance(repositories, list) or len(repositories) != 1 or not isinstance(repositories[0], dict) or repositories[0].get("full_name") != repo_name:
+                        raise ControllerAuthError("repository_grant", "contradictory")
+                else:
+                    listing = self._request("GET", "/installation/repositories?per_page=100", token)
+                    repos = listing.get("repositories")
+                    total_count = listing.get("total_count")
+                    if type(total_count) is not int or total_count != 1 or not isinstance(repos, list) or len(repos) != 1 or not isinstance(repos[0], dict) or repos[0].get("full_name") != repo_name:
+                        raise ControllerAuthError("repository_grant", "broader_or_unproven")
+                if expires.timestamp() - self._clock() <= 60:
+                    raise ControllerAuthError("token", "insufficient_lifetime")
+                authority = hashlib.sha256(json.dumps(["app", self.api_origin, self.config.app_id, installation_id, repo_name, scope]).encode()).hexdigest()
+                self._credential = ControllerCredential(token, "app", self.api_origin, repo_name, scope, authority, expires, self.config.app_id, installation_id, uuid.uuid4().hex)
+                return self._credential
+        finally:
+            app_jwt = ""
+            token = ""
+            minted = {}
+            installation = {}
+            listing = {}
 
     def identity_for(self, repo_name: str) -> ControllerIdentity:
         self._bound(repo_name)
@@ -258,7 +292,7 @@ def select_controller_auth(repo_name: str, *, provided_token: Optional[str] = No
     """Select App mode when configured, otherwise preserve personal-token precedence."""
     base_home = home or Path.home()
     config = _load_controller_config(repo_name, config_path, base_home)
-    transport = client or httpx.Client(timeout=30)
+    transport = instrument_github_client(client or httpx.Client(timeout=30), subsystem="controller-auth", api_origin=api_origin)
     if config is not None:
         return GitHubAppControllerAuth(repo_name, config, transport, api_origin, clock)
     token = provided_token or get_github_token()
