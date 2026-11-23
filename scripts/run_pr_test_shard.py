@@ -25,6 +25,7 @@ KILL_CONFIRM_SECONDS = 2.0
 cancel_signal: int | None = None
 DURATION_SNAPSHOT = Path("tests/data/pr-test-durations.json")
 MIN_DURATION_SECONDS = 0.001
+PR_TEST_SHARDS = 6
 
 
 def _duration_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -174,7 +175,7 @@ def _run_attempt(group: int, attempt: int, timeout: float, grace: float, log_dir
     command = ["bash", "scripts/test.sh"]
     if ci_tests_only:
         command.append("--ci-tests-only")
-    command.extend(["--splits", "4", "--group", str(group), "--splitting-algorithm", "duration_based_chunks", "--durations-path", str(durations), "-m", "not browser and not opencode_live and not muse_live and not supervisor_integration", "-vv", "-o", "faulthandler_timeout=30"])
+    command.extend(["--splits", str(PR_TEST_SHARDS), "--group", str(group), "--splitting-algorithm", "duration_based_chunks", "--durations-path", str(durations), "-m", "not browser and not opencode_live and not muse_live and not supervisor_integration", "-vv", "-o", "faulthandler_timeout=30"])
     supervisor_log = log_dir / f"attempt-{attempt}.supervisor.log"
     sink = logger.add(
         supervisor_log,
@@ -192,11 +193,16 @@ def _run_attempt(group: int, attempt: int, timeout: float, grace: float, log_dir
         logger.remove(sink)
         return "infrastructure"
     try:
+        environment = os.environ.copy()
+        # Keep native pytest phase evidence with the existing per-attempt
+        # diagnostics. A distinct directory separates a timeout from its retry.
+        environment["AUTO_CODER_CI_TIMING_DIR"] = str(log_dir / f"attempt-{attempt}-timing")
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            env=environment,
         )
     except OSError as exc:
         logger.error("Attempt {} infrastructure failure while launching: {}", attempt, exc)
@@ -277,7 +283,7 @@ def _run_attempt(group: int, attempt: int, timeout: float, grace: float, log_dir
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--group", type=int, choices=range(1, 5), required=True)
+    parser.add_argument("--group", type=int, choices=range(1, PR_TEST_SHARDS + 1), required=True)
     parser.add_argument("--attempt-timeout", type=float, default=360)
     parser.add_argument("--termination-grace", type=float, default=10)
     parser.add_argument("--max-attempts", type=int, default=2, choices=(2,))

@@ -46,20 +46,21 @@ def _run_step(tmp_path, group, test_script, timeout="0.25", grace="0.1"):
     )
 
 
-@pytest.mark.parametrize("group", [1, 2, 3, 4])
+@pytest.mark.parametrize("group", [1, 2, 3, 4, 5, 6])
 def test_production_step_passes_correct_shard_once(tmp_path, group):
     result = _run_step(
         tmp_path,
         group,
-        '#!/bin/bash\nprintf "%s\\n" "$*" >> invocations\necho shard-output\n',
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> invocations\nprintf "%s\\n" "$AUTO_CODER_CI_TIMING_DIR" > timing-env\necho shard-output\n',
     )
 
     assert result.returncode == 0
     assert (tmp_path / "invocations").read_text().splitlines() == [
-        f"--ci-tests-only --splits 4 --group {group} --splitting-algorithm duration_based_chunks --durations-path pr-test-logs/shard-{group}/normalized-durations.json -m not browser and not opencode_live and not muse_live and not supervisor_integration -vv -o faulthandler_timeout=30"
+        f"--ci-tests-only --splits 6 --group {group} --splitting-algorithm duration_based_chunks --durations-path pr-test-logs/shard-{group}/normalized-durations.json -m not browser and not opencode_live and not muse_live and not supervisor_integration -vv -o faulthandler_timeout=30"
     ]
     assert "shard-output" in result.stdout
     assert (tmp_path / f"pr-test-logs/shard-{group}/attempt-1.stdout.log").exists()
+    assert (tmp_path / "timing-env").read_text().strip() == f"pr-test-logs/shard-{group}/attempt-1-timing"
     assert not (tmp_path / f"pr-test-logs/shard-{group}/attempt-2.stdout.log").exists()
 
 
@@ -394,7 +395,7 @@ def test_workflow_contract_and_aggregate_shell():
     assert workflow["permissions"] == {"contents": "read"}
     assert set(workflow["jobs"]) >= {"lint", "tests-shard", "tests"}
     shard = workflow["jobs"]["tests-shard"]
-    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4]}}
+    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4, 5, 6]}}
     test_step = next(step for step in shard["steps"] if step["name"].startswith("Run tests"))
     assert test_step["timeout-minutes"] == 24
     assert "--attempt-timeout 480" in test_step["run"]

@@ -42,12 +42,12 @@ jobs:
         run: uv run mypy --config-file pyproject.toml -p auto_coder
 
   tests-shard:
-    name: Tests with Coverage (${{ matrix.group }}/4)
+    name: Tests with Coverage (${{ matrix.group }}/6)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4]
+        group: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -86,7 +86,7 @@ jobs:
           fi
           echo "CLI entry point test passed!"
 
-      - name: Run tests with coverage (shard ${{ matrix.group }}/4)
+      - name: Run tests with coverage (shard ${{ matrix.group }}/6)
         timeout-minutes: 24
         run: |
           uv run python scripts/run_pr_test_shard.py \

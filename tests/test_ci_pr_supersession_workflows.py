@@ -64,10 +64,10 @@ def test_existing_trigger_checkout_and_check_identities_are_preserved() -> None:
     }
     assert {job["name"] for job in pr["jobs"].values()} >= {
         "Lint & Type Check",
-        "Tests with Coverage (${{ matrix.group }}/4)",
+        "Tests with Coverage (${{ matrix.group }}/6)",
     }
     shard = pr["jobs"]["tests-shard"]
-    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4]}}
+    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4, 5, 6]}}
     shard_run = next(step["run"] for step in shard["steps"] if step.get("name", "").startswith("Run tests with coverage"))
     assert "scripts/run_pr_test_shard.py" in shard_run
 

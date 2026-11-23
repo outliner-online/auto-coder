@@ -72,7 +72,7 @@ def test_pr_workflow_has_one_unconditional_normal_profile() -> None:
 
     assert set(workflow["jobs"]) == {"lint", "tests-shard", "tests"}
     shard = workflow["jobs"]["tests-shard"]
-    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4]}}
+    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4, 5, 6]}}
     assert "if" not in shard and "needs" not in shard
     assert workflow["jobs"]["tests"]["needs"] == ["lint", "tests-shard"]
     assert workflow["jobs"]["tests"]["if"] == "always()"
