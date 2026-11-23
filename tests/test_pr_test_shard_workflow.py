@@ -74,6 +74,9 @@ def _run_real_pytest_step(tmp_path: Path, assertion: str) -> subprocess.Complete
         "CI": "true",
         "REPO_NAME": "outliner-online/auto-coder",
         "HOME": str(tmp_path / "home"),
+        # Never allow an inherited project environment (including the checkout's
+        # .venv) to be synchronized from this deliberately modified fixture.
+        "UV_PROJECT_ENVIRONMENT": str(tmp_path / ".venv"),
     }
     environment.pop("VIRTUAL_ENV", None)
     uv_executable = next(str(Path(directory) / "uv") for directory in environment["PATH"].split(os.pathsep) if (Path(directory) / "uv").is_file())
@@ -98,6 +101,16 @@ def _run_real_pytest_step(tmp_path: Path, assertion: str) -> subprocess.Complete
         text=True,
         timeout=120,
     )
+
+
+def _environment_linkage_snapshot(environment: Path) -> dict[str, bytes]:
+    """Capture files that identify which source tree an environment imports."""
+    patterns = ("pyvenv.cfg", "*.pth", "direct_url.json")
+    return {
+        str(path.relative_to(environment)): path.read_bytes()
+        for pattern in patterns
+        for path in environment.rglob(pattern)
+    }
 
 
 @pytest.mark.parametrize("group", [1, 2, 3, 4])
@@ -132,16 +145,23 @@ def test_completed_nonzero_status_is_not_retried(tmp_path, status):
 
 
 def test_actual_pytest_assertion_propagates_without_retry_and_passing_control_passes(tmp_path):
+    outer_environment = ROOT / ".venv"
+    outer_before_passing = _environment_linkage_snapshot(outer_environment)
     passing = _run_real_pytest_step(tmp_path / "passing", "True")
     assert "uv run python scripts/run_pr_test_shard.py" in passing.args[-1]
     assert passing.returncode == 0, passing.stdout + passing.stderr
+    assert (tmp_path / "passing/.venv/pyvenv.cfg").is_file()
+    assert _environment_linkage_snapshot(outer_environment) == outer_before_passing
 
+    outer_before_failing = _environment_linkage_snapshot(outer_environment)
     failing = _run_real_pytest_step(tmp_path / "failing", "False")
     assert failing.returncode != 0
     assert "1 failed" in failing.stdout
     assert "ordinary failure" in failing.stderr
     assert "starting retry" not in failing.stderr
     assert not (tmp_path / "failing/pr-test-logs/shard-1/attempt-2.stdout.log").exists()
+    assert (tmp_path / "failing/.venv/pyvenv.cfg").is_file()
+    assert _environment_linkage_snapshot(outer_environment) == outer_before_failing
 
     aggregate = _workflow()["jobs"]["tests"]["steps"][0]["run"]
 
