@@ -68,8 +68,8 @@ def _read_config(path: Path, *, missing_ok: bool) -> dict:
     try:
         with path.open("rb") as stream:
             value = tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ControllerAuthError("configuration", "unreadable_or_malformed") from exc
+    except (OSError, tomllib.TOMLDecodeError):
+        raise ControllerAuthError("configuration", "unreadable_or_malformed") from None
     if not isinstance(value, dict):
         raise ControllerAuthError("configuration")
     return value
@@ -129,8 +129,8 @@ class PersonalControllerAuth:
                 self._identity = ControllerIdentity(login, account_id=account_id)
             except ControllerAuthError:
                 raise
-            except Exception as exc:
-                raise ControllerAuthError("personal_identity", "github_rejection") from exc
+            except Exception:
+                raise ControllerAuthError("personal_identity", "github_rejection") from None
         return self._identity
 
     def invalidate(self, credential: ControllerCredential) -> None:
@@ -153,8 +153,8 @@ class GitHubAppControllerAuth:
             key = self.config.private_key_path.read_text()
             now = int(self._clock())
             return jwt.encode({"iat": now - 60, "exp": now + 540, "iss": str(self.config.app_id)}, key, algorithm="RS256")
-        except Exception as exc:
-            raise ControllerAuthError("private_key", "unavailable_or_invalid") from exc
+        except Exception:
+            raise ControllerAuthError("private_key", "unavailable_or_invalid") from None
 
     def _request(self, method: str, path: str, token: str, json_body: Optional[dict[str, object]] = None) -> dict:
         try:
@@ -164,13 +164,13 @@ class GitHubAppControllerAuth:
             if not isinstance(body, dict):
                 raise ValueError
             return body
-        except Exception as exc:
-            raise ControllerAuthError("github_api", "rejected_or_malformed") from exc
+        except Exception:
+            raise ControllerAuthError("github_api", "rejected_or_malformed") from None
 
     def _verify_identity(self, app_jwt: str) -> ControllerIdentity:
         body = self._request("GET", "/app", app_jwt)
         app_id, slug = body.get("id"), body.get("slug")
-        if app_id != self.config.app_id or not isinstance(slug, str) or not slug.strip():
+        if type(app_id) is not int or app_id <= 0 or app_id != self.config.app_id or not isinstance(slug, str) or not slug.strip():
             raise ControllerAuthError("app_identity", "missing_or_mismatched")
         return ControllerIdentity(f"{slug}[bot]", app_id=app_id)
 
@@ -191,25 +191,28 @@ class GitHubAppControllerAuth:
             self._identity = self._verify_identity(app_jwt)
             installation = self._request("GET", f"/repos/{repo_name}/installation", app_jwt)
             installation_id = installation.get("id")
-            if not isinstance(installation_id, int) or installation_id <= 0:
+            if type(installation_id) is not int or installation_id <= 0:
                 raise ControllerAuthError("installation")
             minted = self._request("POST", f"/app/installations/{installation_id}/access_tokens", app_jwt, json_body={"repositories": [repo_name.split("/", 1)[1]], "permissions": dict(scope)})
             token, expires_raw = minted.get("token"), minted.get("expires_at")
             try:
                 expires = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
-            except ValueError as exc:
-                raise ControllerAuthError("token", "invalid_expiry") from exc
+            except ValueError:
+                raise ControllerAuthError("token", "invalid_expiry") from None
             if not isinstance(token, str) or not token or expires.timestamp() - self._clock() <= 60 or not self._permissions_sufficient(minted.get("permissions"), scope):
                 raise ControllerAuthError("token", "invalid_or_insufficient")
-            repositories = minted.get("repositories")
-            total = minted.get("repository_selection") == "selected" and len(repositories) if isinstance(repositories, list) else -1
-            names = {item.get("full_name") for item in repositories if isinstance(item, dict)} if isinstance(repositories, list) else set()
-            if total != 1 or names != {repo_name}:
+            if "repositories" in minted:
+                repositories = minted["repositories"]
+                if minted.get("repository_selection") != "selected" or not isinstance(repositories, list) or len(repositories) != 1 or not isinstance(repositories[0], dict) or repositories[0].get("full_name") != repo_name:
+                    raise ControllerAuthError("repository_grant", "contradictory")
+            else:
                 listing = self._request("GET", "/installation/repositories?per_page=100", token)
                 repos = listing.get("repositories")
-                listed_names = {item.get("full_name") for item in repos if isinstance(item, dict)} if isinstance(repos, list) else set()
-                if listing.get("total_count") != 1 or listed_names != {repo_name}:
+                total_count = listing.get("total_count")
+                if type(total_count) is not int or total_count != 1 or not isinstance(repos, list) or len(repos) != 1 or not isinstance(repos[0], dict) or repos[0].get("full_name") != repo_name:
                     raise ControllerAuthError("repository_grant", "broader_or_unproven")
+            if expires.timestamp() - self._clock() <= 60:
+                raise ControllerAuthError("token", "insufficient_lifetime")
             authority = hashlib.sha256(json.dumps(["app", self.api_origin, self.config.app_id, installation_id, repo_name, scope]).encode()).hexdigest()
             self._credential = ControllerCredential(token, "app", self.api_origin, repo_name, scope, authority, expires.astimezone(timezone.utc), self.config.app_id, installation_id, uuid.uuid4().hex)
             return self._credential
