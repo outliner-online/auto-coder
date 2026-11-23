@@ -113,9 +113,47 @@ A non-typed failure during a resumed Issue's candidate processing, including the
 local job-store lookup after its successful strict refresh, becomes a retained
 `EVALUATION_FAILED` operational block. Ordinary scans and generic wakes cannot
 retry it; the existing selected manual retry preserves identity and effects.
-Typed GitHub request failures retain their existing classification and deadlines.
 The initial-refresh regression also injects failures at both actual candidate
 boundaries through the production handler and scheduler/store.
+
+Typed GitHub request failures retain provider classification authority: only
+primary, secondary, or generic typed throttle outcomes spend the deliberate
+three-retry budget. Local admission deferrals remain separately scheduled.
+Determinate remote errors (including HTTP 404 or 5xx) and other non-throttle
+failures use the existing `evaluation_failed` operational block, with no timed
+retry and no throttle increment or reset. Authentication, forbidden, and
+indeterminate delivery retain their existing operational blocks. An HTTP 404 is
+not evidence authorizing release of an implementation owner.
+The retained error reports only classification, HTTP status when available, and
+instructions to check the resource, repository and access before retrying the
+selected obligation; request context and provider messages are not copied into it.
+Startup warnings distinguish automatic scheduling from an operational block and
+give the selected `pending-work retry` command. Workers remain behind the startup
+barrier until a complete fresh reconciliation succeeds. Correcting the cause and
+using the official single-obligation retry remains the recovery path; polling or
+a generic wake never rearms the block.
+
+Controller restart reads the retained startup identity before deciding whether
+to make an inline attempt. An unfinished cycle remains owned by the existing
+scheduler: future deadlines, operational blocks and exhausted throttle counts
+are preserved even if the remote cause has since disappeared. Due obligations,
+interrupted running claims and explicitly selected retries still recover through
+the registered startup handler. Only absence of an unfinished cycle permits a
+fresh inline scan. If scheduler recovery completes and retires the row during
+that read, its completion event prevents a duplicate inline scan. This implements
+the restart and completed-cycle boundary of #1921/REQ-002, REQ-006 and REQ-008;
+it does not add another retry authority.
+
+Strict open-entity enumeration identifies its explicit malformed-page, JSON and
+incomplete-pagination rejections with `InvalidOpenEntitiesObservation` (a
+`RuntimeError` subtype). Only the resumed startup handler converts that type
+into an `evaluation_failed` operational block. It keeps the same identity,
+unfinished effects and throttle count, clears the due deadline, and stores safe
+guidance to correct the observation and retry that single obligation. A 200
+response is not proof of a complete valid enumeration. Elapsed time and generic
+wakes cannot repeat the invalid scan; fresh inline invalid enumeration still
+propagates as a defect. Unrelated implementation defects, storage failures,
+transport failures and governor errors are not caught by this new boundary.
 
 The bounded cadence regression observes completion of the actual second
 production handler evaluation before asserting its strict-reader timestamp.

@@ -133,6 +133,7 @@ def production_codex_reconstructor(repository: str, issue_number: int) -> CodexW
         tracking_complete: bool = False,
         request_fingerprint: str | None = None,
         handoff_pr_number: int | None = None,
+        native_membership: tuple[str, ...] = (),
     ) -> CodexWorkOperation:
         return CodexWorkOperation(
             operation_id,
@@ -148,6 +149,7 @@ def production_codex_reconstructor(repository: str, issue_number: int) -> CodexW
             phase is CodexWorkPhase.ACCEPTED,
             request_fingerprint=request_fingerprint,
             handoff_pr_number=handoff_pr_number,
+            native_membership=native_membership,
         )
 
     def cloud_runs() -> CodexSourceSnapshot:
@@ -295,7 +297,11 @@ def production_codex_reconstructor(repository: str, issue_number: int) -> CodexW
             # issue a certificate; no historical journal is backfilled.
             handoff_pr = handoff.pr_number if verified_handoff and (supported_repair or missing_contract) and handoff is not None else None
             handoff_sources.append((task, handoff))
-            operations.append(operation(stable_codex_operation_id("follow-up", request), "follow-up", request, phase, task, baseline, request_fingerprint=fingerprint or None, handoff_pr_number=handoff_pr, publication_complete=completed_handoff, tracking_complete=completed_handoff))
+            operations.append(
+                operation(
+                    stable_codex_operation_id("follow-up", request), "follow-up", request, phase, task, baseline, request_fingerprint=fingerprint or None, handoff_pr_number=handoff_pr, native_membership=tuple(identities), publication_complete=completed_handoff, tracking_complete=completed_handoff
+                )
+            )
         owner_binding = None if bound_owner is None else (bound_owner.incarnation, bound_owner.implementation_prs)
         return CodexSourceSnapshot("follow-ups", _value_identity((_path_identity(followup_path), handoff_sources, owner_binding)), tuple(operations))
 

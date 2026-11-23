@@ -248,8 +248,10 @@ environment_id = "env_from_toml"
             wham.send_follow_up.return_value = FollowUpDeliveryResult(FollowUpDeliveryOutcome.INDETERMINATE, ambiguous_outcome)
             client.wham_client = wham
 
-            assert client.send_followup("task_e_123", "same logical work") is False
-            assert client.send_followup("task_e_123", "same logical work") is True
+            assert client.send_followup("task_e_123", "same logical work", ("feedback-F",)) is False
+            assert client.consume_followup_rejection("task_e_123", ("feedback-F",)) is False
+            assert client.send_followup("task_e_123", "same logical work", ("feedback-F",)) is True
+            assert client.consume_followup_rejection("task_e_123", ("feedback-F",)) is False
 
         wham.send_follow_up.assert_called_once()
         assert not (tmp_path / "followups.json").read_text(encoding="utf-8").strip() == ""
@@ -267,9 +269,18 @@ environment_id = "env_from_toml"
             wham.send_follow_up.return_value = FollowUpDeliveryResult(FollowUpDeliveryOutcome.INDETERMINATE, 429)
             client.wham_client = wham
 
-            assert client.send_followup("task_e_123", "same logical work") is False
-            assert client.send_followup("task_e_123", "same logical work") is False
-            assert client.send_followup("task_e_123", "same logical work") is False
+            identities = ("feedback-F",)
+            assert client.send_followup("task_e_123", "same logical work", identities) is False
+            assert client.consume_followup_duplicate_guard("task_e_123", identities) is False
+            assert client.send_followup("task_e_123", "same logical work", identities) is False
+            assert client.consume_followup_rejection("task_e_123", identities) is False
+            assert client.consume_followup_duplicate_guard("task_e_123", identities) is True
+            assert client.consume_followup_duplicate_guard("task_e_123", identities) is False
+            assert client.send_followup("task_e_123", "same logical work", identities) is False
+            # The next send resets the single-use diagnostic, including a
+            # pre-send refusal with no native journal or transport operation.
+            assert client.send_followup("invalid", "same logical work", identities) is False
+            assert client.consume_followup_duplicate_guard("task_e_123", identities) is False
 
         wham.send_follow_up.assert_called_once()
 
@@ -330,10 +341,33 @@ environment_id = "env_from_toml"
             ]
             client.wham_client = wham
 
-            assert client.send_followup("task_e_123", "same logical work") is False
-            assert client.send_followup("task_e_123", "same logical work") is True
+            assert client.send_followup("task_e_123", "same logical work", ("feedback-F",)) is False
+            assert client.consume_followup_rejection("task_e_123", ("feedback-F",)) is True
+            assert client.consume_followup_rejection("task_e_123", ("feedback-F",)) is False
+            assert client.send_followup("task_e_123", "same logical work", ("feedback-F",)) is True
+            assert client.consume_followup_rejection("task_e_123", ("feedback-F",)) is False
 
         assert wham.send_follow_up.call_count == 2
+
+    @pytest.mark.parametrize("entry", [None, [], "unreadable", 7, {"unexpected_field": True}])
+    def test_exact_malformed_followup_entry_is_unknown_but_absence_is_not_delivery(self, mock_backend_config, tmp_path, entry):
+        import hashlib
+        import json
+
+        task_id, identity = "task_e_123", "feedback-F"
+        key = hashlib.sha256(f"{task_id}\0{identity}".encode()).hexdigest()
+        path = tmp_path / "followups.json"
+        path.write_text(json.dumps({key: entry}))
+        with (
+            patch("auto_coder.codex_cloud_client.get_llm_config", return_value=mock_backend_config),
+            patch("auto_coder.codex_cloud_client._codex_followup_state_path", return_value=path),
+        ):
+            client = CodexCloudClient("codex-cloud", repo_name="owner/repo")
+            assert client.get_followup_delivery(task_id, identity) is FollowUpDeliveryOutcome.INDETERMINATE
+            assert client.consume_followup_rejection(task_id, (identity,)) is False
+            path.write_text(json.dumps({"unrelated-key": None}))
+            assert client.get_followup_delivery(task_id, identity) is FollowUpDeliveryOutcome.NOT_DELIVERED
+            assert client.consume_followup_rejection(task_id, (identity,)) is False
 
     def test_start_task_skips_cli_when_weekly_quota_disallows_it(self, mock_backend_config):
         with (

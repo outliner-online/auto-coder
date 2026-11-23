@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from string import Template
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, TypedDict, cast
 
 from auto_coder.backend_manager import BackendManager, get_llm_backend_manager, run_llm_prompt
 from auto_coder.cli_helpers import create_high_score_backend_manager
@@ -506,6 +506,8 @@ def _execute_pending_strong_audit(
                 if not evidence.success:
                     diagnostic = redact_string(evidence.stderr.strip() or evidence.stdout.strip() or "no Git diagnostic")[:2000]
                     raise RuntimeError(f"required {evidence_name} evidence is unavailable (exit={evidence.returncode}): {diagnostic}")
+            from .strong_correction_scope import review_context
+
             review_input = ReviewExecutionInput(
                 mode=ReviewMode.STRONG_AUDIT,
                 round_id=claim.claim_id,
@@ -515,6 +517,7 @@ def _execute_pending_strong_audit(
                 contract=inputs.contract,
                 policy=inputs.policy,
                 repository_evidence="Pinned read-only snapshot. Tracked paths:\n" + tracked.stdout,
+                correction_scope_context=review_context(repo_name, pr_number),
                 diff_evidence=diff.stdout,
             )
             result = execute_review(review_input, availability.backend_manager, worktree)
@@ -2549,14 +2552,109 @@ def _retain_claude_quota_deferral(
     return wait.retry_not_before
 
 
-def _send_followup_with_quota_admission(client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None) -> bool:
+@contextmanager
+def _new_pr_correction_request(repository: str, pr_number: int):
+    """Other existing PR senders invalidate the old series, without registering one."""
+    from .pr_no_commit_recovery import NoCommitRecovery, pr_correction_lock
+
+    path = _cloud_review_repair_state_path(repository)
+    with pr_correction_lock(path, pr_number):
+        if path.exists():
+            NoCommitRecovery(path).end_series(pr_number)
+        yield
+
+
+def _retire_closed_cloud_checkpoint(repository: str, pr_number: int) -> None:
+    """Known closure must not revive the old series if the PR is reopened."""
+    from .pr_no_commit_recovery import NoCommitRecovery
+
+    path = _cloud_review_repair_state_path(repository)
+    if path.exists():
+        NoCommitRecovery(path).end_series(pr_number, "closed")
+
+
+class _NativeFollowupAuthority(TypedDict, total=False):
+    final_authority_check: Callable[[], bool]
+    strong_source: Optional[str]
+    strong_revision: Optional[str]
+
+
+def _send_followup_with_quota_admission(
+    client: Any,
+    repository: str,
+    task_id: str,
+    message: str,
+    identities: tuple[str, ...] = (),
+    *,
+    repair_target: Optional[ExistingPrRepairTarget] = None,
+    recovery_provider: str = "",
+    checkpoint: bool = False,
+    final_authority_check: Optional[Callable[[], bool]] = None,
+    strong_source: Optional[str] = None,
+    strong_revision: Optional[str] = None,
+) -> bool:
+    """Keep accepted PR correction checkpoints on the normal authenticated sender."""
+    from .pr_no_commit_recovery import SUPPORTED_PROVIDERS
+
+    authority: _NativeFollowupAuthority = {}
+    if final_authority_check is not None:
+        authority["final_authority_check"] = final_authority_check
+    if strong_source is not None:
+        authority["strong_source"], authority["strong_revision"] = strong_source, strong_revision
+
+    if repair_target is None or checkpoint:
+        return _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target, **authority)
+    if recovery_provider not in SUPPORTED_PROVIDERS:
+        with _new_pr_correction_request(repository, repair_target.pr_number):
+            native_identities = identities if not recovery_provider else ()
+            return _send_followup_with_quota_admission_impl(
+                client,
+                repository,
+                task_id,
+                message,
+                native_identities,
+                repair_target=repair_target,
+                **authority,
+            )
+    from .pr_no_commit_recovery import NoCommitRecovery, pr_correction_lock
+
+    path = _cloud_review_repair_state_path(repository)
+    with pr_correction_lock(path, repair_target.pr_number):
+        recovery = NoCommitRecovery(path)
+        recovery.supersede_prior_request(recovery_provider, task_id, repair_target, identities, message)
+        accepted = _send_followup_with_quota_admission_impl(
+            client,
+            repository,
+            task_id,
+            message,
+            identities if recovery_provider == "codex-cloud" else (),
+            repair_target=repair_target,
+            **authority,
+        )
+        if accepted:
+            try:
+                recovery.record_acceptance(recovery_provider, task_id, repair_target, identities, message, time.time())
+            except (OSError, ValueError, TypeError) as exc:
+                # Receipt persistence must never turn a confirmed original send
+                # into an apparent rejection that permits an original replay.
+                logger.error(f"Accepted PR correction has no recovery clock: {exc}")
+        return accepted
+
+
+def _send_followup_with_quota_admission_impl(
+    client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None
+) -> bool:
     """Serialize Claude usage rechecks and fence final provider assignment."""
     context = getattr(type(client), "followup_quota_context", None)
     if not callable(context):
         bounded_sender = getattr(type(client), "send_existing_pr_followup", None)
         if repair_target is not None and callable(bounded_sender):
-            return bounded_sender(client, task_id, message, repair_target, identities)
+            return bounded_sender(client, task_id, message, repair_target, identities, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}), **({"strong_source": strong_source, "strong_revision": strong_revision} if strong_source is not None else {}))
+        if final_authority_check is not None:
+            raise ValueError("Scoped final authority requires the bounded native sender")
         return client.send_followup(task_id, message, identities) if identities else client.send_followup(task_id, message)
+    if final_authority_check is not None:
+        raise ValueError("Scoped final authority is limited to Codex native ownership")
     backend_name, credential_context = context(client)
     store = get_claude_followup_wait_store()
     with store.admission(repository, backend_name, credential_context) as claim:
@@ -6060,6 +6158,7 @@ def _dispatch_confirmed_effective_correction(
             if retained is None:
                 raise DecisionRetentionError("the effective correction has no retained producing decision")
             if retained.handoff == HANDOFF_DISPATCHED and set(retained.blocker_ids) == set(blocker_ids):
+                _checkpoint_delivered_cloud_correction(repo_name, pr_data, github_client)
                 return CloudReviewRepairResult([f"The current corrective generation for PR #{pr_number} was already delivered; no duplicate request was sent"], delivered=True), {
                     "review_disposition": ReviewDisposition.CORRECTIVE_HANDOFF.value,
                     "handoff": HANDOFF_DISPATCHED,
@@ -9767,7 +9866,8 @@ PR Author: {pr_data.get('user', {}).get('login', 'Unknown')}
             logger.info(f"Sending CI failure logs to Jules session '{session_id}' for PR #{pr_number}; " f"head={expected_head} failures={authority.failure_identities}")
             jules_client = JulesClient()
             attempt_started = True
-            response = jules_client.send_message(session_id, message)
+            with _new_pr_correction_request(repo_name, pr_number):
+                response = jules_client.send_message(session_id, message)
 
         try:
             get_trace_logger().log("Jules Feedback", f"Sent CI failure logs to Jules for PR #{pr_number}", item_type="pr", item_number=pr_number, details={"session_id": session_id})
@@ -10152,27 +10252,41 @@ def _load_review_validation_snapshots(state_path: Path) -> dict[str, dict[str, s
 def _record_review_feedback_state(
     state_path: Path,
     delivered: set[str],
-    pending: set[str],
+    pending_additions: set[str],
     validation_generations: Optional[dict[str, str]] = None,
     validation_snapshots: Optional[dict[str, dict[str, str]]] = None,
+    *,
+    remove_pending: Optional[set[str]] = None,
 ) -> None:
-    """Atomically persist confirmed and indeterminate feedback deliveries."""
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = state_path.with_suffix(f"{state_path.suffix}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(
-            {
-                "delivered_feedback": sorted(delivered),
-                "pending_feedback": sorted(pending),
-                "validation_generations": validation_generations if validation_generations is not None else _load_review_validation_generations(state_path),
-                "validation_snapshots": validation_snapshots if validation_snapshots is not None else _load_review_validation_snapshots(state_path),
-            },
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-    os.replace(temporary, state_path)
+    """Merge confirmed receipts and explicit pending additions/releases atomically."""
+    from .pr_no_commit_recovery import review_repair_state_lock
+
+    with review_repair_state_lock(state_path):
+        # A caller's snapshot can predate another PR's confirmed POST. Receipt
+        # identities are monotonic; a stale write cannot erase or re-pend them.
+        delivered = delivered | _load_delivered_review_feedback(state_path)
+        # Unseen reservations belong to other in-flight writers. Only confirmed
+        # receipts or an explicit release by the owning sender may clear an ID.
+        pending = (pending_additions | _load_pending_review_feedback(state_path)) - delivered - (remove_pending or set())
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        previous_document = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        temporary = state_path.with_suffix(f"{state_path.suffix}.{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    **({"scoped_review_followups": previous_document["scoped_review_followups"]} if "scoped_review_followups" in previous_document else {}),
+                    "no_commit_series": previous_document.get("no_commit_series", {}),
+                    "delivered_feedback": sorted(delivered),
+                    "pending_feedback": sorted(pending),
+                    "validation_generations": validation_generations if validation_generations is not None else _load_review_validation_generations(state_path),
+                    "validation_snapshots": validation_snapshots if validation_snapshots is not None else _load_review_validation_snapshots(state_path),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, state_path)
 
 
 def _adversarial_validation_snapshot_identity(validation_report: str) -> str:
@@ -10188,15 +10302,14 @@ def _record_review_validation_snapshot(state_path: Path, validation_report: str,
         _record_review_feedback_state(
             state_path,
             _load_delivered_review_feedback(state_path),
-            _load_pending_review_feedback(state_path),
+            set(),
             validation_snapshots=snapshots,
         )
 
 
 def _record_delivered_review_feedback(state_path: Path, feedback: set[str]) -> None:
     """Atomically persist confirmed feedback deliveries."""
-    pending = _load_pending_review_feedback(state_path) - feedback
-    _record_review_feedback_state(state_path, feedback, pending)
+    _record_review_feedback_state(state_path, feedback, set())
 
 
 def _cloud_review_feedback_markers(feedback: Sequence[str]) -> str:
@@ -10228,13 +10341,20 @@ def _record_pr_delivered_review_feedback(github_client: Optional[Any], repo_name
     return True
 
 
-def _reconcile_codex_review_feedback(client: Any, provider: str, task_id: str, feedback: Sequence[str]) -> set[str]:
+def _reconcile_codex_review_feedback(client: Any, provider: str, task_id: str, feedback: Sequence[str], *, uncertain: Optional[set[str]] = None) -> set[str]:
     """Return stable feedback identities confirmed by Codex reconciliation."""
     if provider != "codex-cloud" or not hasattr(client, "get_followup_delivery"):
         return set()
     from .codex_wham_client import FollowUpDeliveryOutcome
 
-    return {identity for identity in feedback if client.get_followup_delivery(task_id, identity) is FollowUpDeliveryOutcome.DELIVERED}
+    delivered: set[str] = set()
+    for identity in feedback:
+        outcome = client.get_followup_delivery(task_id, identity)
+        if outcome is FollowUpDeliveryOutcome.DELIVERED:
+            delivered.add(identity)
+        elif outcome is not FollowUpDeliveryOutcome.NOT_DELIVERED and uncertain is not None:
+            uncertain.add(identity)
+    return delivered
 
 
 _LOCAL_REPAIR_MARKERS = ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")
@@ -10486,6 +10606,112 @@ def _render_canonical_correction_scope(repo_name: str, pr_number: int, canonical
         return ""
 
 
+def _checkpoint_delivered_cloud_correction(repo_name: str, pr_data: Dict[str, Any], github_client: Any) -> None:
+    """The retained current correction can bypass the ordinary feedback sender."""
+    from .pr_no_commit_recovery import NoCommitRecovery
+
+    path = _cloud_review_repair_state_path(repo_name)
+    try:
+        if not path.exists() or not NoCommitRecovery(path).has_due_request(int(pr_data["number"]), time.time()):
+            return
+        resolution = _resolve_cloud_task_origin(repo_name, pr_data, github_client)
+        if resolution.origin is not None:
+            _checkpoint_cloud_review_repair(repo_name, pr_data, github_client, resolution.origin)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(f"Retained cloud correction checkpoint is unavailable: {exc}")
+
+
+def _checkpoint_cloud_review_repair(repo_name: str, pr_data: Dict[str, Any], github_client: Optional[Any], origin: CloudTaskOrigin, acknowledged: bool = False) -> None:
+    """Revisit an accepted correction only from its ordinary duplicate-wait path."""
+    from .pr_no_commit_recovery import SUPPORTED_PROVIDERS, NoCommitRecovery
+
+    if origin.provider not in SUPPORTED_PROVIDERS:
+        return
+    target = resolve_existing_pr_repair_target(repo_name, pr_data)
+    if target is None or github_client is None:
+        return
+    state_path = _cloud_review_repair_state_path(repo_name)
+    # Legacy deliveries have no frozen acceptance clock. Never invent one from
+    # observation time or perform new provider/GitHub reads for such records.
+    if not state_path.exists():
+        return
+    sender_origin = origin
+
+    def current() -> str:
+        nonlocal sender_origin
+        if acknowledged:
+            return "acknowledged_outcome"
+        if not new_work_allowed():
+            return "draining"
+        pending = _load_pending_review_feedback(state_path) - _load_delivered_review_feedback(state_path)
+        if any(identity.startswith(f"{repo_name}#{target.pr_number}:") for identity in pending):
+            return "pending_delivery"
+        exhaustion = check_pr_repair_exhaustion(repo_name, target.pr_number)
+        if exhaustion and exhaustion.is_exhausted:
+            return "allowance_exhausted"
+        live = github_client.get_pull_request_metadata_strict(repo_name, target.pr_number)
+        if not isinstance(live, dict) or live.get("number") != target.pr_number:
+            return "target_unavailable"
+        if live.get("state") == "closed" or live.get("merged") is True:
+            return "closed"
+        if live.get("state") != "open":
+            return "target_unavailable"
+        fresh_target = resolve_existing_pr_repair_target(repo_name, live)
+        if fresh_target is None:
+            return "target_unavailable"
+        if fresh_target != target:
+            return "baseline_changed"
+        route = _select_review_repair_route(repo_name, live, github_client)
+        if route.disposition is not ReviewRepairRouteDisposition.CLOUD:
+            return "ownership_unavailable"
+        fresh = _resolve_cloud_task_origin(repo_name, live, github_client)
+        if fresh.origin is None:
+            return "ownership_unavailable"
+        if (fresh.origin.provider, fresh.origin.task_id) != (origin.provider, origin.task_id):
+            return "owner_changed"
+        if _revalidate_cloud_origin(repo_name, target.pr_number, fresh.origin, github_client=github_client):
+            return "ownership_unavailable"
+        sender_origin = fresh.origin
+        return "eligible"
+
+    def send(logical_identity: str, bounded_target: ExistingPrRepairTarget) -> bool:
+        details = render_prompt("pr.no_commit_checkpoint")
+        message = build_existing_pr_repair_prompt(bounded_target, details)
+        try:
+            accepted = _send_followup_with_quota_admission(
+                sender_origin.client,
+                repo_name,
+                origin.task_id,
+                message,
+                SUPPORTED_PROVIDERS[origin.provider].identities(logical_identity),
+                repair_target=bounded_target,
+                checkpoint=True,
+            )
+        except ClaudeFollowupUsageLimitError as exc:
+            _retain_claude_quota_deferral(exc, target.pr_number, origin.task_id, "no-commit-checkpoint", logical_identity)
+            raise
+        if accepted:
+            get_claude_followup_wait_store().retire(repo_name, origin.task_id, "no-commit-checkpoint", logical_identity)
+        return accepted
+
+    try:
+        result = NoCommitRecovery(state_path).checkpoint(origin.provider, origin.task_id, target, time.time, current, send)
+        if result.reason != "no_accepted_request":
+            logger.info("PR no-commit checkpoint repository={} pr={} provider={} task={} ordinal={} reason={}", repo_name, target.pr_number, origin.provider, origin.task_id, result.ordinal, result.reason)
+            _record_pr_stage(
+                target.pr_number,
+                "pr.no-commit-recovery",
+                f"pr#{target.pr_number} no-commit recovery",
+                Outcome.ACCEPTED_HANDOFF if result.reason == "accepted" else Outcome.SKIPPED if result.reason in {"limit_reached", "baseline_changed", "owner_changed", "closed", "acknowledged_outcome", "unsupported_provider"} else Outcome.DEFERRED,
+                {"provider": origin.provider, "task_id": origin.task_id, "ordinal": result.ordinal, "reason": result.reason, "head_sha": target.head_sha, "next_check_at": result.next_check_at},
+            )
+    except Exception as exc:
+        # The original receipt and normal review/merge decision stay unchanged.
+        # The reserved logical send remains unknown if transport was entered.
+        logger.warning(f"PR no-commit checkpoint retained without another send for {repo_name}#{target.pr_number}: {exc}")
+        _record_pr_stage(target.pr_number, "pr.no-commit-recovery", f"pr#{target.pr_number} no-commit recovery", Outcome.DEFERRED, {"provider": origin.provider, "task_id": origin.task_id, "reason": "observation_or_delivery_unavailable", "error_type": type(exc).__name__, "head_sha": target.head_sha})
+
+
 def _delegate_cloud_review_thread_repair(
     repo_name: str,
     pr_data: Dict[str, Any],
@@ -10648,6 +10874,7 @@ def _delegate_cloud_review_thread_repair(
     provider_label = {"codex-cloud": "Codex Cloud", "jules": "Jules", "claude-routine": "Claude Routine"}.get(provider, provider)
 
     from .cloud_task_client_base import CloudTaskClientBase
+    from .pr_no_commit_recovery import SUPPORTED_PROVIDERS
 
     if getattr(type(client), "send_followup", None) is CloudTaskClientBase.send_followup:
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: cloud provider '{provider}' does not support follow-up delivery"])
@@ -10677,22 +10904,34 @@ def _delegate_cloud_review_thread_repair(
     selected_identities = {identity for _thread, _comment, identity in findings}
     with _cloud_review_delivery_lock:
         try:
+            from .strong_correction_scope import has_registered_task, strict_native_evidence
+
+            if provider == "codex-cloud" and has_registered_task(repo_name, task_id):
+                strict_native_evidence(repo_name)  # Before reconciliation can rewrite filtered legacy rows.
             delivered = _load_delivered_review_feedback(state_path)
             remote_delivered = _load_pr_delivered_review_feedback(github_client, repo_name, pr_number, sorted(selected_identities | diagnostic_candidates))
             # Excluded receipts are diagnostic evidence only: never reconcile
             # or persist these identities through the actionable delivery state.
             delivered.update(remote_delivered & selected_identities)
-            reconciled = _reconcile_codex_review_feedback(client, provider, task_id, [identity for _thread, _comment, identity in findings if identity not in delivered])
+            native_uncertain: set[str] = set()
+            reconciled = _reconcile_codex_review_feedback(client, provider, task_id, [identity for _thread, _comment, identity in findings if identity not in delivered], uncertain=native_uncertain)
             if reconciled:
                 delivered.update(reconciled)
                 _record_delivered_review_feedback(state_path, delivered)
                 _record_pr_delivered_review_feedback(github_client, repo_name, pr_number, sorted(reconciled), f"🤖 Auto-Coder: I reconciled previously submitted review feedback with the existing {provider} task.")
-            indeterminate = _load_pending_review_feedback(state_path) - delivered
+            retained_pending = _load_pending_review_feedback(state_path)
+            if native_uncertain - delivered - retained_pending:
+                # Retain the observed unknown claim before isolating new work.
+                # Later native key loss must not turn it into unsent feedback.
+                _record_review_feedback_state(state_path, delivered, native_uncertain - delivered)
+            indeterminate = (retained_pending | native_uncertain) - delivered
         except (OSError, ValueError) as exc:
             logger.warning(f"Could not read cloud review repair state: {exc}")
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: prior delivery state could not be read: {exc}"])
         pending = [(thread, comment, identity) for thread, comment, identity in findings if identity not in delivered]
     if not pending:
+        acknowledged = bool(findings) and all(thread.comments and is_same_github_login(thread.comments[-1].author_login, implementer_login) and reply_claims_review_addressed(thread.comments[-1].body) for thread, _comment, _identity in findings)
+        _checkpoint_cloud_review_repair(repo_name, pr_data, github_client, selected_origin, acknowledged=acknowledged)
         logger.info(f"All actionable review feedback for PR #{pr_number} was already delegated")
         # Observation only: ordinary implementer replies can be acknowledgments
         # or guidance. Never infer their role, expose their prose, or override
@@ -10706,6 +10945,15 @@ def _delegate_cloud_review_thread_repair(
     if not pending:
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: a prior follow-up has unconfirmed durable receipt status; duplicate delivery was suppressed"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
 
+    from .strong_correction_scope import deliver_ordinary
+
+    strong_delivery = deliver_ordinary(repo_name, pr_data, github_client, selected_origin, pending, state_path, delivered)
+    if strong_delivery is not None:
+        return strong_delivery
+
+    if provider == "codex-cloud" and any(identity.startswith(prefix) for identity in indeterminate):
+        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: local duplicate guard held mixed feedback for independent scope resolution; no provider request was made"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
+
     pending_identities = {identity for _thread, _comment, identity in pending}
     work_identity = hashlib.sha256("\n".join(sorted(pending_identities)).encode()).hexdigest()
     retained_wait = get_claude_followup_wait_store().get(repo_name, task_id, "review-thread-repair", work_identity)
@@ -10717,20 +10965,20 @@ def _delegate_cloud_review_thread_repair(
         )
     with _cloud_review_delivery_lock:
         try:
-            _record_review_feedback_state(state_path, delivered, indeterminate | pending_identities)
+            _record_review_feedback_state(state_path, delivered, pending_identities)
         except OSError as exc:
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: a durable delivery reservation could not be recorded: {exc}"])
 
     if github_client is None:
         with _cloud_review_delivery_lock:
-            _record_review_feedback_state(state_path, delivered, indeterminate)
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: an authoritative current PR lookup is unavailable"])
     try:
         live_metadata = github_client.get_pull_request_repair_metadata_strict(repo_name, pr_number)
     except Exception as exc:
         with _cloud_review_delivery_lock:
             try:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
             except OSError:
                 pass
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: current PR head/branch could not be verified: {exc}"])
@@ -10740,7 +10988,7 @@ def _delegate_cloud_review_thread_repair(
     target = resolve_existing_pr_repair_target(repo_name, live_pr_data)
     if not target:
         with _cloud_review_delivery_lock:
-            _record_review_feedback_state(state_path, delivered, indeterminate)
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: current PR head/base branch metadata is unavailable"])
 
     canonical_pending = [(thread, comment, identity) for thread, comment, identity in pending if comment.body.startswith(("### Auto-Coder adversarial finding", "### Auto-Coder material test-oracle gap"))]
@@ -10801,17 +11049,20 @@ def _delegate_cloud_review_thread_repair(
         feedback = "\n\n".join(f"Thread `{thread.id}`:\n{comment.body}" for thread, comment, _identity in pending)
         details = Template(get_prompt_template("codex_cloud.review_thread_repair_details")).safe_substitute(actionable_feedback=feedback)
         prompt = build_existing_pr_repair_prompt(target, details)
+    if provider == "codex-cloud":
+        # An admission failure before entering the native sender must not consume
+        # a one-use receipt left by an earlier invocation of the same request.
+        client.consume_followup_rejection(task_id, tuple(sorted(pending_identities)))
     try:
         attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin, github_client=github_client)
         if attribution_error:
             with _cloud_review_delivery_lock:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {attribution_error}"], deferred=_draft_pr_repair_authority.get() is not None)
-        if provider == "codex-cloud":
-            accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, tuple(sorted(pending_identities)), repair_target=target)
-        else:
-            accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt)
+        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, tuple(sorted(pending_identities)), repair_target=target, recovery_provider=provider)
     except ClaudeFollowupHoldActive as exc:
+        with _cloud_review_delivery_lock:
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult(
             [f"DEFERRED Claude review repair for PR #{pr_number} until {exc.retry_not_before}"],
             deferred=True,
@@ -10821,7 +11072,7 @@ def _delegate_cloud_review_thread_repair(
         retry_at = _retain_claude_quota_deferral(exc, pr_number, task_id, "review-thread-repair", work_identity)
         if exc.delivery_certainty is DeliveryCertainty.NOT_SENT:
             with _cloud_review_delivery_lock:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
         return CloudReviewRepairResult(
             [f"DEFERRED Claude review repair for PR #{pr_number} until {retry_at}"],
             deferred=True,
@@ -10830,18 +11081,33 @@ def _delegate_cloud_review_thread_repair(
     except Exception as exc:
         logger.warning(f"Cloud review repair delegation failed for PR #{pr_number}: {exc}")
         with _cloud_review_delivery_lock:
+            # Native transport persists definite rejection before accounting its
+            # result. A later bookkeeping exception does not erase that proof.
+            definitely_rejected = provider not in SUPPORTED_PROVIDERS
+            if provider == "codex-cloud":
+                definitely_rejected = client.consume_followup_rejection(task_id, tuple(sorted(pending_identities))) is True
             try:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if definitely_rejected else None)
             except OSError:
                 pass
+        if provider == "codex-cloud" and definitely_rejected:
+            return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' rejected follow-up delivery; bookkeeping failed: {exc}"])
         return CloudReviewRepairResult([f"Review repair was not delivered to {provider} for PR #{pr_number}: {exc}"])
     if not accepted:
+        definitely_rejected = provider not in SUPPORTED_PROVIDERS
+        if provider == "codex-cloud":
+            # Only positive evidence from this exact send can release the
+            # shared claim. Missing native journal keys may be lost writes.
+            definitely_rejected = client.consume_followup_rejection(task_id, tuple(sorted(pending_identities)))
         with _cloud_review_delivery_lock:
             try:
-                _record_review_feedback_state(state_path, delivered, indeterminate)
+                _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities if definitely_rejected else None)
             except OSError:
                 pass
-        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' rejected follow-up delivery"])
+        if provider == "codex-cloud" and client.consume_followup_duplicate_guard(task_id, tuple(sorted(pending_identities))):
+            return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: local duplicate guard suppressed the follow-up before any provider request"], wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
+        detail = "rejected follow-up delivery" if definitely_rejected else "has unconfirmed follow-up delivery"
+        return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {provider} task '{task_id}' {detail}"])
 
     get_claude_followup_wait_store().retire(repo_name, task_id, "review-thread-repair", work_identity)
 
@@ -10849,6 +11115,7 @@ def _delegate_cloud_review_thread_repair(
     try:
         with _cloud_review_delivery_lock:
             delivered = _load_delivered_review_feedback(state_path)
+            local_receipt = pending_identities.issubset(delivered)
             delivered.update(identity for _thread, _comment, identity in pending)
             _record_delivered_review_feedback(state_path, delivered)
             local_receipt = True
@@ -11029,7 +11296,10 @@ def _record_adjudication_effect_stage(pr_number: int, effect_kind: str, context_
     facts: Dict[str, Any] = {"effect_kind": effect_kind, "context_id": context_id, "decision_id": decision_id, "status": status}
     if gap_id:
         facts["gap_id"] = gap_id
-    _record_pr_stage(pr_number, "pr.review-adjudication-effect", f"pr#{pr_number} review adjudication effect ({effect_kind})", _ADJUDICATION_EFFECT_OUTCOMES.get(status, Outcome.UNKNOWN), facts)
+    outcome = _ADJUDICATION_EFFECT_OUTCOMES.get(status, Outcome.UNKNOWN)
+    if effect_kind == "SCOPED_FIX":
+        outcome = Outcome.ACCEPTED_HANDOFF if status == "accepted" else Outcome.FAILED if status == "remote_rejected" else Outcome.DEFERRED if status.startswith("held_") or status == "already_accepted" else Outcome.UNKNOWN
+    _record_pr_stage(pr_number, "pr.review-adjudication-effect", f"pr#{pr_number} review adjudication effect ({effect_kind})", outcome, facts)
 
 
 def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: Dict[str, Any], github_client: Any) -> Tuple[PRActionList, bool]:
@@ -11077,7 +11347,69 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
             effect_store.finish(reopen.context_id, "reconciliation-required", gap_id=reopen.gap_id)
             _record_adjudication_effect_stage(pr_number, "REOPEN", reopen.context_id, reopen.decision_id, "reconciliation-required", gap_id=reopen.gap_id)
 
+    scoped_pass = any(item.scoped_followup is not None for item in plan.upholds)
     for upheld in plan.upholds:
+        if scoped_pass and upheld.scoped_followup is None:
+            actions.append(f"Unscoped adjudicated correction remains held during scoped admission for PR #{pr_number}")
+            continue
+        if upheld.scoped_followup is not None:
+            status = "held_source"
+            try:
+                from .scoped_review_followup import deliver_scoped_followup
+
+                origin = _resolve_cloud_task_origin(repo_name, pr_data, github_client).origin
+                scoped = upheld.scoped_followup
+                metadata = github_client.get_pull_request_repair_metadata_strict(repo_name, pr_number)
+                target = resolve_existing_pr_repair_target(repo_name, {**pr_data, "head": {"sha": metadata.head_sha, "ref": metadata.head_ref}, "base": {"ref": metadata.base_ref}})
+
+                def current_source() -> bool:
+                    if origin is None or origin.provider != "codex-cloud" or not origin.attribution_token or origin.task_id != scoped.task_id or _revalidate_cloud_origin(repo_name, pr_number, origin, github_client=github_client):
+                        return False
+                    live = github_client.get_pull_request_metadata_strict(repo_name, pr_number)
+                    if not isinstance(live, dict) or live.get("number") != pr_number or live.get("state") != "open" or live.get("merged") is True:
+                        return False
+                    fresh = github_client.get_pull_request_repair_metadata_strict(repo_name, pr_number)
+                    if fresh != metadata or fresh.head_sha != upheld.head_sha or not new_work_allowed():
+                        return False
+                    if effect_store.force_revalidation_needed(repo_name, pr_number):
+                        return False
+                    exhaustion = check_pr_repair_exhaustion(repo_name, pr_number)
+                    if exhaustion and exhaustion.is_exhausted:
+                        return False
+                    latest = _current_adjudication_ledger_snapshots(repo_name, pr_number, github_client)
+                    return any(item.context is not None and item.context.context_id == upheld.context_id and item.result.status is AdjudicationStatus.APPLICABLE and item.result.decision_id == upheld.decision_id and item.source_comment_id == upheld.source_comment_id for item in latest)
+
+                def send_scoped(prompt: str, identity: str, final_authority_check: Callable[[], bool]) -> str:
+                    if origin is None:
+                        return "held_owner"
+                    try:
+                        accepted = _send_followup_with_quota_admission(origin.client, repo_name, scoped.task_id, prompt, (identity,), repair_target=target, final_authority_check=final_authority_check)
+                    except Exception:
+                        if origin.client.consume_followup_rejection(scoped.task_id, (identity,)):
+                            return "remote_rejected"
+                        raise
+                    if accepted:
+                        return "accepted"
+                    if origin.client.consume_followup_duplicate_guard(scoped.task_id, (identity,)):
+                        return "held_native_duplicate"
+                    if origin.client.consume_followup_rejection(scoped.task_id, (identity,)):
+                        return "remote_rejected"
+                    return "delivery_unknown"
+
+                if target is not None and origin is not None:
+                    status = deliver_scoped_followup(
+                        _cloud_review_repair_state_path(repo_name),
+                        target,
+                        upheld,
+                        current_source,
+                        send_scoped,
+                    )
+            except Exception as exc:
+                logger.warning(f"Scoped adjudicated correction remains fenced for PR #{pr_number}: {exc}")
+                status = "delivery_unknown"
+            actions.append(f"Scoped adjudicated correction for PR #{pr_number}: {status}")
+            _record_adjudication_effect_stage(pr_number, "SCOPED_FIX", upheld.context_id, upheld.decision_id, status)
+            continue
         try:
             effect_store.begin(upheld.context_id, repo_name, pr_number, upheld.decision_id, upheld.head_sha, upheld.contract_digest, "UPHOLD")
         except Exception as exc:
@@ -11113,7 +11445,7 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
                             actions.append(f"Adjudicated repair for PR #{pr_number} was not delivered: {attribution_error}")
                             status = "pending"
                             continue
-                        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, (upheld.decision_id,), repair_target=target) if provider == "codex-cloud" else client.send_followup(task_id, prompt)
+                        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, (upheld.decision_id,) if provider == "codex-cloud" else (), repair_target=target)
                         if accepted:
                             actions.append(f"Requested {provider} task '{task_id}' to apply an authorized bounded correction for PR #{pr_number}")
                             status = "delivered"
@@ -11470,7 +11802,8 @@ def _send_codex_cloud_error_feedback(
                     kwargs["repair_target"] = target
             if force:
                 kwargs["force"] = True
-            resumed = client.continue_if_paused(task_id, **kwargs)
+            with _new_pr_correction_request(repo_name, pr_number):
+                resumed = client.continue_if_paused(task_id, **kwargs)
 
         if resumed:
             get_trace_logger().log(
@@ -11646,7 +11979,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
             _record_review_feedback_state(
                 state_path,
                 delivered,
-                _load_pending_review_feedback(state_path),
+                set(),
                 validation_generations,
             )
             remediation_tokens = {finding_identity: validation_generations[validation_identities[finding_identity]] for _body, finding_identity in feedback_bodies}
@@ -11721,6 +12054,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
             if generation_identity not in delivered and (finding_identity not in delivered or (has_remediation_evidence[finding_identity] and validation_identities[finding_identity] not in delivered))
         ]
         if not pending_feedback:
+            _checkpoint_cloud_review_repair(repo_name, pr_data, github_client, selected_origin)
             return CloudReviewRepairResult([f"Skipped duplicate adversarial feedback to {provider} for PR #{pr_number}: all actionable feedback was already delivered"], delivered=True)
         failed_correction = any(finding_identity in delivered for _body, finding_identity, _generation_identity in pending_feedback)
 
@@ -11818,7 +12152,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
         attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin, github_client=github_client)
         if attribution_error:
             return [f"Adversarial feedback was not delivered for PR #{pr_number}: {attribution_error}"]
-        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, identities, repair_target=target)
+        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, identities, repair_target=target, recovery_provider=provider)
     except ClaudeFollowupHoldActive as exc:
         deferred_actions = PRActionList([f"DEFERRED Claude adversarial feedback for PR #{pr_number} until {exc.retry_not_before}"])
         deferred_actions.quota_deferred = True
@@ -11851,6 +12185,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
     try:
         with _cloud_review_delivery_lock:
             delivered = _load_delivered_review_feedback(state_path)
+            local_receipt = set(identities).issubset(delivered)
             delivered.update(identity for _body, finding_identity, generation_identity in pending_feedback for identity in (finding_identity, generation_identity))
             delivered.update(validation_identities[finding_identity] for _body, finding_identity, _generation_identity in pending_feedback)
             delivered.update(baseline_receipts)
@@ -12192,7 +12527,8 @@ def _handle_definitive_merge_rejection(
                         reason = f"Blocked merge-conflict resolution request for PR #{pr_number}: session '{session_id}' belongs to a durably retired implementation slot (REQ-009)"
                         return PRRepairResult(RepairDisposition.REFUSED, reason=reason)
                     prompt = render_prompt("pr.jules_merge_conflict_resolution")
-                    jules_client.send_message(session_id, prompt)
+                    with _new_pr_correction_request(repo_name, pr_number):
+                        jules_client.send_message(session_id, prompt)
                     return PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, attempt_started=True)
 
                 result = BaseUpdateConflictExecutionService().execute_conflict_repair(

@@ -12,9 +12,10 @@ import httpx
 import pytest
 
 from auto_coder.automation_config import AutomationConfig
-from auto_coder.automation_engine import AutomationEngine, EngineLifecycle
+from auto_coder.automation_engine import STARTUP_RECONCILIATION_STAGE, AutomationEngine, EngineLifecycle, _StartupReconciliationHandler
 from auto_coder.cli_commands_main import _run_process_issues_daemon
-from auto_coder.github_pending_work import PendingWorkPersistenceError
+from auto_coder.github_pending_work import PendingObligation, PendingReason, PendingWorkPersistenceError, WorkIdentity
+from auto_coder.github_request_governor import GovernorStateError
 from auto_coder.health_monitor import HealthMonitor
 from auto_coder.implementation_slots import ImplementationSlotUnavailable
 from auto_coder.local_job_handoff import LocalJobStoreUnavailable
@@ -23,6 +24,27 @@ from auto_coder.worker_management_bridge import WorkerManagementBridge, configur
 from auto_coder.worker_startup_failure import observed_startup_failure
 from tests.test_pending_work_resumption import _github_error
 from tests.test_worker_management_bridge import configure
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("implementation defect"), AssertionError("invariant"), ValueError("internal value"), PendingWorkPersistenceError("storage"), LocalJobStoreUnavailable("storage"), ImplementationSlotUnavailable("storage"), GovernorStateError("governor"), httpx.ConnectError("transport")],
+)
+def test_resumed_startup_does_not_reclassify_unrelated_defects_or_operational_errors(monkeypatch, error):
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    monkeypatch.setattr(engine, "_attempt_startup_reconciliation", AsyncMock(side_effect=error))
+    retained = PendingObligation(WorkIdentity("owner/repo", "startup", STARTUP_RECONCILIATION_STAGE), PendingReason.ADMISSION_DEFERRED, 1)
+
+    async def scenario():
+        engine._loop = asyncio.get_running_loop()
+        engine._startup_reconciliation_event = asyncio.Event()
+        with pytest.raises(type(error)) as caught:
+            await asyncio.to_thread(_StartupReconciliationHandler(engine, "owner/repo").dispatch, retained)
+        assert caught.value is error
+        assert not engine._startup_reconciliation_event.is_set()
+        assert not engine.startup_reconciled
+
+    asyncio.run(scenario())
 
 
 def test_actual_release_daemon_abandons_startup_but_owns_checkpoint_until_graceful_terminal(monkeypatch, tmp_path):
