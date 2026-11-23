@@ -3,7 +3,8 @@
 import fcntl
 import json
 import os
-import select
+import resource
+import selectors
 import sqlite3
 import subprocess
 import sys
@@ -141,6 +142,36 @@ def test_partial_fence_acquisition_releases_earlier_descriptors(tmp_path: Path):
         fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+def _fence_participant_ready(stdout):
+    with selectors.DefaultSelector() as selector:
+        selector.register(stdout, selectors.EVENT_READ)
+        return bool(selector.select(15))
+
+
+@pytest.mark.parametrize("minimum_fd", [0, 1024], ids=["ordinary-fd", "high-fd"])
+def test_fence_participant_ready_with_real_pipe(minimum_fd):
+    if minimum_fd >= 1024:
+        soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit != resource.RLIM_INFINITY and soft_limit <= minimum_fd:
+            pytest.skip(f"Synthetic high-FD control needs FD {minimum_fd}; soft RLIMIT_NOFILE is {soft_limit}")
+    read_fd, write_fd = os.pipe()
+    try:
+        duplicate = fcntl.fcntl(read_fd, fcntl.F_DUPFD_CLOEXEC, minimum_fd)
+        try:
+            reader = os.fdopen(duplicate, "r")
+        except BaseException:
+            os.close(duplicate)
+            raise
+        with reader:
+            assert reader.fileno() >= minimum_fd
+            os.write(write_fd, b"held\n")
+            assert _fence_participant_ready(reader)
+            assert reader.readline().strip() == "held"
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
 @pytest.mark.usefixtures("_use_real_commands")
 def test_independent_shared_fences_overlap_host_to_successor_without_owner_gap(tmp_path: Path):
     for name in ("a", "b"):
@@ -158,7 +189,7 @@ sys.stdin.readline()
 """
     process = subprocess.Popen([sys.executable, "-I", "-B", "-c", program, str(manifest)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        assert process.stdout is not None and select.select([process.stdout], [], [], 15)[0]
+        assert process.stdout is not None and _fence_participant_ready(process.stdout)
         assert process.stdout.readline().strip() == "held"
         check_exclusion_peer(bindings, held, process.pid)
         for fd in held:

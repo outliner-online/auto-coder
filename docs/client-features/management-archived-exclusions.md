@@ -209,6 +209,12 @@ CONFLICT/UNAVAILABLE responses are retained. No worker scheduler/provider or
 dashboard event schema changes are introduced.
 
 
+The component overlap fixture uses a context-managed default selector for its
+unchanged 15-second participant wait. Real-pipe controls cover ordinary and
+high-numbered descriptors; only the synthetic high-FD control may skip when
+soft `RLIMIT_NOFILE` cannot allocate FD 1024. These fixture checks do not certify
+an OCI artifact, installed source or live cutover.
+
 The dedicated `test_management_archived_cutover_container.py` cases run in the
 existing root `fresh-host` CI group with only disposable UUID-named containers,
 OAuth grants, database roots and image tags. They exercise the unpatched host
