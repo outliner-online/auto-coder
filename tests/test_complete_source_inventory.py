@@ -16,7 +16,7 @@ import pytest
 from scripts import check_source_test_shards
 
 from auto_coder.ci_shard_plan import read_plan
-from auto_coder.tested_source_refs import TestedSourceError
+from auto_coder.tested_source_refs import TestedSourceError as SourceQualificationError
 from auto_coder.util.gh_cache import GitDataResponse
 
 pytestmark = pytest.mark.usefixtures("_use_real_commands")
@@ -297,5 +297,5 @@ def test_recorded_native_receipts_qualify_complete_same_source_baseline_and_reje
         json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(TestedSourceError, match="incomplete or failed"):
+    with pytest.raises(SourceQualificationError, match="incomplete or failed"):
         check_source_test_shards.main()
