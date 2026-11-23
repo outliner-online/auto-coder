@@ -48,6 +48,7 @@ class Family:
     test_step_pattern: str
     source_paths: tuple[str, ...]
     guidance: str
+    require_test_step: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,9 @@ def read_config(path: Path) -> tuple[Workflow, ...]:
             sources = entry.get("source_paths")
             if not isinstance(sources, list) or not sources:
                 raise ValueError("Each family needs verified implementation source paths")
+            require_test_step = entry.get("require_test_step", False)
+            if not isinstance(require_test_step, bool):
+                raise ValueError("require_test_step must be a boolean")
             family = Family(
                 _text(entry.get("key")),
                 _text(entry.get("name")),
@@ -213,6 +217,7 @@ def read_config(path: Path) -> tuple[Workflow, ...]:
                 _text(entry.get("test_step_pattern")),
                 tuple(_text(source) for source in sources),
                 _text(entry.get("guidance")),
+                require_test_step,
             )
             re.compile(family.job_pattern)
             re.compile(family.test_step_pattern)
@@ -275,7 +280,7 @@ def collect(client: Client, workflows: tuple[Workflow, ...], cutoff: datetime) -
                     if observation.workflow.path != workflow.path:
                         continue
                     family = observation.family
-                    selected = [(job, duration) for job, duration in candidates if re.fullmatch(family.job_pattern, _text(job.get("name")))]
+                    selected = [(job, duration) for job, duration in candidates if re.fullmatch(family.job_pattern, _text(job.get("name"))) and (not family.require_test_step or any(re.search(family.test_step_pattern, _text(step.get("name"))) for step in _objects(job.get("steps", []))))]
                     if not selected:
                         continue
                     job, duration = max(selected, key=lambda item: (item[1], _number(item[0].get("id"))))
