@@ -71,6 +71,9 @@ class AcceptedReviewPayload:
 
     def canonical_json(self) -> str:
         raw = asdict(self)
+        for finding in raw["findings"]:
+            if finding.get("correction_scope") is None:
+                finding.pop("correction_scope", None)
         # Empty attribution is omitted so the identity of a payload that predates
         # it (and of every strong payload) is unchanged.
         for name in ("ordinary_attempt_id", "ordinary_attempt_sequence", "ordinary_reviewer"):

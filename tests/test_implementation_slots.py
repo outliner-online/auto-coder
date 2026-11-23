@@ -1,8 +1,10 @@
 """Tests for durable logical implementation ownership."""
 
+import fcntl
 import json
 import os
-import select
+import resource
+import selectors
 import subprocess
 import sys
 import tempfile
@@ -804,6 +806,78 @@ def test_corrupt_state_error_is_distinct_from_permission_failures(tmp_path):
         slots.active_owners()
 
 
+def _read_slot_participant_line(process, participant_diagnostics, timeout=15):
+    assert process.stdout is not None
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        readable = selector.select(timeout)
+    assert readable, f"Participant {process.pid} did not report within {timeout:g} seconds: {participant_diagnostics()}"
+    return process.stdout.readline().strip()
+
+
+def _require_slot_participant_fd(minimum_fd):
+    if minimum_fd >= 1024:
+        soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit != resource.RLIM_INFINITY and soft_limit <= minimum_fd:
+            pytest.skip(f"Synthetic high-FD control needs FD {minimum_fd}; soft RLIMIT_NOFILE is {soft_limit}")
+
+
+@pytest.mark.parametrize("minimum_fd", [0, 1024])
+@pytest.mark.parametrize("soft_limit", [1023, 1024, 1025, resource.RLIM_INFINITY])
+def test_slot_participant_fd_limit_guard(monkeypatch, minimum_fd, soft_limit):
+    # Inject the observation only; never change the process's resource limits.
+    monkeypatch.setattr(resource, "getrlimit", lambda limit: (soft_limit, soft_limit))
+    if minimum_fd >= 1024 and soft_limit != resource.RLIM_INFINITY and soft_limit <= minimum_fd:
+        with pytest.raises(pytest.skip.Exception, match="Synthetic high-FD control needs FD 1024"):
+            _require_slot_participant_fd(minimum_fd)
+    else:
+        _require_slot_participant_fd(minimum_fd)
+
+
+@pytest.mark.parametrize("minimum_fd", [0, 1024], ids=["ordinary-fd", "high-fd"])
+@pytest.mark.parametrize("report", ["ready", "eof", "timeout"])
+def test_slot_participant_reader_handles_high_fd(report, minimum_fd):
+    """Exercise the race fixture's real pipe reader beyond select's FD limit."""
+    _require_slot_participant_fd(minimum_fd)
+    script = "import sys; " + {"ready": "print('READY 123', flush=True)", "eof": "sys.exit(77)", "timeout": "sys.stdin.read(1)"}[report]
+    process = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert process.stdout is not None
+    descriptor = None
+    try:
+        descriptor = fcntl.fcntl(process.stdout.fileno(), fcntl.F_DUPFD_CLOEXEC, minimum_fd)
+        original = process.stdout
+        try:
+            process.stdout = os.fdopen(descriptor, "r")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        original.close()
+        assert process.stdout.fileno() >= minimum_fd
+
+        def diagnostics():
+            return "controlled participant diagnostics"
+
+        if report == "timeout":
+            started = time.monotonic()
+            with pytest.raises(AssertionError, match="did not report within 0.1 seconds: controlled participant diagnostics"):
+                _read_slot_participant_line(process, diagnostics, timeout=0.1)
+            assert 0.1 <= time.monotonic() - started < 5
+        else:
+            assert _read_slot_participant_line(process, diagnostics) == ("READY 123" if report == "ready" else "")
+            assert process.wait(timeout=5) == (0 if report == "ready" else 77)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+    assert process.stdin.closed and process.stdout.closed and process.stderr.closed
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
 @pytest.mark.parametrize("crash_after_persist", [False, True], ids=["admission", "post-persist-crash"])
 def test_cross_identity_processes_racing_final_slot_admit_exactly_one(crash_after_persist):
     """REQ-001/REQ-002/REQ-004: a published namespace is not consumed early."""
@@ -876,12 +950,6 @@ time.sleep(30)
             details.append({"pid": process.pid, "exit": exit_code, "stderr": stderr})
         return details
 
-    def read_participant_line(process):
-        assert process.stdout is not None
-        readable, _, _ = select.select([process.stdout], [], [], 15)
-        assert readable, f"Participant {process.pid} did not report within 15 seconds: {participant_diagnostics()}"
-        return process.stdout.readline().strip()
-
     try:
         for command in setup_commands:
             if os.geteuid() != 0:
@@ -913,7 +981,7 @@ time.sleep(30)
             )
             assert process.stdout is not None
             processes.append(process)
-        ready = [read_participant_line(process) for process in processes]
+        ready = [_read_slot_participant_line(process, participant_diagnostics) for process in processes]
         assert all(len(line.split()) == 2 and line.split()[0] == "READY" and line.split()[1].isdigit() for line in ready), f"Unexpected startup output {ready!r}: {participant_diagnostics()}"
         participant_pids = [int(line.split()[1]) for line in ready]
         assert len(set(participant_pids)) == 2
@@ -924,7 +992,7 @@ time.sleep(30)
             time.sleep(0.005)
         assert encountered_path.exists()
         release_path.touch()
-        outcomes = [read_participant_line(process) for process in processes]
+        outcomes = [_read_slot_participant_line(process, participant_diagnostics) for process in processes]
         state = json.loads(storage_path.read_text(encoding="utf-8"))
 
         def assert_successful_admission():

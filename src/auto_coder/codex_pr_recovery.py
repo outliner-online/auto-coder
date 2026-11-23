@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sqlite3
 import threading
 import time
@@ -306,6 +307,7 @@ class CodexPRRecoveryMonitor:
         # outbound request has occurred yet.
         if not await asyncio.to_thread(self.wham.follow_up_preflight):
             return
+        from .codex_work_accounting import CodexSendProvenance
         from .codex_work_fence import production_codex_fence
 
         source_request_id = f"{REMINDER_PURPOSE}:{fresh.execution.assistant_turn_id}"
@@ -336,7 +338,10 @@ class CodexPRRecoveryMonitor:
             return self.wham.send_follow_up(run.task_id, fresh.execution.assistant_turn_id, "Create PR", False)
 
         try:
-            result = await asyncio.to_thread(fence.execute, work_identity, reserve_and_send) if fence is not None and work_identity is not None else await asyncio.to_thread(reserve_and_send)
+            provenance = None
+            if run.launch_identity and run.publication_head_repository and run.publication_head_ref:
+                provenance = CodexSendProvenance(hashlib.sha256(b"Create PR").hexdigest(), (source_request_id,), publication_launch_identity=run.launch_identity, publication_head_repository=run.publication_head_repository, publication_head_ref=run.publication_head_ref)
+            result = await asyncio.to_thread(fence.execute, work_identity, reserve_and_send, send_provenance=provenance, publication_observation=fresh) if fence is not None and work_identity is not None else await asyncio.to_thread(reserve_and_send)
         except Exception as exc:
             logger.warning(f"Codex PR recovery send was fenced for {run.task_id}: {exc}")
             return

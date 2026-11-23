@@ -143,6 +143,7 @@ class Finding:
     disposition_evidence: str = ""
     disposition_head_sha: str = ""
     delivery_status: str = DELIVERY_NONE
+    correction_scope: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -375,6 +376,7 @@ class PrReviewCycleRepository:
             disposition_evidence=str(raw.get("disposition_evidence", "")),
             disposition_head_sha=str(raw.get("disposition_head_sha", "")),
             delivery_status=str(raw.get("delivery_status", DELIVERY_NONE)),
+            correction_scope=raw.get("correction_scope"),
         )
 
     def _strong_round_from_raw(self, raw: dict) -> StrongAuditRound:
@@ -897,7 +899,9 @@ class PrReviewCycleRepository:
         """
         if verdict not in (VERDICT_PASS, VERDICT_FINDINGS):
             raise ValueError(f"Unknown strong-audit verdict: {verdict!r}")
-        with self.serialized_transition(), self._locked():
+        from .strong_correction_scope import acceptance_lock, register_births
+
+        with acceptance_lock(self.repo_name, pr_number, findings), self.serialized_transition(), self._locked():
             state = self._read()
             prs = state["prs"]
             assert isinstance(prs, dict)
@@ -955,6 +959,7 @@ class PrReviewCycleRepository:
                     "disposition_evidence": "",
                     "disposition_head_sha": "",
                     "delivery_status": DELIVERY_NONE,
+                    "correction_scope": finding.correction_scope,
                 }
                 new_finding_ids.append(finding.finding_id)
             if new_finding_ids:
@@ -1018,6 +1023,7 @@ class PrReviewCycleRepository:
                 # longer applies to whatever new head follows.
                 pr_state["ordinary_pass"] = None
             self._bump(pr_state)
+            register_births(self.repo_name, pr_number, round_record, findings, int(pr_state["transition_version"]))
             self._write(state)
             return round_record
 

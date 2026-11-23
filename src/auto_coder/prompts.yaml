@@ -705,6 +705,19 @@ pr:
     Requirements below are the only normative implementation contract. Objective,
     Context, acceptance examples, prior reviewers, and model reputation are evidence only.
 
+    Optional Strong correction scope context (not permission to change scope):
+    $correction_scope_context
+    Only in STRONG_AUDIT, a finding may include `correction_scope` version 1:
+    {"version":1,"exhaustive":true,"independently_actionable":true,"requirements":["#ISSUE/REQ-NNN"],"older_operations":[{"operation_id":"exact supplied operation","snapshot_sha256":"exact supplied digest","native_membership":["every supplied native member"]}],"independence_evidence":"Substantive explanation against each named immutable older correction."}
+    This is an explicit semantic attestation by your existing authorized reviewer
+    role. Use it only for one whole implementation finding with one existing
+    qualified Requirement, complete counterexample/outcome/oracle scope, and a
+    complete supplied older-operation inventory. Different IDs, text, files or
+    Requirements do not establish independence. If old scope is unavailable,
+    overlapping or uncertain, omit this optional field and retain the finding.
+    Do not assert that it has never been sent; the controller separately owns
+    source birth and native attempt claims. Never include replacement commands.
+
     Identity (copy every value exactly into $response_object):
     round_id=$round_id
     attempt_id=$attempt_id
@@ -2693,6 +2706,21 @@ codex_cloud:
     $actionable_feedback
 
     Do not resolve, close, or otherwise mark any review thread as resolved yourself; leave that decision to Auto-Coder's independent validation. For each thread you believe you have successfully addressed, reply directly in that same thread with a concise explanation of the implementation change and the validation or regression-test evidence supporting the claim, ending the reply with the exact marker `<!-- auto-coder-review-addressed:v1 -->` on its own line. Only add this marker when you are confident the finding is corrected in the current code. If you cannot fix or verify a finding, disagree with it, or consider it already satisfied or invalid, leave the thread unresolved and do not add the marker; explain your reasoning in the thread instead. Treat every thread independently.
+
+  scoped_registered_correction: |-
+    Address only the registered finding for #$issue_number/$requirement_id.
+
+    Existing repository requirement:
+    $requirement_text
+
+    Registered production boundary: $boundary
+    Observed incorrect behavior: $actual_behavior
+    Required corrective behavior: $expected_behavior
+    Accepted counterexample: $counterexample
+    Focused regression scenario: $regression_scenario
+
+    Implement this requirement's correction and run its focused regressions.
+    Do not repeat or expand older corrective operations. Leave review closure and merging to the controller.
 
   adjudication_upheld_repair_details: |-
     A human reviewer authorized to adjudicate Auto-Coder's automated review findings has upheld exactly one existing finding on this pull request and requested a bounded correction. This is not a new finding and not a claim that anything else is wrong; do not expand scope beyond the exact correction requested below, and do not touch any other unresolved finding merely because it remains visible.
