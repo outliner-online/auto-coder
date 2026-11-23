@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -225,7 +226,17 @@ def _open_fd_padding(minimum_descriptor: int) -> list[int]:
     return descriptors
 
 
-def _assert_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, high_descriptor: bool) -> None:
+@contextmanager
+def _managed_fd_padding(minimum_descriptor: int | None):
+    descriptors = _open_fd_padding(minimum_descriptor) if minimum_descriptor is not None else []
+    try:
+        yield descriptors
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def _run_large_unread_prompt_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, high_descriptor: bool, fd_padding: list[int]) -> None:
     # Control only the execution clock, not scheduling, Popen or real cleanup.
     # A total wall-time bound also measures pre-deadline startup and CI load.
     budget = 0.05
@@ -240,7 +251,6 @@ def _assert_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypat
     controllers = []
     stops = []
     ready = tmp_path / "child-ready"
-    fd_padding = _open_fd_padding(1024) if high_descriptor else []
 
     class Clock:
         now = 0.0
@@ -363,10 +373,13 @@ def _assert_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypat
             if thread is not None:
                 thread.join(15)
                 assert not thread.is_alive(), "fixture I/O or deadline controller leaked"
-        for descriptor in fd_padding:
-            os.close(descriptor)
         if (owner.root / "invocation-one").exists():
             owner.discard(owner.root / "invocation-one")
+
+
+def _assert_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, high_descriptor: bool) -> None:
+    with _managed_fd_padding(1024 if high_descriptor else None) as fd_padding:
+        _run_large_unread_prompt_timeout(tmp_path, monkeypatch, high_descriptor=high_descriptor, fd_padding=fd_padding)
 
 
 def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep) -> None:
@@ -397,6 +410,18 @@ def test_fd_padding_closes_descriptors_when_capacity_is_exhausted(monkeypatch: p
     with pytest.raises(OSError, match="fixture descriptor capacity exhausted"):
         _open_fd_padding(1024)
     for descriptor in opened:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(descriptor)
+
+
+def test_fd_padding_closes_descriptors_after_body_failure() -> None:
+    acquired: list[int] = []
+    with pytest.raises(RuntimeError, match="synthetic teardown failure"):
+        with _managed_fd_padding(16) as descriptors:
+            acquired.extend(descriptors)
+            raise RuntimeError("synthetic teardown failure")
+    assert acquired
+    for descriptor in acquired:
         with pytest.raises(OSError, match="Bad file descriptor"):
             os.fstat(descriptor)
 
