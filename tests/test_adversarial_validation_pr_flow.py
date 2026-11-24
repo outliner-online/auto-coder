@@ -4002,6 +4002,136 @@ class TestClaimedReviewThreadValidationFlow:
         merge_pr.assert_not_called()
         assert thread.is_resolved is False
 
+    @pytest.mark.parametrize(
+        ("review_state", "repair_state", "codex_completed", "discussion_changed", "expects_validation"),
+        [
+            pytest.param("old-head", "acknowledged", False, False, True, id="acknowledged-mixed-findings"),
+            pytest.param("old-head", "acknowledged", True, False, True, id="stable-post-codex-recheck"),
+            pytest.param("old-head", "acknowledged", True, True, False, id="changed-post-codex-discussion"),
+            pytest.param("old-head", "unacknowledged", False, False, False, id="delivery-without-acknowledgement"),
+            pytest.param("old-head", "delivered", False, False, False, id="active-corrective-handoff"),
+            pytest.param("old-head", "indeterminate", False, False, False, id="uncertain-followup-receipt"),
+            pytest.param("same-head", "acknowledged", False, False, False, id="saved-current-head-needs-tests"),
+            pytest.param("human-only", "acknowledged", False, False, False, id="no-authentic-revalidation-input"),
+        ],
+    )
+    def test_acknowledged_mixed_reviews_admit_only_current_head_reassessment(self, review_state, repair_state, codex_completed, discussion_changed, expects_validation):
+        """Completed repairs cannot starve an eligible new-head App review or authorize human closure."""
+        from auto_coder.adversarial_validator import ReviewThreadDisposition, adversarial_validation_comment_marker
+        from auto_coder.execution_trace import Outcome, get_trace_collector
+
+        head_sha = "b" * 40
+        reviewed_sha = head_sha if review_state == "same-head" else "a" * 40
+        reviewer_login = "auto-coder-reviewer[bot]"
+        addressed = "Implemented and tested.\\n\\n<!-- auto-coder-review-addressed:v1 -->"
+        app_thread = ReviewThread(
+            id="thread-app-finding",
+            is_resolved=False,
+            comments=[ReviewThreadComment(database_id=17, body="### Auto-Coder material test-oracle gap\n\nAdd the missing failure regression.", author_login=reviewer_login, author_id=1)],
+        )
+        human_thread = ReviewThread(
+            id="thread-human-finding",
+            is_resolved=False,
+            comments=[
+                ReviewThreadComment(database_id=18, body="[P2] Verify complete native coverage output.", author_login="implementer", author_id=2),
+                ReviewThreadComment(database_id=19, body=addressed, author_login="implementer", author_id=2, in_reply_to_id=18),
+            ],
+        )
+        threads = [human_thread] if review_state == "human-only" else [app_thread, human_thread]
+        client = GitHubClient("test-token")
+        client.get_authenticated_user_login = MagicMock(return_value="implementer")
+        client.get_pr_review_threads_strict = MagicMock(return_value=threads)
+        client.get_pr_reviews_strict = MagicMock(
+            return_value=[
+                {"body": f"{adversarial_validation_comment_marker(reviewed_sha)}\n## ⚠️ Auto-Coder adversarial validation: NEEDS_TESTS", "user": {"login": reviewer_login}},
+                {"body": f"{adversarial_validation_comment_marker('earlier-head')}\n## ❌ Auto-Coder adversarial validation: NEEDS_FIX", "user": {"login": reviewer_login}},
+            ]
+        )
+        client.get_pr_comments = MagicMock(return_value=[])
+        client.get_pr_comments_strict = MagicMock(return_value=[])
+        client.get_pull_request = MagicMock(return_value={"head": {"sha": head_sha}})
+        with patch("auto_coder.pr_processor.get_pr_review_allowlist_from_config", return_value=[]):
+            initial_state = _get_claimed_review_thread_state(client, "owner/repo", 609)
+        assert initial_state.claimed == ()
+        assert initial_state.blocking_unresolved == tuple(threads)
+
+        post_codex_state = initial_state
+        if discussion_changed:
+            changed_thread = ReviewThread(
+                id=human_thread.id,
+                is_resolved=False,
+                comments=[*human_thread.comments, ReviewThreadComment(database_id=20, body="The latest regression still omits a branch.", author_login="implementer", author_id=2, in_reply_to_id=18)],
+            )
+            post_codex_state = ClaimedReviewThreadGateState(unresolved=(app_thread, changed_thread), blocking_unresolved=(app_thread, changed_thread), has_blocking_unresolved=True)
+        final_state = ClaimedReviewThreadGateState(unresolved=(human_thread,), blocking_unresolved=(human_thread,), has_blocking_unresolved=True)
+        observed_states = [initial_state, post_codex_state, final_state] if codex_completed else [initial_state, final_state]
+        repair_result = CloudReviewRepairResult(
+            ["Existing review feedback was already delegated"],
+            delivered=repair_state == "delivered",
+            deferred=repair_state != "delivered",
+            wait_reason="indeterminate" if repair_state == "indeterminate" else "",
+            acknowledged_no_actionable_feedback=repair_state == "acknowledged",
+        )
+        validation = AdversarialValidationResult(
+            result="PASS",
+            summary="The new-head regression independently fixes the App finding",
+            thread_dispositions=[ReviewThreadDisposition(thread_id=app_thread.id, status="ADDRESSED", rationale="The failure path now has independent coverage", evidence="tests/test_reject.py exercises both native exit statuses")],
+        )
+        config = AutomationConfig()
+        config.AUTO_MERGE = True
+        config.ENABLE_ADVERSARIAL_VALIDATION = True
+        config.MAX_ADVERSARIAL_VALIDATIONS = 2
+        pr_data = {"number": 609, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": head_sha}}
+        client.get_pull_request_metadata_strict = MagicMock(return_value={**pr_data, "user": {"login": "implementer"}, "state": "open"})
+        collector = get_trace_collector()
+        with (
+            patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True),
+            patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"}),
+            patch("auto_coder.pr_processor._check_github_actions_status", side_effect=authoritative_ci_status(success=True, ids=[1])),
+            patch("auto_coder.pr_processor._get_claimed_review_thread_state", side_effect=observed_states),
+            patch("auto_coder.pr_processor._get_codex_review_state", return_value=CodexReviewState(present=codex_completed, completed=codex_completed)),
+            patch("auto_coder.pr_processor._get_adversarial_validation_eligibility", return_value=AdversarialValidationEligibility(issue_numbers=(99,))),
+            patch("auto_coder.pr_processor.run_adversarial_validation", return_value=validation) as run_validation,
+            patch("auto_coder.pr_processor.publish_adversarial_review", return_value=ReviewPublicationResult(True, "COMMENT", "")),
+            patch("auto_coder.pr_processor.resolve_addressed_review_threads", return_value=[app_thread.id]) as resolve_threads,
+            patch("auto_coder.pr_processor._delegate_cloud_review_thread_repair", return_value=repair_result) as repair,
+            patch("auto_coder.pr_processor._replay_saved_nonpass_review", return_value=(repair_result, False)) as replay,
+            patch("auto_coder.pr_processor.isolated_pr_head_worktree"),
+            patch("auto_coder.pr_processor._merge_pr") as merge_pr,
+            collector.start_execution("owner/repo", "pr", 609, origin="worker") as execution,
+        ):
+            actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
+
+        if review_state == "same-head":
+            replay.assert_called_once()
+            repair.assert_not_called()
+        else:
+            repair.assert_called_once()
+            assert repair.call_args.kwargs["unresolved_threads"] == (human_thread,)
+            replay.assert_not_called()
+        events = [event for event in collector.get_snapshot(repository="owner/repo", item_type="pr", item_number=609).events if event.execution_id == execution.scope.execution_id]
+        reassessments = [event for event in events if event.stage_id == "pr.review-thread-gate" and event.facts.get("effect") == "acknowledged-review-reassessment"]
+        if expects_validation:
+            run_validation.assert_called_once()
+            validation_threads = run_validation.call_args.kwargs["claimed_review_threads_section"]
+            assert f"### Older-head adversarial finding requiring revalidation: {app_thread.id}" in validation_threads
+            assert human_thread.id not in validation_threads
+            assert "explicit --force" not in validation_threads
+            resolve_threads.assert_called_once()
+            assert any("unresolved review threads remain at the merge boundary" in action for action in actions)
+            assert len(reassessments) == 1
+            assert reassessments[0].outcome == Outcome.DEFERRED
+            assert reassessments[0].facts["examined_head"] == head_sha
+            assert reassessments[0].facts["blocking_thread_ids"] == [human_thread.id]
+            assert reassessments[0].facts["revalidation_thread_ids"] == [app_thread.id]
+        else:
+            run_validation.assert_not_called()
+            resolve_threads.assert_not_called()
+            if not discussion_changed:
+                assert reassessments == []
+        merge_pr.assert_not_called()
+        assert human_thread.is_resolved is False
+
     @pytest.mark.parametrize("app_identity_login", ["auto-coder-reviewer", "auto-coder-reviewer[bot]"])
     @pytest.mark.parametrize("review_cap", [None, 1], ids=["unlimited", "reached-cap"])
     def test_forced_revalidation_reaches_validation_despite_same_head_error_and_unresolved_thread(self, app_identity_login, review_cap):

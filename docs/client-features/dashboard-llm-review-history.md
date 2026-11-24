@@ -237,3 +237,13 @@ An unchanged poll with only prior receipts reports `DEFERRED`, preserving the
 unresolved-thread gate. An explicit same-account guidance reply can produce one
 new handoff; its repeated polls are deferred. The existing trace schema and
 renderer remain unchanged; neither state establishes implementation completion.
+
+When acknowledged cloud corrections leave ordinary review threads unresolved,
+an authentic older-head finding can still enter its first current-head review.
+The existing review-thread gate records a deferred
+`acknowledged-review-reassessment` effect with the examined head, ordinary
+blocking thread IDs and authenticated revalidation thread IDs. This admission
+is separate from the preceding deferred repair observation and the following
+validator result. It is not an explicit force request, an external-thread
+closure, or merge completion. Changed post-Codex discussion, newly actionable
+feedback and observed uncertain delivery retain their existing waits.
