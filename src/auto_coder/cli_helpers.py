@@ -1,5 +1,6 @@
 """CLI helper functions for backend management and validation."""
 
+import importlib.util
 import math
 import os
 import shlex
@@ -84,10 +85,10 @@ def check_claude_cli_or_fail() -> None:
     check_cli_tool(tool_name="claude", install_url="https://claude.ai/download\nOr use: npm install -g @anthropic-ai/claude-code", version_flag="--version")
 
 
-def check_aider_cli_or_fail() -> None:
-    """Check if aider CLI is available and working."""
-    # Note: aider is typically a python library but it does have a CLI
-    check_cli_tool(tool_name="aider", install_url="pip install aider-chat", version_flag="--version")
+def check_aider_library_or_fail() -> None:
+    """Check the manually installed Aider Python API without importing it."""
+    if importlib.util.find_spec("aider") is None:
+        raise click.ClickException("Aider Python API is unavailable. Install aider-chat manually in the Python environment running Auto-Coder; Auto-Coder does not install it.")
 
 
 def check_opencode_cli_or_fail() -> None:
@@ -290,7 +291,7 @@ def check_backend_prerequisites(backends: list[str]) -> None:
         elif backend_name == "claude":
             check_claude_cli_or_fail()
         elif backend_name == "aider":
-            check_aider_cli_or_fail()
+            check_aider_library_or_fail()
         elif backend_name == "opencode":
             check_opencode_cli_or_fail()
         elif backend_name == "codex-cloud":

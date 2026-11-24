@@ -1,21 +1,23 @@
-"""Exercise Aider's real imports and numerical ranking on each tested Python."""
+"""Aider stays outside the installed application dependency graph."""
 
-import networkx as nx
-import pytest
-
-
-def test_aider_backend_dependencies_import():
-    from auto_coder.aider_client import Coder, InputOutput, Model
-
-    # AiderClient catches ImportError, so assert the backend was actually loaded.
-    assert Coder is not None
-    assert InputOutput is not None
-    assert Model is not None
+import importlib.util
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
 
 
-def test_aider_repository_ranking_numerical_dependencies():
-    # RepoMap uses NetworkX PageRank, which executes NumPy and SciPy sparse code.
-    graph = nx.DiGraph([("caller", "callee"), ("callee", "callee")])
-    ranking = nx.pagerank(graph, alpha=0.85)
+def test_aider_is_not_installed_or_locked():
+    root = Path(__file__).resolve().parents[1]
+    lock = tomllib.loads((root / "uv.lock").read_text())
+    names = {package["name"] for package in lock["package"]}
+    assert names.isdisjoint({"aider-chat", "audioop-lts", "numpy", "scipy", "pydub", "regex"})
+    assert "python-dateutil" in names
+    assert importlib.util.find_spec("aider") is None
 
-    assert ranking == pytest.approx({"caller": 0.075, "callee": 0.925})
+
+def test_native_entry_point_without_aider(_use_real_commands):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([str(Path(sys.executable).with_name("auto-coder")), "--help"], cwd=root, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "Usage:" in result.stdout
