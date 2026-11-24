@@ -323,3 +323,46 @@ def test_recorded_native_receipts_qualify_complete_same_source_baseline_and_reje
     )
     with pytest.raises(SourceQualificationError, match="incomplete or failed"):
         check_source_test_shards.main()
+
+
+def test_recorded_timing_comparison_reports_confounded_result_as_inconclusive() -> None:
+    """Do not turn unmatched successful runs into a measured improvement claim."""
+    evidence_path = ROOT / "tests/data/complete-source-timing-comparison-aed1e23.json"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    candidate = evidence["candidate"]
+    reference = evidence["reference"]
+    comparison = evidence["comparison"]
+
+    assert evidence["schema_version"] == "complete-source-timing-comparison-v1"
+    assert evidence["controls"] == {
+        "automatic_retry_observation": ("Both successful runs are attempt 1; every receipt records one native invocation " "and each selected node executes once."),
+        "profile_id": "source-required-v1",
+        "python_major_minor": "3.12",
+        "selector": "not opencode_live",
+        "workflow": "Test Source for Runtime",
+    }
+    assert candidate["run_attempt"] == reference["run_attempt"] == 1
+    assert candidate["max_job_elapsed_seconds"] == (candidate["pre_command_seconds"] + candidate["max_command_elapsed_seconds"] + candidate["post_command_seconds"])
+    assert reference["max_job_elapsed_seconds"] == (reference["pre_command_seconds"] + reference["max_command_elapsed_seconds"] + reference["post_command_seconds"])
+    for observation in (candidate, reference):
+        phases = observation["max_native_phase_seconds"]
+        assert phases["total"] == pytest.approx(phases["setup"] + phases["call"] + phases["teardown"], abs=0.001)
+
+    assert comparison["job_elapsed_delta_seconds"] == (candidate["max_job_elapsed_seconds"] - reference["max_job_elapsed_seconds"])
+    assert comparison["command_elapsed_delta_seconds"] == (candidate["max_command_elapsed_seconds"] - reference["max_command_elapsed_seconds"])
+    assert comparison["native_phase_delta_seconds"] == pytest.approx(
+        candidate["max_native_phase_seconds"]["total"] - reference["max_native_phase_seconds"]["total"],
+        abs=0.001,
+    )
+    assert candidate["source_sha"] != reference["source_sha"]
+    assert candidate["configuration_digest"] != reference["configuration_digest"]
+    assert candidate["inventory_nodes"] != reference["inventory_nodes"]
+    assert candidate["max_shard"].split("/")[1] != reference["max_shard"].split("/")[1]
+    assert comparison["conclusion"] == "inconclusive"
+    assert set(comparison["reasons"]) == {
+        "different source revisions",
+        "different configuration digests",
+        "different native inventories",
+        "different shard counts",
+        "single successful observation per configuration",
+    }
