@@ -1,0 +1,50 @@
+name: Issue 2888 Selective Cancellation Fixture
+on:
+  pull_request:
+    branches: [fixture/issue-2888-base-20261124]
+permissions:
+  contents: read
+jobs:
+  root-a:
+    name: Cancelled root A
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Wait for deliberate cancellation on the initial attempt
+        if: github.run_attempt == 1
+        run: sleep 240
+      - name: Complete selected root
+        run: echo 'root A completed'
+  root-b:
+    name: Cancelled root B
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Wait for deliberate cancellation on the initial attempt
+        if: github.run_attempt == 1
+        run: sleep 240
+      - name: Complete selected root
+        run: echo 'root B completed'
+  unrelated:
+    name: Unrelated successful shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo 'This successful shard must run exactly once.'
+  required-aggregate:
+    name: Required aggregate
+    if: always()
+    needs: [root-a, root-b, unrelated]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require all root jobs to succeed
+        env:
+          ROOT_A: ${{ needs.root-a.result }}
+          ROOT_B: ${{ needs.root-b.result }}
+          UNRELATED: ${{ needs.unrelated.result }}
+        run: |
+          printf 'root_a=%s root_b=%s unrelated=%s\n' "$ROOT_A" "$ROOT_B" "$UNRELATED"
+          test "$ROOT_A" = success
+          test "$ROOT_B" = success
+          test "$UNRELATED" = success

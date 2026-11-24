@@ -103,3 +103,31 @@ def test_changed_or_closed_target_refuses_before_ci_read():
                 assert authority.allowed is False
                 assert reason in authority.reason
             observe.assert_not_called()
+
+
+@pytest.mark.parametrize("conclusion", [CIConclusion.CANCELLED, CIConclusion.SUCCESS, CIConclusion.SKIPPED])
+def test_non_failure_terminal_results_do_not_admit_code_repair(conclusion):
+    observed = snapshot(workflow("2", 2, conclusion))
+    assert evaluate_ci_repair_snapshot(observed) == (False, "CI has no current terminal failure")
+
+
+def test_cancelled_root_does_not_hide_an_independent_test_failure():
+    observed = snapshot(
+        workflow("2", 2, CIConclusion.CANCELLED),
+        WorkflowObservation(WorkflowExecutionIdentity("independent", "3", 1), CIConclusion.FAILURE),
+    )
+    assert evaluate_ci_repair_snapshot(observed) == (True, "current exact-head CI failure")
+    from auto_coder.ci_repair_authority import CIRepairAuthority
+
+    assert CIRepairAuthority(True, "failure", "head", observed).failure_identities == ("workflow:independent:run:3:attempt:1",)
+
+
+def test_interruption_annotation_preserves_native_red_merge_evidence():
+    from auto_coder.ci_repair_authority import CIRepairAuthority
+
+    aggregate = WorkflowObservation(WorkflowExecutionIdentity("workflow", "2", 2), CIConclusion.FAILURE, repair_trigger=False)
+    observed = snapshot(aggregate, workflow("3", 1, CIConclusion.CANCELLED))
+    assert evaluate_ci_repair_snapshot(observed) == (False, "CI has no current terminal failure")
+    assert aggregate.conclusion is CIConclusion.FAILURE
+    assert observed.facts[1].conclusion is CIConclusion.CANCELLED
+    assert CIRepairAuthority(False, "interrupted", "head", observed).failure_identities == ()

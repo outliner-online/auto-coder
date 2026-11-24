@@ -9,12 +9,15 @@ import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 from urllib.parse import urlparse
 
 import tomli_w
 
 from .logger_config import get_logger
+
+if TYPE_CHECKING:
+    from .ci_cancellation_recovery import RecoveryPolicy
 
 # Define implementation-required options for each backend type. Codex execution
 # policies are validated by mode in ``BackendConfig.validate_required_options``
@@ -2183,6 +2186,43 @@ def get_jules_pr_ci_timeout_hours_from_config(
         value_type=int,
         repo_name=repo_name,
     )
+
+
+def get_ci_cancellation_recovery_from_config(
+    config_path: Optional[str] = None,
+    repo_name: Optional[str] = None,
+) -> "tuple[RecoveryPolicy, ...]":
+    """Load explicitly enabled normal PR test workflows for cancellation recovery."""
+    from .ci_cancellation_recovery import RecoveryPolicy
+
+    data = load_app_config_data(config_path=config_path, repo_name=repo_name)
+    section = data.get("ci_cancellation_recovery", {})
+    if not isinstance(section, dict):
+        raise ValueError("[ci_cancellation_recovery] must be a TOML table")
+    workflows = section.get("workflows", [])
+    if not isinstance(workflows, list):
+        raise ValueError("ci_cancellation_recovery.workflows must be an array of tables")
+    policies = []
+    seen_paths = set()
+    for entry in workflows:
+        if not isinstance(entry, dict) or set(entry) - {"workflow_path", "root_job_names", "aggregate_job_names", "multi_root_verified"}:
+            raise ValueError("Cancellation recovery workflow has invalid configuration fields")
+        path = entry.get("workflow_path")
+        if not isinstance(path, str) or not path.startswith(".github/workflows/") or not path.endswith((".yml", ".yaml")) or len(Path(path).parts) != 3 or path in seen_paths:
+            raise ValueError("Cancellation recovery requires distinct .github/workflows/*.yml paths")
+        roots = entry.get("root_job_names")
+        aggregates = entry.get("aggregate_job_names", [])
+        for names in (roots, aggregates):
+            if not isinstance(names, list) or any(not isinstance(name, str) or not name.strip() or name != name.strip() for name in names) or len(set(names)) != len(names):
+                raise ValueError("Cancellation recovery job names must be unique nonempty exact strings")
+        if not roots or set(roots) & set(aggregates):
+            raise ValueError("Cancellation recovery roots must be nonempty and distinct from aggregates")
+        multi_root_verified = entry.get("multi_root_verified", False)
+        if not isinstance(multi_root_verified, bool):
+            raise ValueError("Cancellation recovery multi_root_verified must be a boolean")
+        policies.append(RecoveryPolicy(path, tuple(roots), tuple(aggregates), multi_root_verified))
+        seen_paths.add(path)
+    return tuple(policies)
 
 
 def get_github_action_log_max_length_from_config(

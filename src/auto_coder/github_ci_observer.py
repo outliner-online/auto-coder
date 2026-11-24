@@ -128,6 +128,13 @@ def accept_and_fence_ci_delivery(accept: Callable[[], bool], reason: str) -> boo
 
 
 @contextmanager
+def ci_effect_authority() -> Iterator[None]:
+    """Serialize a final CI effect validation with accepted webhook knowledge."""
+    with _ci_authority_barrier:
+        yield
+
+
+@contextmanager
 def ci_observation_merge_authority(snapshot: CIObservationSnapshot) -> Iterator[bool]:
     """Prevent accepted CI invalidation between authority proof and merge."""
     with _ci_authority_barrier:

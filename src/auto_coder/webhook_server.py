@@ -195,10 +195,24 @@ async def process_github_payload(
         if not numbers and head_sha is None:
             raise HTTPException(status_code=422, detail="Supported CI delivery requires a PR number or head SHA")
         workflow_id = container.get("workflow_id")
-        run_id = container.get("run_id") or container.get("id")
+        run_id = container.get("run_id") if event_type == "workflow_job" else container.get("run_id") or container.get("id")
+        if event_type in {"workflow_job", "workflow_run"} and (not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0):
+            run_id = None
         attempt = container.get("run_attempt")
+        job_id = container.get("id") if event_type == "workflow_job" else None
+        conclusion = container.get("conclusion")
         delivery = CIWebhookDelivery(
-            repo_name, delivery_id, event_type or "", action if isinstance(action, str) else None, numbers, head_sha, str(workflow_id) if workflow_id is not None else None, str(run_id) if run_id is not None else None, attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else None
+            repo_name,
+            delivery_id,
+            event_type or "",
+            action if isinstance(action, str) else None,
+            numbers,
+            head_sha,
+            str(workflow_id) if workflow_id is not None else None,
+            str(run_id) if run_id is not None else None,
+            attempt if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0 else None,
+            str(job_id) if isinstance(job_id, int) and not isinstance(job_id, bool) and job_id > 0 else None,
+            conclusion if isinstance(conclusion, str) else None,
         )
         try:
             accepted = await asyncio.to_thread(
