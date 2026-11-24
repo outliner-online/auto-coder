@@ -5,12 +5,15 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .issue_dispatch import DispatchResult
 from .logger_config import get_logger
 from .pr_processing_evidence import FinalGateEvidence
 from .pr_repair_dispatch import PRRepairResult
+
+if TYPE_CHECKING:
+    from .ci_cancellation_recovery import RecoveryPolicy
 
 logger = get_logger(__name__)
 
@@ -81,6 +84,7 @@ class AutomationConfig:
     JULES_ONLY_MODE: bool = False
     repo_name: Optional[str] = None
     jules_mode: Optional[bool] = None
+    CI_CANCELLATION_RECOVERY: "tuple[RecoveryPolicy, ...]" = ()
 
     # Label prompt mappings for label-based issue/PR processing
     # Maps labels to prompt template keys
@@ -237,6 +241,7 @@ class AutomationConfig:
             get_active_repo_name,
             get_adversarial_validation_concurrency_from_config,
             get_adversarial_validation_max_reviews_from_config,
+            get_ci_cancellation_recovery_from_config,
             get_feature_switch_from_config,
             get_github_action_log_max_length_from_config,
             get_isolate_single_test_on_failure_from_config,
@@ -253,6 +258,7 @@ class AutomationConfig:
 
         effective_repo = repo_name if repo_name is not None else get_active_repo_name()
         object.__setattr__(self, "repo_name", effective_repo)
+        object.__setattr__(self, "CI_CANCELLATION_RECOVERY", get_ci_cancellation_recovery_from_config(repo_name=effective_repo))
 
         object.__setattr__(self, "JULES_WAIT_TIMEOUT_HOURS", get_jules_wait_timeout_hours_from_config(repo_name=effective_repo))
         object.__setattr__(self, "JULES_PR_CI_TIMEOUT_HOURS", get_jules_pr_ci_timeout_hours_from_config(repo_name=effective_repo))

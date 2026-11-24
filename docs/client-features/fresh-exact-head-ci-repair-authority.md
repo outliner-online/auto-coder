@@ -14,3 +14,14 @@ observation, while a request that already crossed the boundary is reported as a
 historical delivery. Refusals are retryable/deferred and do not publish a
 fix-requested receipt. Each later initiation, including resumed work, performs a
 new strict read rather than inheriting an earlier failure or persisted intent.
+
+Native `cancelled` conclusions are settled interruptions, never code-repair
+triggers. For explicitly configured cancellation-recovery workflows, the final
+admission also reads complete native job evidence for the effective run attempt.
+It resolves configured aggregate gates to exact native check IDs and excludes
+interruption-derived aggregate failures. An independently failed or timed-out
+non-aggregate job still admits normal repair alongside cancelled roots. Unknown
+job/check identity, active execution, or changed attempt evidence defers repair.
+The repair annotation preserves every native conclusion, so an interrupted or
+failed aggregate remains red for merge eligibility. The original observation's
+invalidation barrier still fences the joined evidence at the first effect.

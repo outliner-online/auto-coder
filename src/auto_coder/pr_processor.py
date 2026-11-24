@@ -8152,6 +8152,48 @@ def _handle_pr_merge(
                 _record_pr_stage(pr_number, "pr.ci-watch-registration", f"pr#{pr_number} CI watch registration", Outcome.DEFERRED, {"reason": str(exc)})
                 return actions
 
+        # Recovery owns only a selective CI effect. Its receipt is never a
+        # successful test/merge verdict, and ordinary review/check gates still
+        # decide every later action from freshly observed native results.
+        recovery_policies = getattr(config, "CI_CANCELLATION_RECOVERY", ())
+        if watched_head and recovery_policies:
+            from .ci_cancellation_recovery import RecoveryResult, recover_cancelled_jobs
+
+            try:
+                webhooks_verified, cancellation_signal = ci_watch_store.ci_recovery_signal_state(repo_name, watched_head)
+                recovery = recover_cancelled_jobs(github_client, repo_name, pr_number, watched_head, recovery_policies) if webhooks_verified else RecoveryResult("deferred", "webhook_delivery_unverified")
+            except Exception as exc:
+                logger.warning(f"CI cancellation recovery deferred repository={repo_name} pr={pr_number} error={type(exc).__name__}")
+                cancellation_signal = False
+                recovery = RecoveryResult("deferred", "recovery_observation_unavailable")
+            if recovery.status not in {"disabled", "no_candidate"}:
+                actions.append(f"CI cancellation recovery for PR #{pr_number}: {recovery.status} ({recovery.reason})")
+                _record_pr_stage(
+                    pr_number,
+                    "pr.ci-cancellation-recovery",
+                    f"pr#{pr_number} cancelled CI recovery",
+                    Outcome.ACCEPTED_HANDOFF if recovery.status == "accepted" else Outcome.DEFERRED,
+                    {
+                        "effect": "selective-job-rerun",
+                        "status": recovery.status,
+                        "reason": recovery.reason,
+                        "run_id": recovery.run_id,
+                        "attempt": recovery.attempt,
+                        "job_id": recovery.job_id,
+                        "logical_job": recovery.logical_job,
+                        "claim_id": recovery.claim_id,
+                        "cancellation_signal": cancellation_signal,
+                        "ci_success": False,
+                    },
+                )
+            if recovery.status in {"accepted", "indeterminate"}:
+                if processing_status is not None:
+                    processing_status.outcome = PRProcessingOutcome.DEFERRED
+                return actions
+            # A rejected/exhausted/unsafe recovery does not suppress repair of
+            # an independently demonstrated test failure. The ordinary repair
+            # authority below excludes interruptions and their aggregates.
+
         # A stale review-thread resolution (issue #1619) that could not be
         # rolled back in an earlier run is a persistent integrity failure:
         # retry it on every processing run, and refuse to merge while any
@@ -8495,7 +8537,7 @@ def _handle_pr_merge(
             github_client=github_client,
         )
         local_ports = LocalCIRepairPorts(
-            authority=current_ci_failure_authority,
+            authority=lambda client, repository, number, head: current_ci_failure_authority(client, repository, number, head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())),
             prepare_branch=lambda: _checkout_pr_branch(repo_name, pr_data, config, perform_checkout=False),
             branch_context=BranchManager,
             automatic_fix_enabled=lambda: _is_automatic_test_fix_enabled(config, repo_name),
@@ -9851,7 +9893,7 @@ PR Author: {pr_data.get('user', {}).get('login', 'Unknown')}
             return unsent(RepairDisposition.DEFERRED, "graceful shutdown is draining")
 
         expected_head = str(pr_data.get("head", {}).get("sha") or "")
-        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head) as authority:
+        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())) as authority:
             if not authority.allowed:
                 actions.append(f"Deferred Jules CI feedback for PR #{pr_number}: {authority.reason}")
                 return unsent(RepairDisposition.DEFERRED, authority.reason)
@@ -11810,7 +11852,7 @@ def _send_codex_cloud_error_feedback(
             details = get_prompt_template("codex_cloud.ci_review_repair_details")
             prompt = build_existing_pr_repair_prompt(target, details)
         expected_head = str(pr_data.get("head", {}).get("sha") or "")
-        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head) as authority:
+        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())) as authority:
             if not authority.allowed:
                 actions.append(f"Deferred Codex Cloud continuation for PR #{pr_number}: {authority.reason}")
                 return CodexCloudFeedbackResult(retryable=True, actions=tuple(actions), deferred=True)

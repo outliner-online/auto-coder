@@ -109,7 +109,7 @@ def build_pr_local_job_adapters(
     ci_ports = LocalCIRepairJobPorts(
         source=lambda _job: PRRepairSource(repository_path or Path.cwd()),
         github_client=lambda _job: github_client,
-        authority=current_ci_failure_authority,
+        authority=lambda client, repository, number, head: current_ci_failure_authority(client, repository, number, head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())),
         local_route=lambda job, metadata: explicit_local_checkout(job) or _is_local_llm_pr(metadata),
         correction=lambda job, prepared: build_durable_ci_correction(job, prepared, github_client, config),
     )

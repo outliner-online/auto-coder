@@ -166,6 +166,8 @@ class CIWebhookDelivery:
     workflow_id: Optional[str] = None
     run_id: Optional[str] = None
     run_attempt: Optional[int] = None
+    job_id: Optional[str] = None
+    conclusion: Optional[str] = None
 
 
 class DurableInvalidationQueue:
@@ -209,7 +211,7 @@ class DurableInvalidationQueue:
                 repository TEXT NOT NULL, delivery_id TEXT NOT NULL,
                 event_type TEXT NOT NULL, action TEXT, head_sha TEXT,
                 workflow_id TEXT, run_id TEXT, run_attempt INTEGER,
-                received_at REAL NOT NULL,
+                job_id TEXT, conclusion TEXT, received_at REAL NOT NULL,
                 PRIMARY KEY(repository, delivery_id)
             );
             CREATE TABLE IF NOT EXISTS ci_delivery_targets (
@@ -320,6 +322,11 @@ class DurableInvalidationQueue:
             self._connection.execute("ALTER TABLE entity_invalidations ADD COLUMN deferral_api_origin TEXT")
         if "capacity_waiting" not in invalidation_columns:
             self._connection.execute("ALTER TABLE entity_invalidations ADD COLUMN capacity_waiting INTEGER NOT NULL DEFAULT 0")
+        ci_delivery_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(ci_webhook_deliveries)")}
+        for column in ("job_id", "conclusion"):
+            if column not in ci_delivery_columns:
+                self._connection.execute(f"ALTER TABLE ci_webhook_deliveries ADD COLUMN {column} TEXT")
+
         watch_columns = {row[1] for row in self._connection.execute("PRAGMA table_info(ci_watches)")}
         for column in ("batch_first_seen", "batch_watchdog_at"):
             if column not in watch_columns:
@@ -502,9 +509,9 @@ class DurableInvalidationQueue:
             cursor = self._connection.execute(
                 """INSERT OR IGNORE INTO ci_webhook_deliveries
                    (repository, delivery_id, event_type, action, head_sha,
-                    workflow_id, run_id, run_attempt, received_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (delivery.repository, delivery.delivery_id, delivery.event_type, delivery.action, delivery.head_sha, delivery.workflow_id, delivery.run_id, delivery.run_attempt, received),
+                    workflow_id, run_id, run_attempt, job_id, conclusion, received_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (delivery.repository, delivery.delivery_id, delivery.event_type, delivery.action, delivery.head_sha, delivery.workflow_id, delivery.run_id, delivery.run_attempt, delivery.job_id, delivery.conclusion, received),
             )
             if cursor.rowcount == 0:
                 return False
@@ -532,6 +539,35 @@ class DurableInvalidationQueue:
                     (delivery.repository, delivery.head_sha, received, received, received + 2),
                 )
             return True
+
+    def ci_recovery_signal_state(self, repository: str, head_sha: str) -> tuple[bool, bool]:
+        """Report delivered event capability and a retained cancellation signal.
+
+        Neither fact authorizes a rerun. The ordinary PR evaluator must still
+        freshly establish the exact native run, attempt and job before writing.
+        Missing individual notifications use its existing bounded CI watch.
+        """
+        with self._lock:
+            events = {
+                row[0]
+                for row in self._connection.execute(
+                    """SELECT DISTINCT event_type FROM ci_webhook_deliveries
+                       WHERE repository = ? AND action = 'completed'
+                         AND run_id IS NOT NULL
+                         AND (event_type = 'workflow_run'
+                              OR (event_type = 'workflow_job' AND job_id IS NOT NULL))""",
+                    (repository,),
+                )
+            }
+            candidate = self._connection.execute(
+                """SELECT 1 FROM ci_webhook_deliveries
+                   WHERE repository = ? AND head_sha = ?
+                     AND event_type = 'workflow_job' AND action = 'completed'
+                     AND conclusion = 'cancelled' AND run_id IS NOT NULL
+                     AND job_id IS NOT NULL AND run_attempt > 0 LIMIT 1""",
+                (repository, head_sha),
+            ).fetchone()
+        return {"workflow_job", "workflow_run"}.issubset(events), candidate is not None
 
     def _advance_ci_batch_watches(self, delivery: CIWebhookDelivery, number: int, received: float, new_batch: bool) -> None:
         """Bind only an exactly headed webhook's own batch, keeping its old clock.

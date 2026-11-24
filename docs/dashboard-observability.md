@@ -4163,3 +4163,30 @@ hierarchy reads for the preparation request and the normal three after evidence
 is ready. The deployment registry's existing dispatch-authority guard remains
 in place, so the independent-writer proof is specifically about the slot-store
 mutex, not a claim that every admission guard is absent during preparation.
+
+## Selective cancelled-CI recovery (Issue #2888)
+
+The existing PR-processing origin now emits `pr.ci-cancellation-recovery` after
+an explicitly enabled workflow's recovery evaluation. Facts include `effect`
+(`selective-job-rerun`), `status`, safe `reason`, exact `run_id`, `attempt`,
+`job_id`, retry-stable `logical_job`, durable `claim_id`, and the observed
+`cancellation_signal`. `ci_success` is explicitly false: `accepted_handoff`
+confirms only request acceptance, while `deferred` includes ambiguous delivery,
+unsafe current identity, absent event verification and rejection. These do not
+replace required checks, successful CI evidence, review, or merge completion.
+The unchanged generic detail renderer presents the recorded stage and facts.
+
+`tests/test_ci_cancellation_integration.py::test_real_pr_entry_selectively_recovers_and_shows_handoff_without_merge`
+drives `_handle_pr_merge`, the actual recovery controller and SQLite claims,
+controlled native REST, real HTTP webhook ingress, and the mounted dashboard
+detail path. Its accepted and lost-response controls assert exact selective
+POSTs, retained watch responsibility, no repair/review/merge, and distinct
+handoff/deferred outcomes. The same file checks delivery deduplication, restart,
+legacy schema migration, repository-scoped enablement and missing-event refusal.
+`tests/test_ci_cancellation_repair_authority.py` proves independent test failure
+admission while interruption-only aggregates stay red for merge and do not
+trigger repair. The core suite covers current native identity, pagination,
+competing claims and restart reconciliation. Run the explicit commands in
+[the feature fragment](client-features/cancelled-pr-ci-recovery.md). The
+[non-production GitHub fixture](ci-cancellation-fixture-evidence.md) is separate
+external selectivity evidence and is not represented as infrastructure diagnosis.
