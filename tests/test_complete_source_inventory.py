@@ -26,6 +26,8 @@ BASELINE = ROOT / "tests/data/complete-source-baseline-nodeids.txt.gz"
 PROVENANCE = ROOT / "tests/data/complete-source-baseline-nodeids.provenance.json"
 NATIVE_RECEIPTS = ROOT / "tests/data/complete-source-native-receipts-1911e76.tar.gz"
 NATIVE_RECEIPTS_PROVENANCE = ROOT / "tests/data/complete-source-native-receipts-1911e76.provenance.json"
+INDEPENDENT_NATIVE_INVENTORY = ROOT / "tests/data/complete-source-native-inventory-1911e76.txt.gz"
+INDEPENDENT_NATIVE_INVENTORY_PROVENANCE = ROOT / "tests/data/complete-source-native-inventory-1911e76.provenance.json"
 PYTHON_EXECUTABLE_CASE = "tests/test_management_containment_executable_aliases.py::test_absolute_alias_cannot_hide_resolved_dispatcher_family["
 
 
@@ -41,6 +43,26 @@ def _baseline() -> tuple[str, ...]:
         "schema_version": "complete-source-baseline-v1",
         "selector": "not opencode_live",
         "source_sha": "0924a591da911c91633612136a7e626d98bdba7d",
+    }
+    assert len(nodes) == len(set(nodes))
+    return nodes
+
+
+def _independent_native_inventory() -> tuple[str, ...]:
+    """Load the plain-pytest collection captured independently of the CI planner."""
+    raw = gzip.decompress(INDEPENDENT_NATIVE_INVENTORY.read_bytes())
+    provenance = json.loads(INDEPENDENT_NATIVE_INVENTORY_PROVENANCE.read_text(encoding="utf-8"))
+    nodes = tuple(raw.decode("utf-8").splitlines())
+    assert provenance == {
+        "collection_command": "uv run python -m pytest --collect-only -q -m 'not opencode_live'",
+        "inventory_sha256": hashlib.sha256(raw).hexdigest(),
+        "lock_sha256": "c99f72a9365d07f813e908c16e7c7c1e235ffb35fd61dfd65e1842a517061efa",
+        "nodes": len(nodes),
+        "profile_id": "source-required-v1",
+        "python_major_minor": "3.12",
+        "schema_version": "complete-source-independent-native-inventory-v1",
+        "selector": "not opencode_live",
+        "source_sha": "1911e76a774d794ca2d42f7512646e19c8d69aba",
     }
     assert len(nodes) == len(set(nodes))
     return nodes
@@ -73,7 +95,7 @@ def _require_baseline_inventory(
     assert len(expected) == len(baseline)
     for candidate in (collected, planned, assigned):
         observed = Counter(map(baseline_identity, candidate))
-        assert all(observed[node] == count for node, count in expected.items())
+        assert observed == expected
 
 
 class _RecordedActionsEvidence:
@@ -278,14 +300,16 @@ def test_recorded_native_receipts_qualify_complete_same_source_baseline_and_reje
         receipt_path = artifacts_root / f"source-test-shard-45146500439-1-{shard}" / "receipt.json"
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         executed.extend(receipt["executed"])
-    _require_baseline_inventory(plan.inventory, plan.inventory, plan.inventory, tuple(executed))
+    independent_inventory = _independent_native_inventory()
+    _require_baseline_inventory(independent_inventory, independent_inventory, plan.inventory, tuple(executed))
 
-    # A correlated candidate view with one baseline node missing can agree with
-    # itself, but it cannot satisfy the immutable same-source native evidence.
-    protected = plan.inventory[0]
-    reduced = tuple(node for node in plan.inventory if node != protected)
+    # A plan and matching native receipts can agree after the same upstream
+    # selection omission, but the independent same-source collection rejects it.
+    protected = independent_inventory[0]
+    reduced_plan = tuple(node for node in plan.inventory if node != protected)
+    reduced_receipts = tuple(node for node in executed if node != protected)
     with pytest.raises(AssertionError):
-        _require_baseline_inventory(plan.inventory, reduced, reduced, reduced)
+        _require_baseline_inventory(independent_inventory, independent_inventory, reduced_plan, reduced_receipts)
 
     first_receipt = artifacts_root / "source-test-shard-45146500439-1-1" / "receipt.json"
     receipt = json.loads(first_receipt.read_text(encoding="utf-8"))
