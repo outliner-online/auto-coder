@@ -10882,26 +10882,50 @@ def _delegate_cloud_review_thread_repair(
     state_path = _cloud_review_repair_state_path(repo_name)
     prefix = f"{repo_name}#{pr_number}:{provider}:{task_id}:"
     implementer_login = (get_pr_author_login(pr_data) or "").lower()
+
+    def _latest_addressed_reply_index(thread: ReviewThread) -> int:
+        if not implementer_login:
+            return -1
+        latest = -1
+        for idx, comment in enumerate(thread.comments):
+            if idx > 0 and is_same_github_login(comment.author_login, implementer_login) and reply_claims_review_addressed(comment.body) and not is_adjudication_feedback(comment.body):
+                latest = idx
+        return latest
+
+    addressed_through_by_thread = {thread.id: _latest_addressed_reply_index(thread) for thread in unresolved_threads}
+    all_finding_identities = {
+        _review_feedback_identity(prefix, thread, index)
+        for thread in unresolved_threads
+        for index, comment in enumerate(thread.comments)
+        if (index == 0 or not implementer_login or not is_same_github_login(comment.author_login, implementer_login) or reply_requests_review_correction(comment.body)) and not is_adjudication_feedback(comment.body)
+    }
     findings = [
         (thread, comment, _review_feedback_identity(prefix, thread, index))
         for thread in unresolved_threads
         for index, comment in enumerate(thread.comments)
         # A root is reviewer feedback by definition. A shared reviewer/implementer
         # account must explicitly declare corrective guidance; unmarked replies
-        # remain ambiguous. Addressed claims cannot declare corrective guidance.
+        # remain ambiguous. Addressed claims cannot declare corrective guidance,
+        # and comments at or before the latest implementer addressed reply are
+        # already superseded unless newer actionable feedback follows.
         # A structural adjudication envelope (REQ-009) is a machine-readable
         # decision, not free-form reviewer prose; review_adjudication_orchestrator
         # owns routing its effect, so it must never be forwarded here verbatim,
         # authorized or not.
-        if (index == 0 or not implementer_login or not is_same_github_login(comment.author_login, implementer_login) or reply_requests_review_correction(comment.body)) and not is_adjudication_feedback(comment.body)
+        if index > addressed_through_by_thread[thread.id] and (index == 0 or not implementer_login or not is_same_github_login(comment.author_login, implementer_login) or reply_requests_review_correction(comment.body)) and not is_adjudication_feedback(comment.body)
     ]
     diagnostic_candidates = {
         _review_feedback_identity(prefix, thread, index)
         for thread in unresolved_threads
         for index, comment in enumerate(thread.comments)
-        if index > 0 and implementer_login and is_same_github_login(comment.author_login, implementer_login) and not reply_claims_review_addressed(comment.body) and not reply_requests_review_correction(comment.body) and not is_adjudication_feedback(comment.body)
+        if index > addressed_through_by_thread[thread.id]
+        and index > 0
+        and implementer_login
+        and is_same_github_login(comment.author_login, implementer_login)
+        and not reply_claims_review_addressed(comment.body)
+        and not reply_requests_review_correction(comment.body)
+        and not is_adjudication_feedback(comment.body)
     }
-    selected_identities = {identity for _thread, _comment, identity in findings}
     with _cloud_review_delivery_lock:
         try:
             from .strong_correction_scope import has_registered_task, strict_native_evidence
@@ -10909,10 +10933,10 @@ def _delegate_cloud_review_thread_repair(
             if provider == "codex-cloud" and has_registered_task(repo_name, task_id):
                 strict_native_evidence(repo_name)  # Before reconciliation can rewrite filtered legacy rows.
             delivered = _load_delivered_review_feedback(state_path)
-            remote_delivered = _load_pr_delivered_review_feedback(github_client, repo_name, pr_number, sorted(selected_identities | diagnostic_candidates))
+            remote_delivered = _load_pr_delivered_review_feedback(github_client, repo_name, pr_number, sorted(all_finding_identities | diagnostic_candidates))
             # Excluded receipts are diagnostic evidence only: never reconcile
             # or persist these identities through the actionable delivery state.
-            delivered.update(remote_delivered & selected_identities)
+            delivered.update(remote_delivered & all_finding_identities)
             native_uncertain: set[str] = set()
             reconciled = _reconcile_codex_review_feedback(client, provider, task_id, [identity for _thread, _comment, identity in findings if identity not in delivered], uncertain=native_uncertain)
             if reconciled:
@@ -10930,7 +10954,7 @@ def _delegate_cloud_review_thread_repair(
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: prior delivery state could not be read: {exc}"])
         pending = [(thread, comment, identity) for thread, comment, identity in findings if identity not in delivered]
     if not pending:
-        acknowledged = bool(findings) and all(thread.comments and is_same_github_login(thread.comments[-1].author_login, implementer_login) and reply_claims_review_addressed(thread.comments[-1].body) for thread, _comment, _identity in findings)
+        acknowledged = bool(unresolved_threads) and all(len(thread.comments) > 1 and is_same_github_login(thread.comments[-1].author_login, implementer_login) and reply_claims_review_addressed(thread.comments[-1].body) for thread in unresolved_threads)
         _checkpoint_cloud_review_repair(repo_name, pr_data, github_client, selected_origin, acknowledged=acknowledged)
         logger.info(f"All actionable review feedback for PR #{pr_number} was already delegated")
         # Observation only: ordinary implementer replies can be acknowledgments

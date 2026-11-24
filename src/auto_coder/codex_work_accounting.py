@@ -375,6 +375,67 @@ class CodexWorkAccounting:
                 self._advance_revision(record)
                 self.slots._write(owners)
 
+    def settle_proven_non_delivery(
+        self,
+        owner: ImplementationOwner,
+        incarnation: str,
+        logical_operation_id: str,
+        *,
+        evidence_id: str,
+        source_request_id: str,
+        causal_baseline: str,
+        task_id: str,
+        request_fingerprint: str,
+    ) -> CodexWorkSnapshot:
+        """Settle an ambiguous follow-up proven never delivered by complete WHAM history.
+
+        Never reclassifies an ``ACCEPTED`` or already ``SETTLED`` operation, and
+        requires exact identity, baseline, task, fingerprint, and cryptographic
+        non-delivery evidence binding.
+        """
+        from .codex_followup_causality import NON_DELIVERY_EVIDENCE_PREFIX
+
+        if not isinstance(evidence_id, str) or not evidence_id.startswith(NON_DELIVERY_EVIDENCE_PREFIX) or len(evidence_id) <= len(NON_DELIVERY_EVIDENCE_PREFIX):
+            raise ValueError("A complete-graph WHAM non-delivery evidence identity is required")
+        with self.slots.serialize(owner), self.slots._state_lock():
+            owners = self.slots._read()
+            record = self._active_record(owners, owner, incarnation)
+            accounting = self._complete_accounting(record)
+            operations = accounting["operations"]
+            assert isinstance(operations, dict)
+            raw = operations.get(logical_operation_id)
+            if not isinstance(raw, dict):
+                raise KeyError(logical_operation_id)
+            if raw.get("kind") != "follow-up":
+                raise ValueError("Only follow-up operations can be settled by WHAM turn-graph non-delivery evidence")
+            if raw.get("phase") not in {CodexWorkPhase.RESERVED.value, CodexWorkPhase.DELIVERY_UNKNOWN.value}:
+                raise ValueError("Only reserved or delivery_unknown follow-ups can be settled as proven non-delivered")
+            if any(
+                raw.get(field) != expected
+                for field, expected in (
+                    ("source_request_id", source_request_id),
+                    ("causal_baseline", causal_baseline),
+                    ("task_id", task_id),
+                    ("request_fingerprint", request_fingerprint),
+                )
+            ):
+                raise ValueError("Non-delivery evidence does not match the accounted follow-up identity")
+            if raw.get("send_provenance") is not None:
+                provenance = CodexSendProvenance.from_record(raw["send_provenance"])
+                if provenance.outcome not in {"reserved", "unknown"}:
+                    raise ValueError("Non-delivery evidence cannot weaken an already-confirmed send outcome")
+                raw["send_provenance"] = asdict(replace(provenance, outcome="not_delivered"))
+            raw.update(
+                task_id=None,
+                accepted=False,
+                definite_non_delivery=True,
+                settlement_evidence_id=evidence_id,
+                phase=CodexWorkPhase.SETTLED.value,
+            )
+            self._advance_revision(record)
+            self.slots._write(owners)
+            return self._snapshot_from_record(owner, incarnation, record)
+
     def transition(
         self,
         owner: ImplementationOwner,
