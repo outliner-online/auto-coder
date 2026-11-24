@@ -1,7 +1,7 @@
 import errno
 import fcntl
 import os
-import select
+import selectors
 import signal
 import subprocess
 import sys
@@ -213,7 +213,8 @@ def test_large_unread_prompt_does_not_block_cancellation(tmp_path: Path, _use_re
         worker.join(timeout=3)
 
 
-def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep) -> None:
+@pytest.mark.parametrize("descriptor_floor", [0, 1024], ids=["ordinary-fd", "high-fd"])
+def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep, descriptor_floor: int) -> None:
     # Control only the execution clock, not scheduling, Popen or real cleanup.
     # A total wall-time bound also measures pre-deadline startup and CI load.
     budget = 0.05
@@ -260,24 +261,30 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
             super().stop_and_confirm(group, deadline)
 
     def drive_deadline(descriptor):
+        probe_descriptor = None
         try:
-            assert writer_armed.wait(10), "prompt submission blocked the supervisor"
-            assert polls[0].wait(10), "supervisor never checked its deadline"
-            guard = time.monotonic() + 10
-            while not ready.exists() or select.select([], [descriptor], [], 0)[1]:
-                assert children[0].poll() is None
-                assert time.monotonic() < guard, "unread stdin pipe never filled"
-                threading.Event().wait(0.01)
-            assert writers[0].is_alive()
-            clock.now = budget / 2
-            releases[0].set()
-            assert polls[1].wait(10), "supervisor did not recheck the deadline"
-            assert supervisor.state("invocation-one") is WriterState.ACTIVE
-            assert children[0].poll() is None and writers[0].is_alive()
-            assert not select.select([], [descriptor], [], 0)[1]
-            assert stops == []
-            clock.now = budget
-            releases[1].set()
+            # Duplicate one observer descriptor to cover busy processes whose
+            # real pipes exceed select()'s FD_SETSIZE without opening many files.
+            probe_descriptor = fcntl.fcntl(descriptor, fcntl.F_DUPFD_CLOEXEC, descriptor_floor)
+            with selectors.DefaultSelector() as readiness:
+                readiness.register(probe_descriptor, selectors.EVENT_WRITE)
+                assert writer_armed.wait(10), "prompt submission blocked the supervisor"
+                assert polls[0].wait(10), "supervisor never checked its deadline"
+                guard = time.monotonic() + 10
+                while not ready.exists() or readiness.select(timeout=0):
+                    assert children[0].poll() is None
+                    assert time.monotonic() < guard, "unread stdin pipe never filled"
+                    threading.Event().wait(0.01)
+                assert writers[0].is_alive()
+                clock.now = budget / 2
+                releases[0].set()
+                assert polls[1].wait(10), "supervisor did not recheck the deadline"
+                assert supervisor.state("invocation-one") is WriterState.ACTIVE
+                assert children[0].poll() is None and writers[0].is_alive()
+                assert not readiness.select(timeout=0)
+                assert stops == []
+                clock.now = budget
+                releases[1].set()
         except BaseException as error:
             errors.append(error)
             clock.now = budget
@@ -286,6 +293,9 @@ def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch:
             if children and children[0].poll() is None:
                 children[0].kill()
                 children[0].wait(timeout=5)
+        finally:
+            if probe_descriptor is not None:
+                os.close(probe_descriptor)
 
     class ObservedSupervisor(InvocationProcessSupervisor):
         def _start_reader(self, stream, chunks):

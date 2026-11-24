@@ -116,6 +116,7 @@ def recovery(tmp_path, monkeypatch):
         return api
 
     monkeypatch.setattr("auto_coder.ci_cancellation_recovery.get_ghapi_client", bound_client)
+    monkeypatch.setattr("auto_coder.ci_cancellation_recovery.boundary_hooks", lambda: (None, None))
     path = tmp_path / "claims.sqlite3"
 
     def run(policies=(POLICY,)):
@@ -126,17 +127,30 @@ def recovery(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("cause", ["manual", "runner_shutdown", "unknown", None])
-def test_production_entry_recovers_native_cancellation_without_cause_filter(recovery, cause):
+@pytest.mark.parametrize("governor_enabled", [False, True])
+def test_production_entry_recovers_native_cancellation_without_cause_filter(recovery, cause, governor_enabled, tmp_path, monkeypatch):
+    from auto_coder.github_request_governor import GitHubRequestGovernor
+
     api, run, _, clients = recovery
     api.run["cancellation_reason"] = cause
-    result = run()
-    assert result.status == "accepted"
-    assert result.job_id == 1
-    assert result.logical_job == "Test A"
-    assert result.claim_id
-    assert api.posts == [(f"/repos/{REPOSITORY}/actions/jobs/1/rerun", {"enable_debug_logging": False})]
-    assert clients == [("repository-bound-credential", {"extra_headers": {"Cache-Control": "no-cache"}})]
-    assert result.status != "success"
+    governor = GitHubRequestGovernor(store_path=tmp_path / "governor.sqlite3") if governor_enabled else None
+    if governor is not None:
+        monkeypatch.setattr("auto_coder.ci_cancellation_recovery.boundary_hooks", lambda: (governor.admit_blocking, governor.observe))
+    try:
+        result = run()
+        assert result.status == "accepted"
+        assert result.job_id == 1
+        assert result.logical_job == "Test A"
+        assert result.claim_id
+        assert api.posts == [(f"/repos/{REPOSITORY}/actions/jobs/1/rerun", {"enable_debug_logging": False})]
+        expected_clients = [("repository-bound-credential", {"extra_headers": {"Cache-Control": "no-cache"}})]
+        if governor is not None:
+            expected_clients.append(("repository-bound-credential", {"admission_hook": governor.admit, "observation_hook": governor.observe, "extra_headers": {"Cache-Control": "no-cache"}}))
+        assert clients == expected_clients
+        assert result.status != "success"
+    finally:
+        if governor is not None:
+            governor.close()
 
 
 def test_multiple_roots_use_fresh_native_ids_after_each_terminal_attempt(recovery):
