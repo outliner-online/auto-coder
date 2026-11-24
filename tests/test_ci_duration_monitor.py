@@ -169,22 +169,26 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.run_cli(), 0)
         self.assertEqual(len(self.github.mutations), 3)
 
-    def _configure_python314_family(self) -> str:
-        root = Path(monitor.__file__).resolve().parents[1]
-        config = json.loads((root / ".github" / "ci-duration-monitor.json").read_text(encoding="utf-8"))
-        workflow = next(item for item in config["workflows"] if item["path"] == ".github/workflows/python-314-compatibility.yml")
-        self.config.write_text(json.dumps({"workflows": [workflow]}), encoding="utf-8")
+    def _configure_step_bound_family(self) -> str:
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        workflow = config["workflows"][0]
+        workflow["families"][0].update(
+            key="step-bound",
+            job_pattern=r"(?:Tests \(\d+/\d+\)|Legacy tests|Plan tests)",
+            require_test_step=True,
+        )
+        self.config.write_text(json.dumps(config), encoding="utf-8")
         return workflow["path"]
 
-    def test_python314_hosted_shards_and_historical_monolith_share_one_test_family(self) -> None:
-        path = self._configure_python314_family()
+    def test_step_bound_shards_and_historical_monolith_share_one_test_family(self) -> None:
+        path = self._configure_step_bound_family()
         historical = copy.deepcopy(self.github.runs[0])
         historical.update(id=44853039779, path=path, head_sha="6c93cdbfc02312c8a513d63e799dce50c61c1b1d")
         candidate = copy.deepcopy(historical)
         candidate.update(id=44933377668, head_sha="8fc1a86d7a7eb888446c222564139325739af00a")
         self.github.runs = [historical, candidate]
-        legacy_name = "Python 3.14 source quality and non-live tests (advisory)"
-        native_step = "Run complete non-live test selection"
+        legacy_name = "Legacy tests"
+        native_step = "Run tests"
         legacy = job(136688718212, 4910, name=legacy_name)
         legacy["steps"][0].update(name=native_step, started_at=stamp(-4706))
         self.github.jobs = {(44853039779, 1): [legacy]}
@@ -192,59 +196,62 @@ class MonitorTests(unittest.TestCase):
         durations = (448, 430, 712, 184, 159, 346, 293, 161, 752, 1499, 566, 588)
         test_durations = (329, 326, 614, 67, 71, 245, 189, 62, 662, 1414, 464, 489)
         for number, (duration, test_duration) in enumerate(zip(durations, test_durations), 1):
-            shard = job(number, duration, name=f"Python 3.14 non-live tests ({number}/12)")
+            shard = job(number, duration, name=f"Tests ({number}/12)")
             shard["steps"][0].update(name=native_step, started_at=stamp(-test_duration))
             shards.append(shard)
         aggregate = job(136942522793, 3, name=legacy_name)
         aggregate["steps"][0]["name"] = "Require successful quality, complete planning and every native test shard"
-        planner = job(136934650209, 174, name="Python 3.14 source quality and complete test plan")
+        planner = job(136934650209, 174, name="Plan tests")
         planner["steps"][0]["name"] = "Collect complete non-live inventory and immutable assignments"
         self.github.jobs[(44933377668, 1)] = [*shards, aggregate, planner]
 
         self.assertEqual(self.run_cli(publish=False), 0)
         observations = self.report()["observations"]
         self.assertEqual(len(observations), 1, "planner/aggregate must not become fallback families")
-        self.assertEqual(observations[0]["family"], "python314")
+        self.assertEqual(observations[0]["family"], "step-bound")
         samples = {sample["run_id"]: sample for sample in observations[0]["samples"]}
         self.assertEqual(set(samples), {44853039779, 44933377668})
         old = samples[44853039779]
         self.assertEqual((old["job_id"], old["runner_seconds"], old["test_step_seconds"], old["family_jobs"]), (136688718212, 4910, 4706, 1))
         new = samples[44933377668]
-        self.assertEqual((new["job_name"], new["runner_seconds"], new["test_step_seconds"], new["family_jobs"], new["fastest_job_seconds"]), ("Python 3.14 non-live tests (10/12)", 1499, 1414, 12, 159))
-        self.assertEqual([action["family"] for action in self.report()["actions"]], ["python314"])
+        self.assertEqual((new["job_name"], new["runner_seconds"], new["test_step_seconds"], new["family_jobs"], new["fastest_job_seconds"]), ("Tests (10/12)", 1499, 1414, 12, 159))
+        self.assertEqual([action["family"] for action in self.report()["actions"]], ["step-bound"])
         self.assertEqual(self.github.mutations, [])
 
-    def test_python314_recognized_non_test_jobs_never_create_duration_samples(self) -> None:
-        path = self._configure_python314_family()
+    def test_step_bound_recognized_non_test_jobs_never_create_duration_samples(self) -> None:
+        path = self._configure_step_bound_family()
         self.github.runs[0]["path"] = path
-        aggregate = job(1, 7000, name="Python 3.14 source quality and non-live tests (advisory)")
+        aggregate = job(1, 7000, name="Legacy tests")
         aggregate["steps"] = []
-        planner = job(2, 8000, name="Python 3.14 source quality and complete test plan")
-        planner["steps"][0]["name"] = "Check source quality on Python 3.14"
+        planner = job(2, 8000, name="Plan tests")
+        planner["steps"][0]["name"] = "Check source quality"
         self.github.jobs[(10, 1)] = [aggregate, planner]
         self.assertEqual(self.run_cli(publish=False), 0)
-        self.assertEqual([(item["family"], item["samples"]) for item in self.report()["observations"]], [("python314", [])])
+        self.assertEqual([(item["family"], item["samples"]) for item in self.report()["observations"]], [("step-bound", [])])
         self.assertEqual(self.report()["actions"], [])
         self.assertEqual(self.github.mutations, [])
 
-    def test_python314_step_presence_preserves_failed_tests_and_unknown_step_time(self) -> None:
-        path = self._configure_python314_family()
+    def test_step_bound_step_presence_preserves_failed_tests_and_unknown_step_time(self) -> None:
+        path = self._configure_step_bound_family()
         self.github.runs[0]["path"] = path
-        native = job(1, 700, name="Python 3.14 non-live tests (1/12)", conclusion="failure")
-        native["steps"][0].update(name="Run complete non-live test selection", completed_at=None)
+        native = job(1, 700, name="Tests (1/12)", conclusion="failure")
+        native["steps"][0].update(name="Run tests", completed_at=None)
         self.github.jobs[(10, 1)] = [native]
         self.assertEqual(self.run_cli(publish=False), 0)
         sample = self.report()["observations"][0]["samples"][0]
         self.assertEqual((sample["conclusion"], sample["runner_seconds"], sample["family_jobs"]), ("failure", 700, 1))
         self.assertIsNone(sample["test_step_seconds"])
-        self.assertEqual([action["family"] for action in self.report()["actions"]], ["python314"])
+        self.assertEqual([action["family"] for action in self.report()["actions"]], ["step-bound"])
 
     def test_require_test_step_is_opt_in_and_rejects_non_boolean_configuration(self) -> None:
         root = Path(monitor.__file__).resolve().parents[1]
         workflows = monitor.read_config(root / ".github" / "ci-duration-monitor.json")
-        self.assertEqual([family.key for workflow in workflows for family in workflow.families if family.require_test_step], ["python314"])
+        self.assertEqual([family.key for workflow in workflows for family in workflow.families if family.require_test_step], [])
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertFalse(monitor.read_config(self.config)[0].families[0].require_test_step)
+        config["workflows"][0]["families"][0]["require_test_step"] = True
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        self.assertTrue(monitor.read_config(self.config)[0].families[0].require_test_step)
         for invalid in ("false", "true", 0, 1, None):
             config["workflows"][0]["families"][0]["require_test_step"] = invalid
             self.config.write_text(json.dumps(config), encoding="utf-8")
