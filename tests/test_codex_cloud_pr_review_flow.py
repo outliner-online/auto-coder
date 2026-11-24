@@ -212,7 +212,9 @@ def test_unconfirmed_review_feedback_delivery_is_not_blindly_retried(tmp_path, r
         def read_receipt(_task_id, _identity):
             if receipt_unavailable and send_followup.call_count:
                 raise OSError("receipt unavailable after POST")
-            return FollowUpDeliveryOutcome.INDETERMINATE
+            # The first request is genuinely new; uncertainty starts only
+            # after its attempted POST, rather than preexisting in the journal.
+            return FollowUpDeliveryOutcome.INDETERMINATE if send_followup.call_count else FollowUpDeliveryOutcome.NOT_DELIVERED
 
         delivery.side_effect = read_receipt
         _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=_github_client(), unresolved_threads=(_thread(),))
@@ -1318,3 +1320,64 @@ def test_native_review_rejection_requires_positive_current_send_evidence(tmp_pat
         assert json.loads(shared_path.read_text())["pending_feedback"]
     if outcome == "mixed":
         assert len(sent_identities) == 2
+
+
+def test_supported_external_feedback_producer_cannot_supply_mixed_split_resolution(tmp_path):
+    """Real comment intake admits aliases but cannot produce the required decision.
+
+    No native records or ledger decisions are seeded. The first ordinary send
+    becomes unknown at controlled transport; adding distinct unsent feedback
+    exposes the missing production producer without replaying the old request.
+    """
+    from auto_coder.canonical_pr_blocker_ledger import CanonicalPRBlockerLedger
+    from auto_coder.codex_wham_client import FollowUpDeliveryOutcome, FollowUpDeliveryResult
+
+    shared = tmp_path / "shared.json"
+    native = tmp_path / "native.json"
+    ledger = CanonicalPRBlockerLedger(tmp_path / "ledger.sqlite")
+    head = "a" * 40
+    old = ReviewThread(id="coverage", comments=[ReviewThreadComment(database_id=101, body="Reject incomplete executable-file coverage", author_login="reviewer")])
+    new = ReviewThread(id="failure-path", comments=[ReviewThreadComment(database_id=201, body="Preserve the failure-path exit status", author_login="reviewer")])
+    prefix = "owner/repo#5262:codex-cloud:task_e_review5262:"
+    old_id = _review_feedback_identity(prefix, old, 0)
+    new_id = _review_feedback_identity(prefix, new, 0)
+    github = _github_client(head_sha=head)
+    wham = MagicMock()
+    wham.resolve_latest_assistant_turn.return_value = "task_e_review5262~assttrn_1"
+    wham.reconcile_follow_up.return_value = False
+    wham.send_follow_up.return_value = FollowUpDeliveryResult(FollowUpDeliveryOutcome.INDETERMINATE, 502)
+    config = AutomationConfig()
+    config.AUTO_MERGE = True
+    gate = ClaimedReviewThreadGateState(unresolved=(old,), blocking_unresolved=(old,), has_blocking_unresolved=True)
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=shared),
+        patch("auto_coder.codex_cloud_client._codex_followup_state_path", return_value=native),
+        patch("auto_coder.codex_cloud_client.CodexWhamClient", return_value=wham),
+        patch("auto_coder.pr_processor.CanonicalPRBlockerLedger", return_value=ledger),
+        patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"}),
+        patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True),
+        patch("auto_coder.pr_processor._check_github_actions_status", side_effect=authoritative_ci_status(success=True, ids=[1])),
+        patch("auto_coder.pr_processor._get_claimed_review_thread_state", return_value=gate) as thread_gate,
+    ):
+        first = _handle_pr_merge(github, "owner/repo", _pr_data(head), config, {})
+        snapshot = ledger.get_snapshot("https://api.github.com", "owner/repo", 5262)
+        assert snapshot.get_blockers_for_alias("external_review_comment", "comment:101")
+        assert snapshot.reconciliation_records == ()
+        original_native = native.read_bytes()
+        thread_gate.return_value = ClaimedReviewThreadGateState(unresolved=(old, new), blocking_unresolved=(old, new), has_blocking_unresolved=True)
+        second = _handle_pr_merge(github, "owner/repo", _pr_data(head), config, {})
+        third = _handle_pr_merge(github, "owner/repo", _pr_data(head), config, {})
+    wham.send_follow_up.assert_called_once()
+    assert "Reject incomplete executable-file coverage" in wham.send_follow_up.call_args.kwargs["prompt"]
+    assert "Preserve the failure-path exit status" not in wham.send_follow_up.call_args.kwargs["prompt"]
+    assert any("unconfirmed follow-up delivery" in action for action in first)
+    assert all(any("independent scope resolution" in action for action in actions) for actions in (second, third))
+    assert native.read_bytes() == original_native
+    state = json.loads(shared.read_text())
+    assert state["pending_feedback"] == [old_id]
+    assert state["delivered_feedback"] == []
+    assert new_id not in state["pending_feedback"]
+    snapshot = ledger.get_snapshot("https://api.github.com", "owner/repo", 5262)
+    assert snapshot.reconciliation_records == ()
+    assert not snapshot.get_blockers_for_alias("external_review_comment", "comment:201")
+    github.merge_pull_request.assert_not_called()

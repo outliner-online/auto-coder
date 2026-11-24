@@ -3914,6 +3914,195 @@ a lost-key peer write, a malformed exact entry and mixed identities through the
 ordinary review producer. This hardens existing outcome reporting; it adds no
 processing origin or event schema and leaves Jules unchanged.
 
+## Mixed Codex review delivery evidence
+
+Native uncertainty participates in ordinary review intake alongside shared
+producer claims. Mixed ordinary comments remain held with the existing
+`unconfirmed_delivery_receipt` reason; new IDs or different canonical UUIDs do
+not authorize separation. Sender-time local guards remain distinct from remote
+rejection. `test_supported_external_feedback_producer_cannot_supply_mixed_split_resolution`
+exercises this hold through the production merge entry, real source retention,
+native journal and controlled transport, without changing old evidence. The
+existing public projection regression verifies the same reason reaches the view.
+Explicit scoped sources use the separate existing adjudication stage below.
+
+## Explicit scoped adjudicated correction
+
+The existing `pr.review-adjudication-effect` stage carries `effect_kind=SCOPED_FIX`
+with its existing context/decision/status facts. `accepted` emits
+`ACCEPTED_HANDOFF` for assignment only; `already_accepted` and `held_*` emit
+`DEFERRED`. `delivery_unknown` emits `UNKNOWN`; `remote_rejected` emits `FAILED`
+only with positive exact-send rejection evidence. Local duplicate suppression is
+`held_native_duplicate`, never a remote refusal. No payload, older snapshot text,
+owner incarnation, new endpoint or public fact field is exposed. The existing
+stage renderer displays these facts without a schema or renderer change.
+
+The native v2 source is consumed through the existing adjudication reader.
+`scoped_review_followups` in the shared review-delivery document is the additional
+durable resumption claim; prior claims never cause another provider send. Ordinary
+v1 sources, receipt writers and #2889 recovery remain under their existing gates.
+See [Scoped adjudicated cloud corrections](client-features/scoped-adjudicated-cloud-corrections.md).
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_scoped_review_followup.py tests/test_review_adjudication.py tests/test_review_adjudication_orchestrator.py tests/test_pr_processor_adjudication_effects.py tests/test_review_feedback_marker.py tests/test_codex_cloud_pr_review_flow.py`.
+The new real-entry regression controls only source/GitHub/transport boundaries;
+actual owner, attribution, native journal, accounting and source persistence are
+used. It asserts old evidence preservation across repeated reconstruction.
+The current common owner wildcard fence disables its former mixed positive
+emission until exhaustive ordinary obligation authority exists. The baseline
+adjudication regressions cover the existing stage contract. The scoped fixture also checks the emitted stage outcome/status mapping.
+
+Scoped adjudication pre-wire source refusal now emits `held_source_not_sent`
+through the existing deferred status mapping. Its private exact claim is settled
+as `not_sent`, with its pending identity removed under the shared document lock;
+older and peer claims are preserved. Unknown/crash-after-wire outcomes remain
+reserved. `held_registered_obligation` and `held_obligation_overlap` distinguish
+unsupported or duplicate requirement selections. No free-form replacement payload
+or distinction field is accepted. The registered requirement/finding determines
+the instruction; the same existing facts and public renderer are retained.
+The real-entry scoped regression checks refusal after reservation, no wire call,
+a subsequent authorized source held by the owner wildcard fence, and restart
+fences alongside duplicate, whitespace-only and unrelated obligation controls.
+
+### Ordinary legacy source evidence and rejection bookkeeping
+
+`tests/test_legacy_review_source_evidence.py` reaches `_handle_pr_merge` with
+real accepted canonical findings and durable Codex ownership. Exact historical
+payload/native-fingerprint matching does not turn Finding `NONE` into an unsent
+receipt. Distinct registered requirements, duplicate/paraphrased guidance and
+incomplete historical evidence keep the existing mixed-batch
+`unconfirmed_delivery_receipt` wait, unchanged across reevaluation.
+
+A post-transport bookkeeping exception can carry exact positive native rejection
+proof. Ordinary intake now consumes that proof under the shared lock and releases
+only its current pending identities; generic exceptions and stale/mismatched
+proof retain claims. The existing repair action reports rejection with the
+bookkeeping failure. These use the existing repair-result event/stage and detail
+renderer: no new processing origin, schema, dashboard status or recovery clock is
+introduced. Other work-accounting records remain governed by their existing
+settlement rules. Run `bash scripts/test.sh --ci-tests-only
+tests/test_legacy_review_source_evidence.py tests/test_codex_cloud_pr_review_flow.py`.
+
+## Common Codex before-wire provenance milestone
+
+Native correction callers now persist private wire membership in existing owner
+accounting before journal reservation/POST. Scope is always wildcard; no new
+mixed-send eligibility or processing origin is enabled. Reserved/unknown legacy
+and future operations hold later correction/publication sends under the owner
+file lock, including forced broad continuation and the v2 prototype. The client
+reports this as its existing local duplicate guard, not remote refusal; scoped
+adjudication retains `held_native_duplicate` / `DEFERRED`. Other caller result
+stages retain their existing mapping. No payload, owner incarnation, membership
+list, endpoint or private provenance is added to the public projection.
+
+Exact native outcome persistence precedes later bookkeeping. Positive definite
+rejection remains distinguishable if that bookkeeping raises. Acceptance is not
+lifecycle completion, and existing checkpoint clocks/observability remain owned
+by #2889. Existing receipt reconciliation may update future wire outcome only
+with exact fingerprint and whole native membership. No new polling is added.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_codex_send_provenance.py
+tests/test_codex_work_fence.py tests/test_codex_work_accounting.py
+tests/test_codex_work_reconstruction.py tests/test_legacy_review_source_evidence.py
+tests/test_codex_cloud_pr_review_flow.py tests/test_scoped_review_followup.py
+tests/test_pr_no_commit_recovery.py`. These cover before-wire persistence, ordinary
+acceptance, restart/legacy and forced wildcard holds, no-ambiguity broad baseline,
+crashes, known rejection, existing native acceptance reconciliation and unchanged
+legacy/scoped uncertainty. No dashboard schema or renderer change is required
+because the boundary reuses existing assignment/hold/refusal distinctions.
+
+### Narrowed verified-subject overlap
+
+The owner file lock still serializes the decision, but wildcard overlap now uses
+a positively verified repository/PR subject when current slot membership and the
+exact CloudRun association both establish it. Another PR can proceed without
+releasing the old operation. Same-PR SHA/base/close/reopen changes do not separate
+work. Unknown legacy/unverifiable subjects retain the broader hold.
+
+Existing initial-publication recovery may separate a prospective PR using its
+existing fresh observation and durable immutable launch/head binding. Its grace,
+causal and reservation-budget rules remain controlling. Accepted/unknown/rejected
+wire outcome is retained independently from lifecycle settlement. No new provider
+getter, permission, execution origin, dashboard schema or public subject field is
+added. Existing caller outcomes and local-duplicate/deferred statuses continue to
+describe POST versus hold; different-subject sends use their normal assignment
+stages. This correction changes admission scope, not the public trace contract.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_codex_subject_separation.py
+tests/test_codex_send_provenance.py tests/test_codex_work_accounting.py
+tests/test_codex_work_fence.py tests/test_codex_pr_recovery.py
+tests/test_codex_cloud_pr_ci_flow.py tests/test_codex_cloud_pr_review_flow.py
+tests/test_pr_no_commit_recovery.py`. The production-entry controls cover different
+PRs tied to one Issue, exact same-subject force holds, missing associations/legacy
+metadata, first-publication positives and refused observations, old/new incarnation
+and cross-repository behavior. Same-PR mixed-send eligibility remains disabled for broad/legacy records; the
+optional accepted Strong protocol below supplies the bounded future exception.
+
+### Scoped final authority after owner-lock wait
+
+The existing scoped `current_source`/registered-obligation check is passed through
+the bounded native sender to `CodexWorkFence.execute`. It executes inside the
+owner file lock immediately before accounting/native reservation and POST. A
+false result or read failure raises a specific no-wire outcome, allowing exact
+producer cleanup and the existing `held_source_not_sent` / `DEFERRED` projection.
+Generic or post-wire exceptions remain uncertainty; this adds no remote-refusal
+label or lifecycle settlement. The private callback is not an endpoint or flag.
+
+The admission scope also now requires canonical writable head repository/ref
+separation for different PR numbers; shared heads with different bases and
+missing old/new head evidence retain local-duplicate holds. The same existing
+caller outcomes and deferred view mapping apply. No event schema or renderer
+changes are required.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_scoped_final_authority.py
+tests/test_codex_subject_separation.py tests/test_scoped_review_followup.py
+tests/test_codex_cloud_pr_review_flow.py tests/test_codex_cloud_pr_ci_flow.py
+tests/test_pr_no_commit_recovery.py`. The new production-entry regression uses a
+real competing process and owner file lock, confirms a failed nonblocking flock,
+then changes only remote head/decision evidence before releasing the lock. It
+asserts zero POSTs and exact claim cleanup, plus unchanged positive and reserved
+bookkeeping failure outcomes across restart. The subject regressions preserve
+different-branch positives and add same-head/different-base negatives.
+
+Scope delimiter: publication and ordinary non-scoped routes retain their existing
+authority-check timing; the initial-publication remote observation still precedes
+owner-lock wait. This generic freshness increment does not close that publication race. The later
+accepted Strong protocol below reuses the scoped fence for its bounded mixed path. No extra polling or provider verification engine exists.
+
+
+The optional [accepted Strong correction scope](client-features/accepted-strong-correction-scopes.md)
+path now returns the existing ordinary `CloudReviewRepairResult`: actual acceptance
+uses delivered/assigned projection, while unconfirmed or refused authority uses
+`unconfirmed_delivery_receipt` and deferred diagnostics. A local guard is not a
+remote rejection. No new public event fields, dashboard action or permission is
+added. Producer births, owner snapshots and sealed/native accounting evidence stay
+private. The optional attestation belongs to the exact existing accepted review
+payload; absent attestation is omitted from its canonical JSON so legacy payload
+identities and renderers are unchanged. Existing per-PR pending/merge blockers and
+#2889 confirmed-delivery clocks retain their contracts.
+
+Run `bash scripts/test.sh --ci-tests-only tests/test_strong_correction_scope.py
+tests/test_pr_review_effects.py tests/test_codex_cloud_pr_review_flow.py
+tests/test_codex_send_provenance.py tests/test_codex_subject_separation.py` for the
+actual Strong acceptance/canonical/ordinary/native path, delivery/deferred outcomes,
+legacy identities, wildcard holds and unchanged unrelated-subject behavior. These
+controlled transport fixtures do not contact production.
+
+Accepted Strong delivery additionally holds on old native lookup-key/repair-target
+or persisted-status disagreement and on current canonical invalidation or
+reconciliation needs. Existing local/deferred diagnostics remain controlling;
+no remote-refusal or public event field is introduced. The physical-root body
+refresh already runs in the final owner-fenced callback and is unchanged.
+`tests/test_strong_correction_scope.py` covers preserved deficient old records and
+actual owner-lock waits with canonical revocation or a remote root edit, alongside
+the unchanged expanded-round positive.
+
+For registered Strong tasks, malformed extra native journal rows now hold before
+legacy reconciliation as well as exhaustive scope validation, preserving the raw
+document. Existing unavailable/deferred diagnostics apply; ordinary tasks without
+Strong provenance and the legacy journal reader/writer are unchanged. The extra-row
+controls in `tests/test_strong_correction_scope.py` cover even a would-succeed
+reconciliation without new POSTs or journal normalization.
+
 ## Fresh autonomous draft implementation refusal
 
 A draft with no configured local repair backend and no usable existing cloud

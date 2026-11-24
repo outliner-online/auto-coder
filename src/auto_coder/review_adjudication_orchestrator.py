@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .review_adjudication import AdjudicationStatus
+from .review_adjudication import AdjudicationStatus, IssueContract, ScopedFollowup
 from .review_adjudication_github import AdjudicationSnapshot
 
 ADJUDICATION_EFFECTS_DB_ENV = "AUTO_CODER_REVIEW_ADJUDICATION_EFFECTS_DB"
@@ -183,6 +183,12 @@ class UpholdEffect:
     contract_digest: str
     rationale: str
     raw_finding: str
+    scoped_followup: Optional["ScopedFollowup"] = None
+    source_comment_id: int = 0
+    source_body_hash: str = ""
+    source_actor_id: int = 0
+    contracts: tuple[IssueContract, ...] = ()
+    base_sha: str = ""
 
 
 @dataclass(frozen=True)
@@ -294,6 +300,12 @@ def plan_adjudication_effects(snapshots: Sequence[AdjudicationSnapshot], effect_
                         contract_digest=context.contract_digest,
                         rationale=rationale,
                         raw_finding=snapshot.raw_finding,
+                        scoped_followup=context.decisions[result.decision_id or ""].decision.scoped_followup,
+                        source_comment_id=context.decisions[result.decision_id or ""].source.comment_id,
+                        source_body_hash=context.decisions[result.decision_id or ""].body_hash,
+                        source_actor_id=context.decisions[result.decision_id or ""].source.author_id,
+                        contracts=context.contracts,
+                        base_sha=context.base_sha,
                     )
                 )
         elif still_applied_overrule:

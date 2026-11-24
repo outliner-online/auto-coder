@@ -150,7 +150,7 @@ duration-history service are needed.
 
 ## Source-only tracked-snapshot bootstrap
 
-The complete-source and Python 3.14 advisory workflows opt in to `--duration-policy source-required-v1`,
+The complete-source workflow opts in to `--duration-policy source-required-v1`,
 passing `tests/data/pr-test-durations.json` together with the tracked provenance
 document. Both are optional advisory estimation inputs. The planner checks the
 snapshot's exact raw SHA-256, node count, `not opencode_live` selector and

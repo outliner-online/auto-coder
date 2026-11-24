@@ -56,6 +56,7 @@ class ReviewExecutionInput:
     attempt_sequence: int = 0
     finding_set_revision: int = 0
     findings: Tuple[Finding, ...] = field(default_factory=tuple)
+    correction_scope_context: str = ""
     audited_head_sha: str = ""
 
 
@@ -128,6 +129,7 @@ def build_review_prompt(review_input: ReviewExecutionInput, *, embedded_closure:
         findings=findings,
         repository_evidence=review_input.repository_evidence,
         cumulative_diff=review_input.diff_evidence,
+        correction_scope_context=review_input.correction_scope_context,
     )
 
 
@@ -429,7 +431,7 @@ def parse_review_result(response: str, expected: ReviewExecutionInput, reviewer_
         return _diagnostic(expected, reviewer_provenance, "Invalid result")
 
     if expected.mode is ReviewMode.STRONG_AUDIT:
-        findings = _parse_findings(raw.get("findings"), expected.round_id)
+        findings = _parse_findings(raw.get("findings"), expected.round_id, allow_scope=True)
         if findings is None or (verdict == "FINDINGS") != bool(findings) or (verdict == "PASS" and findings):
             return _diagnostic(expected, reviewer_provenance, "Strong finding bundle is incomplete or contradicts verdict")
         return _result(expected, reviewer_provenance, str(verdict), findings=findings)
@@ -457,7 +459,7 @@ def parse_review_result(response: str, expected: ReviewExecutionInput, reviewer_
     return _result(expected, reviewer_provenance, str(verdict), findings=new_findings, dispositions=dispositions, scope=scope, scope_evidence=scope_evidence)
 
 
-def _parse_findings(value: object, origin: str) -> Optional[Tuple[Finding, ...]]:
+def _parse_findings(value: object, origin: str, *, allow_scope: bool = False) -> Optional[Tuple[Finding, ...]]:
     if not isinstance(value, list):
         return None
     parsed = []
@@ -475,6 +477,16 @@ def _parse_findings(value: object, origin: str) -> Optional[Tuple[Finding, ...]]
         gap_fields = ("plausible_incorrect_implementation", "why_tests_admit_it", "material_consequence")
         if regression and any(not isinstance(item.get(key), str) or not item[key].strip() for key in gap_fields):
             return None
+        scope = None
+        if "correction_scope" in item:
+            if not allow_scope:
+                return None
+            from .strong_correction_scope import parse_attestation
+
+            try:
+                scope = parse_attestation(item["correction_scope"])
+            except ValueError:
+                return None
         parsed.append(
             Finding(
                 finding_id=item["finding_id"],
@@ -491,6 +503,7 @@ def _parse_findings(value: object, origin: str) -> Optional[Tuple[Finding, ...]]
                 why_tests_admit_it=str(item.get("why_tests_admit_it", "")),
                 material_consequence=str(item.get("material_consequence", "")),
                 focused_regression_scenario=item["focused_regression_scenario"],
+                correction_scope=scope,
             )
         )
     if len({item.finding_id for item in parsed}) != len(parsed):

@@ -113,3 +113,125 @@ recover publication/tracking facts. The retry source consistency token includes
 the run, recovery and owner binding, so later changes invalidate the observation.
 This never declares execution settled: current, causally terminal native
 provider evidence and the existing closed-PR predicate remain necessary.
+
+## Before-wire continuation provenance milestone
+
+Issue-owned native Codex follow-ups now freeze `send_provenance` in the existing
+accounting operation, under the existing cross-process owner serialization,
+before native journal reservation and WHAM. It binds the prepared-payload
+fingerprint, complete sorted native membership and available exact PR/head/base
+branches to that operation's existing task, source, owner and incarnation.
+This is wire provenance, not an approved-obligation or source-birth certificate.
+There is no new external envelope, setting or enablement flag. Broad/legacy scope remains `wildcard`. The later optional
+[accepted Strong scope](accepted-strong-correction-scopes.md) producer additionally
+binds its sealed birth revision and complete native membership here.
+
+Reserved, interrupted and unknown wildcard work overlaps another follow-up,
+repair or publication operation for the same verified subject. The original
+owner-wide milestone hold is narrowed as described below. Legacy records lacking provenance
+are also wildcard when reserved/unknown. The check runs inside the owner lock,
+before creating another operation or entering transport; neither a different
+message/lane/batch nor `force` establishes separation. All native correction
+producers converge here, including broad CI continuation and the scoped v2
+prototype. Existing direct publication recovery uses the same fence. Untracked
+tasks retain their existing outside-policy behavior. Missing/corrupt accounting
+continues to fail closed. Historical records are not assigned source birth or
+new provenance.
+
+When no ambiguous work exists, ordinary new broad continuation remains available.
+A recorded wire attempt cannot be forcibly reused: that would overwrite its
+before-wire provenance without reserving a new attempt. Existing accepted
+unforced duplicates still use native idempotent receipt handling. This milestone
+does not add retry/attempt sequencing or mint new identities for old work.
+
+Native accepted, unknown and positive definitely-not-delivered outcomes are
+retained independently of execution/publication settlement. The exact outcome
+is persisted before later lifecycle bookkeeping, preserving known rejection if
+that bookkeeping raises. Missing journal entries and generic exceptions never
+prove rejection. Existing native reconciliation can update future provenance to
+accepted only when prepared fingerprint and the entire observed native membership
+match; no new provider getter or polling is introduced. It cannot create legacy
+provenance or settle lifecycle responsibility. Existing checkpoint clocks and
+acceptance timestamps are unchanged.
+
+Mixed-send eligibility remains disabled for broad and legacy records. The optional
+accepted Strong producer now supplies exhaustive future source birth and approved
+membership through the ordinary canonical path; all native correction lanes claim
+possibly overlapping births atomically at this boundary. Unsupported broad lanes
+remain wildcard. Separately actionable scope
+must come from trusted exhaustive records, never UUIDs, strings or digests.
+Legacy #6009 is neither backfilled nor qualified.
+
+`tests/test_codex_send_provenance.py` exercises real ordinary acceptance and native
+pre-wire state, restart, broad continuation with/without force, legacy records,
+pre-/post-wire crashes, exact positive receipt reconciliation and rejection with
+bookkeeping failure. Scoped regressions now prove that the v2 journal cannot
+bypass an old wildcard. The later accepted Strong scope tests supply the bounded future mixed positive.
+
+## Verified PR subject separation
+
+A wildcard is narrowed to its repository/PR number only when that PR is positively
+bound to both the current owner incarnation's PR membership and the exact task's
+durable CloudRun association. Both sides are re-read under owner serialization.
+Different PR numbers can proceed under one Issue owner only when both also have
+verified canonical writable head identities and those repository/ref pairs differ. SHA, base changes, close
+and reopen activity do not distinguish the same PR. Task IDs or lane/kind names
+alone do not prove separate subjects. Missing legacy provenance, association,
+current ownership or target remains an owner-wide unknown overlap; no historical
+record is backfilled or released. Repository namespaces remain independent.
+
+The existing initial-publication monitor can supply its fresh, exact existing
+no-matching-PR observation plus immutable launch/head-repository/head-ref binding.
+Only after these and current ownership verify can a distinct canonical launch
+head establish a different prospective PR subject. An ambiguous/noncanonical ref,
+missing binding, closed Issue, existing publication or conflicting observation
+cannot establish this separation. The monitor retains all its existing grace,
+preflight, causal and publication-budget gates; no new polling or action exists.
+Before-wire provenance freezes that launch/head binding, and the exact native
+outcome is retained before lifecycle bookkeeping. If the run later acquires one
+verified PR association, that numeric PR dominates the prospective branch subject;
+multiple/unverified associations remain broader uncertainty.
+
+This is subject separation only. Wildcards on one PR still overlap across heads
+and force cannot bypass them. Same-PR mixed sends remain disabled unless both operations carry exhaustive
+accepted Strong scope evidence described above. `tests/test_codex_subject_separation.py` starts
+with a real ordinary unknown request and drives native continuation, the real CI
+producer and initial-publication monitor. It covers independent PR/publication
+positives, same-subject and evidence-deficient negatives, close/reopen activity,
+stale incarnation and cross-repository controls while preserving the old records.
+
+Different PR numbers with the same writable head repository/ref remain overlapping
+even with different bases. Missing head identity cannot establish separation;
+this also applies when older provenance has only a PR number. Same-PR head
+changes never establish a new subject. Canonical repository casing is normalized
+for comparison and ambiguous ref representations remain held.
+
+Scoped corrections now carry their existing bounded `current_source` check and
+exact registered-obligation comparison through the native sender. The existing
+owner file lock is acquired before this final check, which runs after overlap
+admission and immediately before accounting/native reservation and POST. It
+rechecks current provider attribution, PR/head, source decision, contract/finding
+and existing pending/allowance gates; no new engine, poller or permission exists.
+A false result or failed authority read has a typed pre-wire refusal. Only the
+exact scoped pending claim becomes `not_sent` under its existing shared lock;
+there is no native reservation or provider request. Generic/post-wire failures
+remain fenced. Untracked/unbounded senders cannot accept this scoped callback.
+
+This final check is limited to the scoped correction path. Ordinary, CI, conflict,
+checkpoint and initial-publication routes retain their current authority checks.
+In particular, the initial-publication monitor still obtains its fresh remote
+observation before owner-lock acquisition; its remote lock-wait freshness gap is
+not fixed by this increment. The v2 scoped path still cannot enable same-PR mixed delivery; the later accepted
+Strong source path reuses this final authority boundary for its qualified exception.
+`tests/test_scoped_final_authority.py` uses an actual competing process/file lock,
+observes a real failed flock attempt, changes only the remote fixture's head or
+decision after outer checks and proves zero POSTs, plus exact positive and
+ambiguous/accepted bookkeeping exceptions with durable replay suppression.
+
+Existing-PR head identity comes from the existing authenticated attribution
+producer's exact head-match publication proof, bound to the same repository, PR,
+Issue, task, attempt and launch, together with current ownership and the frozen
+producer head ref. Task-URL-only attribution does not retain canonical head proof
+and remains insufficient for cross-subject separation. A record's label alone
+cannot qualify mismatching ownership/launch/head evidence. No new attribution
+record is synthesized at the send fence.

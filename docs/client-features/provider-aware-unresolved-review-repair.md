@@ -91,3 +91,79 @@ author login, task identity, receipt content or new API is added. The snapshot
 head is not a new authoritative head lookup, and no reason establishes provider
 liveness, completed repair, safe replay, or permission to merge. Private retained
 review/publication evidence remains the separate scope of #2753.
+
+## Mixed native Codex delivery evidence
+
+Intake fences uncertain native journal identities as well as shared producer
+claims. Observed uncertainty is retained additively as a shared claim, protecting
+against later native key loss. Legacy mixed comment batches stay held: new IDs,
+role declarations and different canonical UUIDs do not establish independent
+operations. No old uncertain request is released or replayed.
+
+Explicit scoped corrections can use the authenticated v2
+adjudication path documented in [Scoped adjudicated cloud corrections](scoped-adjudicated-cloud-corrections.md).
+Its authority is the existing allowed adjudicator's explicit revision-bound
+correction, not a controller-created distinct-defect decision. The former
+unreachable `DISTINCT_DEFECT`-only predicate and artificially seeded positive
+fixture have been removed. Ordinary unmixed comment delivery is unchanged.
+
+A local native duplicate guard has a single-use exact-task/full-identity outcome,
+separate from remote rejection. Only positive native rejection evidence can
+support a remote-refusal label. The production ordinary-intake regression
+`test_supported_external_feedback_producer_cannot_supply_mixed_split_resolution`
+continues to verify that raw new comments do not acquire this authority.
+
+### Ordinary legacy evidence boundary
+
+The ordinary repair-bundle audit retains the rendered payload in SQLite; a
+matching native prepared-message fingerprint can bind those exact bytes to a
+known old send. Native repair metadata can also bind PR/head and current owner
+incarnation. These are useful positive evidence, but neither the canonical
+blocker UUID nor the accepted Finding's `delivery_status=NONE` is an unsent
+receipt. Ordinary sending does not update that Finding field: it can remain
+`NONE` after an actual indeterminate provider request. The bundle audit has no
+immutable source/lane reservation joining accepted source, bounded obligation,
+owner incarnation and complete native send membership. Its payload row can be
+replaced, and the public bundle reader currently omits the stored payload bytes.
+Unavailable or mismatching historical bytes cannot establish old scope.
+
+`tests/test_legacy_review_source_evidence.py` drives the production merge entry
+with real accepted Strong findings, canonical root association, durable current
+Issue/Codex ownership and controlled native transport. It demonstrates both an
+exact old payload/fingerprint match and the misleading `NONE` value after a real
+unknown send. A different registered requirement, duplicate/paraphrased guidance,
+missing owner binding and missing historical payload all remain held across
+reevaluation with no second wire request or old native-record edits. This is a
+negative evidence regression, not a positive mixed-dispatch implementation.
+
+A future ordinary split requires a shared durable source/lane registration
+created before any correction producer can send that source: exact source,
+PR/head, verified owner, registered requirement and bounded payload, plus its
+consumptive native-operation membership. Every applicable producer must honor
+that reservation. Only sources positively born under that contract, or sources
+with independent exact no-effect proof, can establish no prior attempt; legacy
+`NONE` records cannot be backfilled as unsent. Recovering an old scope additionally
+requires exact immutable payload/native fingerprint and complete held-operation
+membership, with overlapping or unverifiable obligations held. The legacy boundary adds no authority or automatic semantic classifier. A later
+optional [accepted Strong scope](accepted-strong-correction-scopes.md) protocol
+provides future explicit semantic authority and birth provenance without adopting
+legacy records.
+
+If native transport proves definite rejection and later bookkeeping raises,
+ordinary intake consumes only the current exact task/full-identity proof under
+the shared lock and releases only that request's pending claim. Stale receipts
+are discarded before admission; absent, mismatched and ambiguous proof remain
+fenced. This does not settle or rewrite other accounting/uncertain operations.
+
+The common Codex owner fence now also holds the v2 prototype behind any ambiguous
+wildcard. Broad wire provenance alone provides no exhaustive registered
+obligation eligibility; the optional accepted Strong source protocol is required; see [Durable Codex work accounting](durable-codex-work-accounting.md#before-wire-continuation-provenance-milestone).
+
+The maintained PR-entry receipt contract supplies explicit typed native outcomes:
+a fresh `NOT_DELIVERED` lookup without a shared claim permits the original
+one-time handoff, whose confirmed receipt suppresses replay. `INDETERMINATE` or
+unclassified receipt objects remain pending without a send. A `NOT_DELIVERED`
+lookup with an older shared pending claim also remains held: native absence cannot
+clear that claim. The parametrized lifecycle regression enters `_handle_pr_merge`
+for both fresh delivery and these uncertainty cases, preserving the same cloud
+owner and prohibiting local repair, merge and CI-failure routing.

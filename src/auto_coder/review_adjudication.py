@@ -15,11 +15,12 @@ from enum import Enum
 from typing import Optional, Sequence
 
 MARKER = "<!-- auto-coder-review-adjudication:v1 -->"
+SCOPED_MARKER = "<!-- auto-coder-review-adjudication:v2 -->"
 SERIALIZATION_VERSION = "review-adjudication-state:v1"
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_ENVELOPE = re.compile(r"^(?:[ \t]*\n)*<!-- auto-coder-review-adjudication:v1 -->\s*\n```json\n([\s\S]*?)\n```\s*$")
+_ENVELOPE = re.compile(r"^(?:[ \t]*\n)*<!-- auto-coder-review-adjudication:v[12] -->\s*\n```json\n([\s\S]*?)\n```\s*$")
 _KEYS = {"decision_id", "context_id", "head_sha", "contract_digest", "verdict", "directive", "supersedes", "rationale", "source"}
 _PAIRS = {("UPHOLD", "FIX"), ("OVERRULE", "NO_CHANGE"), ("UNDECIDED", "NONE")}
 
@@ -51,6 +52,34 @@ class IssueContract:
 
 
 @dataclass(frozen=True)
+class ScopedFollowup:
+    """An explicit same-principal correction, not a retry of old operations."""
+
+    task_id: str
+    owner_incarnation: str
+    issue_number: int
+    requirement_id: str
+    distinct_from: tuple[tuple[str, str], ...]
+
+
+def _parse_scoped(value: object) -> ScopedFollowup:
+    if not isinstance(value, dict) or set(value) != {"task_id", "owner_incarnation", "issue_number", "requirement_id", "distinct_from"}:
+        raise ValueError("scoped follow-up fields must exactly match v2")
+    if any(not isinstance(value[key], str) or not value[key].strip() for key in ("task_id", "owner_incarnation", "requirement_id")):
+        raise ValueError("scoped follow-up requires explicit owner and requirement selection")
+    if re.fullmatch(r"task_e_[A-Za-z0-9]+", value["task_id"]) is None:
+        raise ValueError("scoped follow-up requires a native Codex task ID")
+    if type(value["issue_number"]) is not int or value["issue_number"] <= 0 or re.fullmatch(r"REQ-[0-9]{3,}", value["requirement_id"]) is None:
+        raise ValueError("scoped follow-up requires one qualified existing requirement")
+    refs = value["distinct_from"]
+    if not isinstance(refs, (list, tuple)) or any(not isinstance(ref, (list, tuple)) or len(ref) != 2 or not isinstance(ref[0], str) or not _UUID.fullmatch(ref[0]) or not isinstance(ref[1], str) or not _SHA256.fullmatch(ref[1]) for ref in refs):
+        raise ValueError("distinct_from requires exact operation IDs and snapshot digests")
+    if len({ref[0] for ref in refs}) != len(refs):
+        raise ValueError("distinct_from operation IDs must be unique")
+    return ScopedFollowup(value["task_id"], value["owner_incarnation"], value["issue_number"], value["requirement_id"], tuple((ref[0], ref[1]) for ref in refs))
+
+
+@dataclass(frozen=True)
 class Decision:
     decision_id: str
     context_id: str
@@ -61,6 +90,7 @@ class Decision:
     supersedes: tuple[str, ...]
     rationale: str
     source: str
+    scoped_followup: Optional[ScopedFollowup] = None
 
 
 @dataclass(frozen=True)
@@ -137,7 +167,7 @@ def _pairs_hook(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def parse_decision(body: str) -> Decision:
-    """Parse the literal v1 envelope without interpreting embedded examples."""
+    """Parse literal versioned envelopes without interpreting embedded examples."""
     match = _ENVELOPE.fullmatch(body)
     if not match:
         raise ValueError("body is not an exact v1 adjudication envelope")
@@ -145,8 +175,9 @@ def parse_decision(body: str) -> Decision:
         value = json.loads(match.group(1), object_pairs_hook=_pairs_hook)
     except json.JSONDecodeError as exc:
         raise ValueError("invalid adjudication JSON") from exc
-    if not isinstance(value, dict) or set(value) != _KEYS:
-        raise ValueError("adjudication fields must exactly match the v1 schema")
+    scoped = body.lstrip().startswith(SCOPED_MARKER)
+    if not isinstance(value, dict) or set(value) != (_KEYS | {"scoped_followup"} if scoped else _KEYS):
+        raise ValueError("adjudication fields must exactly match the declared schema")
     if not isinstance(value["decision_id"], str) or not _UUID.fullmatch(value["decision_id"]):
         raise ValueError("decision_id must be a canonical lowercase UUID")
     if not isinstance(value["context_id"], str) or not _UUID.fullmatch(value["context_id"]):
@@ -160,6 +191,8 @@ def parse_decision(body: str) -> Decision:
     pair = (value["verdict"], value["directive"])
     if pair not in _PAIRS:
         raise ValueError("unsupported verdict/directive pair")
+    if scoped and pair != ("UPHOLD", "FIX"):
+        raise ValueError("scoped follow-up retains UPHOLD/FIX authority only")
     supersedes = value["supersedes"]
     if not isinstance(supersedes, list) or any(not isinstance(item, str) or not _UUID.fullmatch(item) for item in supersedes) or len(set(supersedes)) != len(supersedes):
         raise ValueError("supersedes must contain distinct canonical UUIDs")
@@ -168,18 +201,30 @@ def parse_decision(body: str) -> Decision:
     if not isinstance(value["source"], str) or value["source"] not in {"chatgpt-assisted", "dashboard"}:
         raise ValueError("unsupported adjudication source")
     return Decision(
-        decision_id=value["decision_id"], context_id=value["context_id"], head_sha=value["head_sha"], contract_digest=value["contract_digest"], verdict=str(value["verdict"]), directive=str(value["directive"]), supersedes=tuple(supersedes), rationale=value["rationale"], source=value["source"]
+        decision_id=value["decision_id"],
+        context_id=value["context_id"],
+        head_sha=value["head_sha"],
+        contract_digest=value["contract_digest"],
+        verdict=str(value["verdict"]),
+        directive=str(value["directive"]),
+        supersedes=tuple(supersedes),
+        rationale=value["rationale"],
+        source=value["source"],
+        scoped_followup=_parse_scoped(value["scoped_followup"]) if scoped else None,
     )
 
 
 def render_decision(decision: Decision) -> str:
     payload = asdict(decision)
     payload["supersedes"] = list(decision.supersedes)
-    return f"{MARKER}\n```json\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n```"
+    marker = SCOPED_MARKER if decision.scoped_followup is not None else MARKER
+    if decision.scoped_followup is None:
+        payload.pop("scoped_followup")
+    return f"{marker}\n```json\n{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n```"
 
 
 def is_adjudication_envelope(body: str) -> bool:
-    """Return whether ``body`` is structurally a v1 adjudication envelope.
+    """Return whether ``body`` is structurally a supported adjudication envelope.
 
     Used by ordinary review-comment consumers (e.g. generic cloud repair
     delivery) to recognize and exclude an adjudication reply, authorized or
@@ -208,6 +253,19 @@ def contract_identity(contracts: Sequence[IssueContract], parser_version: str) -
     return canonical, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), tuple(objectives)
 
 
+def _serialized_context(context: ReviewContext) -> dict:
+    value = asdict(context)
+    for group in (value["decisions"], value["pending_decisions"]):
+        for record in group.values():
+            if record["decision"].get("scoped_followup") is None:
+                record["decision"].pop("scoped_followup", None)
+    return value
+
+
+def _restore_decision(value: dict) -> Decision:
+    return Decision(**{**value, "supersedes": tuple(value["supersedes"]), "scoped_followup": _parse_scoped(value["scoped_followup"]) if value.get("scoped_followup") is not None else None})
+
+
 class AdjudicationLedger:
     """Deterministic decision graph with permanent fail-closed retirement."""
 
@@ -219,7 +277,7 @@ class AdjudicationLedger:
 
     @staticmethod
     def _integrity_digest(context: ReviewContext) -> str:
-        value = asdict(context)
+        value = _serialized_context(context)
         value.pop("integrity_digest")
         canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -442,7 +500,7 @@ class AdjudicationLedger:
 
     def dumps(self) -> str:
         self._refresh_integrity()
-        return json.dumps({"version": SERIALIZATION_VERSION, "context": asdict(self.context)}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps({"version": SERIALIZATION_VERSION, "context": _serialized_context(self.context)}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @classmethod
     def loads(cls, raw: str) -> "AdjudicationLedger":
@@ -455,8 +513,8 @@ class AdjudicationLedger:
             if set(data) != required_context_fields:
                 raise ValueError
             contracts = tuple(IssueContract(item["issue_id"], item["issue_number"], tuple(Requirement(**req) for req in item["requirements"]), item["objective_text"]) for item in data.pop("contracts"))
-            decisions = {key: DecisionRecord(Decision(**{**item["decision"], "supersedes": tuple(item["decision"]["supersedes"])}), SourceComment(**item["source"]), item["body_hash"]) for key, item in data.pop("decisions").items()}
-            pending = {key: DecisionRecord(Decision(**{**item["decision"], "supersedes": tuple(item["decision"]["supersedes"])}), SourceComment(**item["source"]), item["body_hash"]) for key, item in data.pop("pending_decisions").items()}
+            decisions = {key: DecisionRecord(_restore_decision(item["decision"]), SourceComment(**item["source"]), item["body_hash"]) for key, item in data.pop("decisions").items()}
+            pending = {key: DecisionRecord(_restore_decision(item["decision"]), SourceComment(**item["source"]), item["body_hash"]) for key, item in data.pop("pending_decisions").items()}
             data["objective_fingerprints"] = tuple(data["objective_fingerprints"])
             context = ReviewContext(contracts=contracts, decisions=decisions, pending_decisions=pending, **data)
             if not _SHA256.fullmatch(context.integrity_digest):

@@ -269,9 +269,18 @@ environment_id = "env_from_toml"
             wham.send_follow_up.return_value = FollowUpDeliveryResult(FollowUpDeliveryOutcome.INDETERMINATE, 429)
             client.wham_client = wham
 
-            assert client.send_followup("task_e_123", "same logical work") is False
-            assert client.send_followup("task_e_123", "same logical work") is False
-            assert client.send_followup("task_e_123", "same logical work") is False
+            identities = ("feedback-F",)
+            assert client.send_followup("task_e_123", "same logical work", identities) is False
+            assert client.consume_followup_duplicate_guard("task_e_123", identities) is False
+            assert client.send_followup("task_e_123", "same logical work", identities) is False
+            assert client.consume_followup_rejection("task_e_123", identities) is False
+            assert client.consume_followup_duplicate_guard("task_e_123", identities) is True
+            assert client.consume_followup_duplicate_guard("task_e_123", identities) is False
+            assert client.send_followup("task_e_123", "same logical work", identities) is False
+            # The next send resets the single-use diagnostic, including a
+            # pre-send refusal with no native journal or transport operation.
+            assert client.send_followup("invalid", "same logical work", identities) is False
+            assert client.consume_followup_duplicate_guard("task_e_123", identities) is False
 
         wham.send_follow_up.assert_called_once()
 

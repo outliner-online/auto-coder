@@ -14,7 +14,7 @@ import time
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .cloud_task_client_base import CloudTask, CloudTaskClientBase, CloudTaskState
 from .codex_cloud_task import canonical_codex_cloud_task_url, extract_codex_cloud_task_id, is_valid_codex_cloud_task_id
@@ -123,6 +123,7 @@ class CodexCloudClient(CloudTaskClientBase):
         self.attempts = (self.config_backend and self.config_backend.attempts) or 1
         self.wham_client: Optional[CodexWhamClient] = None
         self._followup_rejection: Optional[tuple[str, tuple[str, ...]]] = None
+        self._followup_duplicate_guard: Optional[tuple[str, tuple[str, ...]]] = None
         self.last_continued_at: Dict[str, float] = {}
 
     def _warn_unsupported_model(self, model_name: Optional[str]) -> None:
@@ -658,9 +659,17 @@ class CodexCloudClient(CloudTaskClientBase):
         latest = max(accepted, key=lambda record: record.accepted_at)
         return latest.completed_turn_id
 
-    def send_existing_pr_followup(self, task_id: str, message: str, target: ExistingPrRepairTarget, logical_identities: tuple[str, ...] = ()) -> bool:
+    def send_existing_pr_followup(self, task_id: str, message: str, target: ExistingPrRepairTarget, logical_identities: tuple[str, ...] = (), *, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None) -> bool:
         """Carry the existing-PR producer contract into the durable sender journal."""
+        if final_authority_check is not None:
+            return self.send_followup(task_id, message, logical_identities, repair_target=target, final_authority_check=final_authority_check, strong_source=strong_source, strong_revision=strong_revision)
         return self.send_followup(task_id, message, logical_identities, repair_target=target)
+
+    def consume_followup_duplicate_guard(self, task_id: str, logical_identities: tuple[str, ...]) -> bool:
+        """Consume a local no-POST outcome separately from remote rejection."""
+        guarded = self._followup_duplicate_guard
+        self._followup_duplicate_guard = None
+        return guarded == (task_id, tuple(sorted(logical_identities)))
 
     def consume_followup_rejection(self, task_id: str, logical_identities: tuple[str, ...]) -> bool:
         """Consume positive rejection evidence from this client's latest send only.
@@ -671,9 +680,12 @@ class CodexCloudClient(CloudTaskClientBase):
         self._followup_rejection = None
         return rejection == (task_id, tuple(sorted(logical_identities)))
 
-    def send_followup(self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None) -> bool:
+    def send_followup(
+        self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None
+    ) -> bool:
         """Send work once, reconciling any prior ambiguous POST before retrying."""
         self._followup_rejection = None
+        self._followup_duplicate_guard = None
         if not is_valid_codex_cloud_task_id(task_id) or not message:
             logger.warning("Codex Cloud follow-up requires a task ID and message")
             return False
@@ -708,6 +720,7 @@ class CodexCloudClient(CloudTaskClientBase):
             if states and all(state is FollowUpDeliveryOutcome.DELIVERED for state in states):
                 return True
             if any(state is not FollowUpDeliveryOutcome.NOT_DELIVERED for state in states):
+                self._followup_duplicate_guard = (task_id, tuple(sorted(identities)))
                 logger.warning("Codex follow-up contains an indeterminate or partially delivered logical identity; duplicate POST deferred")
                 return False
 
@@ -720,7 +733,8 @@ class CodexCloudClient(CloudTaskClientBase):
         # spelling or a caller-provided eligibility flag. Registration occurs
         # before the follow-up journal can retain responsibility or WHAM can
         # observe a POST.
-        from .codex_work_fence import CodexWorkOutsideScope, production_codex_fence
+        from .codex_work_accounting import CodexSendProvenance
+        from .codex_work_fence import CodexWorkAuthorityRefused, CodexWorkOutsideScope, CodexWorkOverlap, production_codex_fence
 
         source_request_id = ",".join(sorted(identities))
         try:
@@ -732,6 +746,15 @@ class CodexCloudClient(CloudTaskClientBase):
                 turn_id,
             )
         except CodexWorkOutsideScope:
+            from .strong_correction_scope import has_registered_task
+
+            try:
+                adopted = has_registered_task(self.repo_name or "", task_id)
+            except Exception:
+                adopted = True
+            if adopted:
+                logger.warning("Registered Strong task has missing owner evidence; no untracked fallback send")
+                return False
             fence = None
             work_identity = None
         except Exception as exc:
@@ -771,7 +794,29 @@ class CodexCloudClient(CloudTaskClientBase):
             return wham.send_follow_up(task_id=task_id, turn_id=turn_id, prompt=message)
 
         try:
-            result = fence.execute(work_identity, send_registered_followup, force=force) if fence is not None and work_identity is not None else send_registered_followup()
+            if final_authority_check is not None and (fence is None or work_identity is None):
+                raise CodexWorkAuthorityRefused("Scoped final authority requires the existing tracked owner fence")
+            provenance = CodexSendProvenance(
+                message_fingerprint,
+                tuple(sorted(identities)),
+                repair_target.pr_number if repair_target is not None else None,
+                repair_target.head_sha if repair_target is not None else None,
+                repair_target.head_branch if repair_target is not None else None,
+                repair_target.base_branch if repair_target is not None else None,
+                strong_source=strong_source,
+                strong_revision=strong_revision,
+            )
+            if fence is not None and work_identity is not None:
+                if final_authority_check is not None:
+                    result = fence.execute(work_identity, send_registered_followup, force=force, send_provenance=provenance, final_authority_check=final_authority_check)
+                else:
+                    result = fence.execute(work_identity, send_registered_followup, force=force, send_provenance=provenance)
+            else:
+                result = send_registered_followup()
+        except CodexWorkOverlap as exc:
+            self._followup_duplicate_guard = (task_id, tuple(sorted(identities)))
+            logger.warning(f"Codex follow-up held by local wildcard overlap guard; no provider request: {exc}")
+            return False
         except (OSError, ValueError, TypeError) as exc:
             logger.warning(f"Cannot durably reserve Codex follow-up; request was not sent: {exc}")
             return False
@@ -802,6 +847,19 @@ class CodexCloudClient(CloudTaskClientBase):
                     pending.pop(key, None)
             _save_pending_followups(state_path, pending)
         if fence is not None and work_identity is not None:
+            from .implementation_slots import ImplementationOwner
+
+            # Preserve native certainty before later lifecycle accounting can
+            # raise. This does not settle execution/publication responsibility.
+            fence.accounting.record_send_outcome(
+                ImplementationOwner("issue", work_identity.issue_number),
+                work_identity.incarnation,
+                work_identity.operation_id,
+                source_request_id=work_identity.source_request_id,
+                causal_baseline=work_identity.causal_baseline,
+                task_id=work_identity.task_id,
+                outcome="accepted" if result.delivered else "not_delivered" if result.outcome is FollowUpDeliveryOutcome.NOT_DELIVERED else "unknown",
+            )
             fence.record_delivery(
                 work_identity,
                 accepted=result.delivered,
