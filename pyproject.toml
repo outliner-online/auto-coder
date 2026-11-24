@@ -26,6 +26,8 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "click>=8.1.0",
     "python-dotenv>=1.0.0",
+    # Used directly by issue, Jules and quota processing (previously via Aider).
+    "python-dateutil>=2.9.0.post0",
     "GitPython>=3.1.0",
     "pyyaml>=6.0",
     "markdown-it-py>=4.0.0,<5.0.0",
@@ -45,9 +47,6 @@ dependencies = [
     # metadata. fastcore>=2.0 removed L.starmap(), which ghapi<2.0's
     # GhApi.__init__ still calls -- see gh_cache.py's get_ghapi_client() comment.
     "fastcore>=1.14.5,<2.0.0",
-    "aider-chat>=0.1.0",
-    # pydub (through Aider) imports audioop, removed from Python 3.13.
-    "audioop-lts>=0.2.2; python_version >= '3.13'",
     "rapidfuzz>=3.14.6",
     "PyGithub>=2.0.0",
     "PyJWT[crypto]>=2.8.0",
@@ -98,15 +97,6 @@ auto_coder = ["prompts.yaml", "*.yml", "*.yaml", "*.json", "management/static/*.
 version = {attr = "auto_coder_build_backend.get_build_version"}
 
 [tool.uv]
-# aider-chat 0.86.2 pins pre-3.14 numerical releases. Match Aider upstream's
-# Python 3.14-compatible ranges while preserving the production 3.12 graph.
-# https://github.com/Aider-AI/aider/blob/main/requirements.txt
-override-dependencies = [
-    "numpy==1.26.4; python_version < '3.14'",
-    "numpy>=2.3,<2.5; python_version >= '3.14'",
-    "scipy==1.15.3; python_version < '3.14'",
-    "scipy>=1.16.1,<1.18; python_version >= '3.14'",
-]
 cache-keys = [{ git = { commit = true } }, { file = "**/*.py" }, { file = "pyproject.toml" }]
 
 [tool.pyright]
