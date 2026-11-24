@@ -1,7 +1,7 @@
-"""Regression coverage for the PR Tests "Lint & Type Check" static-analysis gate.
+"""Regression coverage for Test Source for Runtime's source-quality gate.
 
 These tests execute the *actual* production commands parsed out of
-``.github/workflows/pr-tests.yml`` and ``.pre-commit-config.yaml`` against real,
+``.github/workflows/test-source-for-runtime.yml`` and ``.pre-commit-config.yaml`` against real,
 disposable source fixtures using the real ``black``/``isort``/``flake8``/``mypy``
 binaries already provisioned in this repository's own virtual environment. They
 intentionally avoid mocks: a fake process that merely returns a chosen exit
@@ -26,7 +26,7 @@ from tests.test_repository_hygiene_cli import ALLOWLIST, git, write
 pytestmark = pytest.mark.usefixtures("_use_real_commands")
 
 ROOT = Path(__file__).parents[1]
-WORKFLOW = ROOT / ".github/workflows/pr-tests.yml"
+WORKFLOW = ROOT / ".github/workflows/test-source-for-runtime.yml"
 PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 PYPROJECT = ROOT / "pyproject.toml"
 FLAKE8_CONFIG = ROOT / ".flake8"
@@ -44,11 +44,11 @@ def _workflow() -> dict:
 
 
 def _lint_job() -> dict:
-    return _workflow()["jobs"]["lint"]
+    return _workflow()["jobs"]["source-quality"]
 
 
 def _lint_step(name: str) -> dict:
-    return next(step for step in _lint_job()["steps"] if step["name"] == name)
+    return next(step for step in _lint_job()["steps"] if step.get("name") == name)
 
 
 def _pre_commit_hook(hook_id: str) -> dict:
@@ -66,7 +66,7 @@ def _venv_argv(run: str) -> list[str]:
     """Translate a workflow/hook ``uv run <tool> ...`` command into a direct call.
 
     Uses the real binaries this repository's own ``.venv`` (provisioned via the
-    same ``[project.optional-dependencies].dev`` extra the workflow installs)
+    same locked development and test dependencies the workflow installs)
     so fixture-driven tests do not pay for a full "uv run" resolution per call.
     The argument list -- the thing the requirements actually constrain -- is
     left untouched.
@@ -86,37 +86,37 @@ def _venv_argv(run: str) -> list[str]:
 
 def test_workflow_static_contract_matches_requirements() -> None:
     workflow = _workflow()
-    assert workflow["name"] == "PR Tests"
-    assert workflow["on"]["pull_request"]["types"] == ["opened", "synchronize", "reopened"]
-    assert "workflow_dispatch" in workflow["on"]
+    assert workflow["name"] == "Test Source for Runtime"
+    assert set(workflow["on"]) == {"pull_request", "push", "workflow_dispatch"}
+    assert workflow["on"]["pull_request"] in (None, {})
 
     lint = _lint_job()
-    assert lint["name"] == "Lint & Type Check"
+    assert lint["name"] == "Source identity and quality"
     assert "if" not in lint, "the lint job must not be gated by author/provider/label/path conditions"
 
     steps = lint["steps"]
-    names = [step["name"] for step in steps]
-    assert names == [
-        "Checkout",
-        "Setup Python",
-        "Install uv",
+    names = [step.get("name") for step in steps]
+    mandatory_order = [
         "Install dependencies",
         "Check repository hygiene",
         "Black (check)",
         "isort (check)",
         "Flake8",
         "Mypy",
+        "Test CLI entry point",
     ]
+    assert [names.index(name) for name in mandatory_order] == sorted(names.index(name) for name in mandatory_order)
     assert steps[0]["uses"].startswith("actions/checkout@")
 
     for step in steps:
-        assert "if" not in step, f"step {step['name']!r} must not be conditionally skipped"
-        assert step.get("continue-on-error") is not True, f"step {step['name']!r} must not swallow failures"
+        name = step.get("name", step.get("uses"))
+        assert "if" not in step, f"step {name!r} must not be conditionally skipped"
+        assert step.get("continue-on-error") is not True, f"step {name!r} must not swallow failures"
         run = step.get("run", "")
         assert "|| true" not in run and "continue-on-error" not in run and "set +e" not in run
 
     install = _lint_step("Install dependencies")
-    assert "uv sync --locked --extra dev" in install["run"]
+    assert install["run"].strip() == "uv sync --locked --dev --extra test"
 
     hygiene = _lint_step("Check repository hygiene")
     assert hygiene["run"].strip() == "scripts/check_repository_hygiene.py --source head --repo ."
@@ -237,7 +237,7 @@ def test_fresh_environment_setup_provisions_tools_and_all_checks_pass(tmp_path: 
     """Reproduce the lint job's actual setup + check commands from scratch.
 
     The checkout has no preinstalled Black/isort/Flake8/mypy and no installed
-    git hooks -- ``uv sync --locked --extra dev`` is the only thing that makes those
+    git hooks -- ``uv sync --locked --dev --extra test`` is the only thing that makes those
     tools available, exactly as on a fresh GitHub Actions runner.
     """
     repo = tmp_path / "repo"
@@ -265,24 +265,24 @@ def test_fresh_environment_setup_provisions_tools_and_all_checks_pass(tmp_path: 
     git(repo, "commit", "-qm", "fresh checkout")
     head_before = git(repo, "rev-parse", "HEAD").stdout
 
-    install = _run(["uv", "sync", "--extra", "dev"], cwd=repo)
+    install = _run(shlex.split(_lint_step("Install dependencies")["run"]), cwd=repo)
     assert install.returncode == 0, install.stderr
     for tool in ("black", "isort", "flake8", "mypy"):
-        assert (repo / ".venv/bin" / tool).exists(), f"{tool} was not provisioned by the declared dev extra"
+        assert (repo / ".venv/bin" / tool).exists(), f"{tool} was not provisioned by the declared development dependencies"
 
     hygiene = _run(shlex.split(_lint_step("Check repository hygiene")["run"]), cwd=repo)
     assert hygiene.returncode == 0, hygiene.stdout + hygiene.stderr
 
-    black = _run(["uv", "run", "black", "--check", "src/", "tests/"], cwd=repo)
+    black = _run(shlex.split(_lint_step("Black (check)")["run"]), cwd=repo)
     assert black.returncode == 0, black.stdout + black.stderr
 
-    isort = _run(["uv", "run", "isort", "--check-only", "src/", "tests/"], cwd=repo)
+    isort = _run(shlex.split(_lint_step("isort (check)")["run"]), cwd=repo)
     assert isort.returncode == 0, isort.stdout + isort.stderr
 
-    flake8 = _run(["uv", "run", "flake8", "src/", "tests/"], cwd=repo)
+    flake8 = _run(shlex.split(_lint_step("Flake8")["run"]), cwd=repo)
     assert flake8.returncode == 0, flake8.stdout + flake8.stderr
 
-    mypy = _run(["uv", "run", "mypy", "--config-file", "pyproject.toml", "-p", "auto_coder"], cwd=repo)
+    mypy = _run(shlex.split(_lint_step("Mypy")["run"]), cwd=repo)
     assert mypy.returncode == 0, mypy.stdout + mypy.stderr
     assert "Success" in mypy.stdout
 
@@ -294,16 +294,15 @@ def test_fresh_environment_setup_provisions_tools_and_all_checks_pass(tmp_path: 
 def test_workflow_dispatch_wiring_allows_selecting_an_arbitrary_ref() -> None:
     """AS-001's manually-selected-ref coverage: workflow_dispatch has no inputs
 
-    that would force checkout onto something other than the dispatched ref, and
-    the checkout step takes no explicit, hardcoded ``ref:``. That leaves
-    ``actions/checkout``'s default (``github.ref``, i.e. the manually selected
-    ref for a workflow_dispatch run, or the PR merge ref otherwise) in effect.
+    that would force checkout onto something other than the dispatched ref.
+    Pinning ``github.sha`` resolves that selected ref's exact event commit;
+    on pull requests the same expression selects the synthetic merge commit.
     """
     workflow = _workflow()
     assert workflow["on"]["workflow_dispatch"] in (None, {})
     checkout = _lint_job()["steps"][0]
-    assert checkout["name"] == "Checkout"
-    assert "with" not in checkout or "ref" not in checkout.get("with", {})
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
 
 
 # ---------------------------------------------------------------------------

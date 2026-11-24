@@ -16,6 +16,7 @@ WORKFLOW_PATH = ".github/workflows/test-source-for-runtime.yml"
 WORKFLOW_NAME = "Test Source for Runtime"
 SOURCE_JOB = "complete-source-shard"
 PLAN_JOB_NAME = "Plan complete source tests"
+SOURCE_EVENTS = frozenset({"push", "pull_request", "workflow_dispatch"})
 PHASES = ("setup", "call", "teardown")
 
 
@@ -170,13 +171,17 @@ def verify_current_source_attempt(client: GitHubGitDataClient, run_id: int, atte
         or origin.get("run_id") != str(run_id)
         or origin.get("run_attempt") != str(attempt)
         or origin.get("planning_attempt") != f"source-plan-{run_id}-{attempt}"
-        or not isinstance(origin.get("event_sha"), str)
+        or origin.get("event_sha") != source_sha
+        or origin.get("event_name") not in SOURCE_EVENTS
+        or not isinstance(origin.get("run_head_sha"), str)
     ):
         raise SourceEvidenceError("plan is not from this exact current source workflow attempt")
+    if origin["event_name"] != "pull_request" and origin["run_head_sha"] != source_sha:
+        raise SourceEvidenceError("non-PR source checkout differs from the Actions run head SHA")
     run = _object_response(client, f"actions/runs/{run_id}/attempts/{attempt}", "run")
-    # Actions run.head_sha identifies the PR head; github.sha in a PR job is
-    # the separate ephemeral merge checkout used by source-quality.
-    if any(run.get(key) != value for key, value in {"id": run_id, "run_attempt": attempt, "head_sha": source_sha, "path": WORKFLOW_PATH}.items()):
+    # PR jobs test github.sha, the simulated merge commit. Actions run.head_sha
+    # remains the PR branch head and must be checked as a distinct identity.
+    if any(run.get(key) != value for key, value in {"id": run_id, "run_attempt": attempt, "head_sha": origin["run_head_sha"], "event": origin["event_name"], "path": WORKFLOW_PATH}.items()):
         raise SourceEvidenceError("source run/attempt/tested SHA or workflow path is foreign")
     attempt_started = _time(run.get("run_started_at"), "current attempt start")
     jobs = _all_pages(client, f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")

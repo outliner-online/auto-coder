@@ -15,7 +15,7 @@ pytestmark = pytest.mark.usefixtures("_use_real_commands")
 CHECKER = Path(__file__).parents[1] / "scripts" / "check_repository_hygiene.py"
 ALLOWLIST = json.loads((Path(__file__).parents[1] / "scripts" / "repository_hygiene_allowlist.json").read_text())
 REPOSITORY = Path(__file__).parents[1]
-WORKFLOW = REPOSITORY / ".github/workflows/pr-tests.yml"
+WORKFLOW = REPOSITORY / ".github/workflows/test-source-for-runtime.yml"
 PRE_COMMIT_CONFIG = REPOSITORY / ".pre-commit-config.yaml"
 
 
@@ -234,13 +234,13 @@ def test_checker_does_not_modify_repository_state(tmp_path: Path) -> None:
     assert (repo / "old-artifact.bin").exists()
 
 
-def test_pr_workflow_runs_real_head_check_before_existing_linters(tmp_path: Path) -> None:
+def test_source_workflow_runs_real_head_check_before_existing_linters(tmp_path: Path) -> None:
     workflow = yaml.safe_load(WORKFLOW.read_text())
-    assert set(workflow["on"]) == {"pull_request", "workflow_dispatch"}
-    lint = workflow["jobs"]["lint"]
-    assert lint["name"] == "Lint & Type Check"
+    assert set(workflow["on"]) == {"pull_request", "push", "workflow_dispatch"}
+    lint = workflow["jobs"]["source-quality"]
+    assert lint["name"] == "Source identity and quality"
     steps = lint["steps"]
-    names = [step["name"] for step in steps]
+    names = [step.get("name") for step in steps]
     hygiene = steps[names.index("Check repository hygiene")]
     assert hygiene == {
         "name": "Check repository hygiene",

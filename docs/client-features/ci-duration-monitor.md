@@ -9,8 +9,12 @@ publication; `cancel-in-progress: false` avoids interrupting issue submissions.
 
 ## Detection and evidence
 
-`.github/ci-duration-monitor.json` names the ordinary PR/source/browser/live/
-worker workflows. Known matrix shards are
+`.github/ci-duration-monitor.json` names the unified source/browser/live/
+worker workflows. `Test Source for Runtime` covers PR, main-push, and manual
+source checks; the retired `pr-tests.yml` workflow is no longer monitored.
+Its dynamic source shards retain their existing `complete-source` family
+identity, so earlier source-duration findings and later observations still
+join the same issue. Known matrix shards are
 combined into one logical family; any other job in a monitored workflow receives
 its own exact-name family. A new workflow requires an explicit config entry.
 A family can opt in to `require_test_step: true`, so only recognized jobs

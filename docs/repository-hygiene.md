@@ -25,8 +25,8 @@ does not untrack it; remove it from the index as well.
 
 ## CI checks the committed tree
 
-The `Lint & Type Check` job in the `PR Tests` workflow runs, after checkout and
-dependency installation:
+The `Source identity and quality` job in the `Test Source for Runtime`
+workflow runs, after checkout and dependency installation:
 
 ```console
 scripts/check_repository_hygiene.py --source head --repo .
@@ -67,10 +67,13 @@ the CI head check remains the shared tracked-state check.
 ## Server-side enforcement boundary
 
 CI integration alone does not prevent every merge or direct-push path. GitHub-side
-merge enforcement requires the actual `PR Tests / Lint & Type Check` status context
-to be configured as required in branch protection or a repository ruleset. During
-the 2026-09-07 investigation, the `main` branch was not protected, required status
-checks were disabled, and no repository rulesets were configured.
+merge enforcement requires the native `Complete source tests with Chromium`
+check from `Test Source for Runtime` to be configured as required in branch
+protection or a repository ruleset. That aggregate requires the
+`Source identity and quality` job, including repository hygiene, and the complete
+planned test result. During the 2026-09-07 investigation, the `main` branch was
+not protected, required status checks were disabled, and no repository rulesets
+were configured.
 
 The `Update Version` workflow also commits and pushes directly to `main`. That
 direct-push behavior must be reconciled before strict server-side protection is

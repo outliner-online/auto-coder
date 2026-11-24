@@ -68,20 +68,20 @@ It retrieves issues and error-related PRs from GitHub to build and fix the appli
 
 * Make PR checks via GitHub Actions mandatory.
 * Workflow files:
-  * `.github/workflows/pr-tests.yml` (name: `PR Tests`)
+  * `.github/workflows/test-source-for-runtime.yml` (name: `Test Source for Runtime`)
   * `.github/workflows/browser-tests.yml` (name: `Browser Tests`)
   * `.github/workflows/opencode-live-tests.yml` (name: `OpenCode Live Tests`)
-  * `.github/workflows/update-version.yml` (name: `Update Version`)
-* Required jobs in `PR Tests`:
-  * **Lint & Type Check** (black / isort / flake8 / mypy)
-  * **Tests with Coverage** (pytest with coverage reports)
+  * `.github/workflows/publish-tested-source.yml` (name: `Publish Tested Source`)
+* Required jobs in `Test Source for Runtime`:
+  * **Source identity and quality** (repository hygiene, black / isort / flake8 / mypy, CLI smoke)
+  * **Complete source tests with Chromium** (all planned source shards, native receipts and combined coverage reports)
   * Target Python version: 3.12
-* The `Lint & Type Check` job installs the checked-out project's own quality tools on
-  a fresh runner with `uv sync --locked --extra dev` (the `[project.optional-dependencies].dev`
-  extra: black, isort, flake8, mypy, and their typing dependencies) rather than relying
+* The `Source identity and quality` job installs the checked-out project's own quality tools on
+  a fresh runner with `uv sync --locked --dev --extra test` (locked development
+  and test dependencies: black, isort, flake8, mypy, and their typing dependencies) rather than relying
   on preinstalled tools or a developer's local environment. It never installs commit
   hooks, and it does not rewrite or commit source files.
-* The canonical mypy invocation, used identically by the `Lint & Type Check` job and
+* The canonical mypy invocation, used identically by the `Source identity and quality` job and
   by the `mypy` pre-commit hook, is:
   `mypy --config-file pyproject.toml -p auto_coder`
   Root `pyproject.toml`'s `[tool.mypy]` section (Python 3.12, `mypy_path = "src"`,
@@ -93,31 +93,35 @@ It retrieves issues and error-related PRs from GitHub to build and fix the appli
   submodules), not just files changed in a PR or files already imported elsewhere.
   A detected type error fails the gate even when the offending line is unrelated to
   the PR's diff; there is no baseline/error-count allowance.
-* `PR Tests` excludes pytest tests marked `browser` or `opencode_live`
-  (`-m "not browser and not opencode_live"`) and does not install Playwright browser
-  binaries or the OpenCode CLI. `Browser Tests` is a separate, independently
+* All unified source jobs check out `github.sha`: the synthetic merge commit on
+  pull requests, the committed main revision on push, and the selected revision
+  on manual runs. There is no additional PR-head suite. The source aggregate
+  requires quality, planning and every shard to succeed on the same attempt.
+* `Test Source for Runtime` excludes only tests marked `opencode_live`
+  (`-m "not opencode_live"`), installs and preflights real Chromium, and prepares
+  the Python-only management fixture. `Browser Tests` is a separate, independently
   triggered workflow that installs Playwright Chromium and runs exactly the tests
   marked `@pytest.mark.browser` (real headless-browser regressions such as
   `tests/test_dashboard_detail_scroll_stability.py`). Classify any new pytest test
   whose correctness oracle requires launching and driving a real browser with
   `@pytest.mark.browser` (or module-level `pytestmark = pytest.mark.browser`) so it
-  is picked up automatically by `Browser Tests` and excluded from `PR Tests`.
+  is picked up automatically by both `Browser Tests` and the complete source selection.
   `OpenCode Live Tests` installs the pinned `opencode` CLI, explicitly prepares the
   production runtime image for the checked-out commit (`scripts/prepare_opencode_image.py`),
   and runs all tests marked `@pytest.mark.opencode_live` (both real-CLI host regressions such
   as `tests/test_opencode_noedit_live.py` and container runtime verification scenarios in
   `tests/test_opencode_container_runtime.py`). Ordinary static tests (e.g., Dockerfile/Compose
-  syntax and documentation tests) remain unmarked and execute within ordinary `PR Tests` shards
-  without building Docker images or starting live containers. To run ordinary tests locally
-  without Docker or OpenCode CLI installed, use `pytest -m "not browser and not opencode_live"`.
+  syntax and documentation tests) remain unmarked and execute within complete source shards;
+  those static assertions do not themselves build images or start live containers.
+  For local work without the full CI prerequisites, run the relevant bounded tests.
   To execute the live suite locally, run `python scripts/prepare_opencode_image.py` and
   `pytest -m opencode_live`.
 * The `Publish Beta` workflow (`.github/workflows/publish-beta.yml`) runs the same
-  code-quality gates as `PR Tests` plus `bash scripts/test.sh -m "not opencode_live"`
+  code-quality gates as `Test Source for Runtime` plus `bash scripts/test.sh -m "not opencode_live"`
   on every push to `main`, before building and pushing the `sha-${{ github.sha }}`
   image. This excludes only `@pytest.mark.opencode_live` real-CLI/real-container
-  tests (unlike the `PR Tests` shard selector, it does not also exclude `browser`
-  tests) so the publication gate never installs the OpenCode CLI, prepares a live
+  tests, matching the unified source selection, so the publication gate never
+  installs the OpenCode CLI, prepares a live
   runtime image, or launches real OpenCode tasks/containers. A green `Publish Beta`
   run is a code-quality and non-live-test gate on the published artifact; it is not
   evidence that the independent `OpenCode Live Tests` workflow (which still runs on
@@ -125,15 +129,14 @@ It retrieves issues and error-related PRs from GitHub to build and fix the appli
   `bash scripts/test.sh` call without arguments still runs the full default
   discovery, including `opencode_live`-marked tests.
 * Branch protection should include the following required status checks:
-  * `PR Tests / Lint & Type Check`
-  * `PR Tests / Tests with Coverage`
+  * `Test Source for Runtime / Source identity and quality`
+  * `Test Source for Runtime / Complete source tests with Chromium`
   * `Browser Tests / Browser Tests`
-  * `Update Version / update-version` (for main branch)
-* A failing `Lint & Type Check` (or any other) status check is a red CI result only.
+* A failing `Source identity and quality` (or any other) status check is a red CI result only.
   Whether that red result actually blocks merging or direct pushes to a branch is a
   separate, server-side GitHub setting (branch protection rules / repository
   rulesets required-status-checks configuration), not something this workflow file
-  controls. This change enables the mypy step itself; it does not enable, modify, or
+  controls. Workflow unification does not enable, modify, or
   otherwise touch branch protection or ruleset configuration.
 
 ### LLM Execution Policy (Important)

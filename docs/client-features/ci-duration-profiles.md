@@ -62,7 +62,7 @@ one explicit `origin`:
     "kind": "github-actions",
     "checkout_sha": "1111111111111111111111111111111111111111",
     "event_sha": "2222222222222222222222222222222222222222",
-    "workflow": "PR Tests",
+    "workflow": "Test Source for Runtime",
     "run_id": "41246415733",
     "run_attempt": "1",
     "job_key": "pytest-shard-1",

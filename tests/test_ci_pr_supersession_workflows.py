@@ -10,7 +10,6 @@ from tests.support.ci_browser_install import assert_conditional_chromium_install
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = {
-    "PR Tests": ROOT / ".github/workflows/pr-tests.yml",
     "Browser Tests": ROOT / ".github/workflows/browser-tests.yml",
     "OpenCode Live Tests": ROOT / ".github/workflows/opencode-live-tests.yml",
     "Muse Live Tests": ROOT / ".github/workflows/muse-live-tests.yml",
@@ -31,7 +30,7 @@ def _effective_group(workflow: str, event: str, *, run_id: int, pr: int | None =
     return f"{workflow}-{suffix}"
 
 
-def test_all_six_production_workflows_have_pr_only_supersession() -> None:
+def test_all_retained_production_workflows_have_pr_only_supersession() -> None:
     """REQ-001/REQ-002: inspect every production definition, not a copied fixture."""
     for expected_name in WORKFLOWS:
         workflow = _load(expected_name)
@@ -46,42 +45,30 @@ def test_all_six_production_workflows_have_pr_only_supersession() -> None:
 
 def test_group_event_matrix_isolates_workflows_prs_and_non_pr_runs() -> None:
     """REQ-002/REQ-004: only arrival in an identical workflow/PR group supersedes."""
-    old = _effective_group("PR Tests", "pull_request", pr=41, run_id=100)
-    newer_revision = _effective_group("PR Tests", "pull_request", pr=41, run_id=101)
-    other_pr = _effective_group("PR Tests", "pull_request", pr=42, run_id=102)
+    old = _effective_group("Test Source for Runtime", "pull_request", pr=41, run_id=100)
+    newer_revision = _effective_group("Test Source for Runtime", "pull_request", pr=41, run_id=101)
+    other_pr = _effective_group("Test Source for Runtime", "pull_request", pr=42, run_id=102)
     other_workflow = _effective_group("Browser Tests", "pull_request", pr=41, run_id=103)
 
     assert old == newer_revision
     assert len({old, other_pr, other_workflow}) == 3
-    assert _effective_group("PR Tests", "workflow_dispatch", run_id=201) != _effective_group("PR Tests", "workflow_dispatch", run_id=202)
+    assert _effective_group("Test Source for Runtime", "workflow_dispatch", run_id=201) != _effective_group("Test Source for Runtime", "workflow_dispatch", run_id=202)
     assert _effective_group("Test Source for Runtime", "push", run_id=301) != _effective_group("Test Source for Runtime", "push", run_id=302)
 
 
 def test_existing_trigger_checkout_and_check_identities_are_preserved() -> None:
     """REQ-003/REQ-004: retain event, revision, permission, and check boundaries."""
-    pr = _load("PR Tests")
-    assert pr["on"] == {
-        "pull_request": {"types": ["opened", "synchronize", "reopened"]},
-        "workflow_dispatch": None,
-    }
-    assert {job["name"] for job in pr["jobs"].values()} >= {
-        "Lint & Type Check",
-        "Tests with Coverage (${{ matrix.group }}/4)",
-    }
-    shard = pr["jobs"]["tests-shard"]
-    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4]}}
-    shard_run = next(step["run"] for step in shard["steps"] if step.get("name", "").startswith("Run tests with coverage"))
-    assert "scripts/run_pr_test_shard.py" in shard_run
-
     for name in ("Browser Tests", "OpenCode Live Tests", "Muse Live Tests", "Supervisor Integration Tests"):
         assert set(_load(name)["on"]) == {"pull_request", "workflow_dispatch"}
 
     source = _load("Test Source for Runtime")
-    assert source["on"] == {"push": {"branches": ["main"]}, "pull_request": None}
+    assert source["on"] == {"push": {"branches": ["main"]}, "pull_request": None, "workflow_dispatch": None}
     assert source["jobs"]["source-quality"]["name"] == "Source identity and quality"
     assert source["jobs"]["complete-source-tests"]["name"] == "Complete source tests with Chromium"
-    source_checkout = source["jobs"]["complete-source-shard"]["steps"][0]
-    assert source_checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    for job in source["jobs"].values():
+        checkouts = [step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")]
+        assert len(checkouts) == 1
+        assert checkouts[0]["with"]["ref"] == "${{ github.sha }}"
 
 
 def test_required_profiles_and_fail_closed_prerequisites_are_unchanged() -> None:
@@ -123,12 +110,6 @@ def test_required_profiles_and_fail_closed_prerequisites_are_unchanged() -> None
     assert_conditional_chromium_install(source_steps["Install Chromium"])
     assert source_steps["Verify real headless Chromium"] == {"name": "Verify real headless Chromium", "run": "uv run python scripts/browser_preflight.py"}
     assert "-m 'not opencode_live'" in source_steps["Run complete required source selection"]["run"]
-
-    runner = (ROOT / "scripts/run_pr_test_shard.py").read_text(encoding="utf-8")
-    assert "os.killpg(pgid, signal.SIGTERM)" in runner
-    assert "os.killpg(pgid, signal.SIGKILL)" in runner
-    assert 'result = "cancelled" if _stop_group(process, pgid, grace) else "cleanup-failure"' in runner
-    assert 'if outcome != "timeout" or attempt == args.max_attempts or cancel_signal is not None:' in runner
 
 
 @pytest.mark.parametrize("mutation", ["marker", "required-live", "narrow-selection", "masked-failure"])

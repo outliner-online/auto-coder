@@ -1280,7 +1280,7 @@ or event schema:
    or state a concrete reason in the PR description why the change is
    observability-neutral.
 4. Run `bash scripts/test.sh tests/test_dashboard_observability.py` locally. The same
-   file is collected by the ordinary `PR Tests` shards; failures are mandatory test
+   file is collected by the complete `Test Source for Runtime` shards; failures are mandatory test
    failures, not semantic prompt-evaluation advice.
 
 Changing `dashboard.py`, approving a screenshot/generated snapshot, or editing a

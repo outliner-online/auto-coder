@@ -1,8 +1,15 @@
 # Exact-head CI evidence reuse
 
 Adversarial validation receives the production exact-head CI observation and
-uses verified `.github/workflows/pr-tests.yml` success to avoid a redundant
-whole-suite check. Dynamic test targets are restricted to `all` or existing
+uses verified `.github/workflows/test-source-for-runtime.yml` success to avoid a
+redundant whole-suite check. The retired `pr-tests.yml` workflow and a matching
+display name without the canonical path do not qualify. The CI observation is
+bound to the current PR head; the unified PR suite tests GitHub's merge candidate
+for that head and the selected base. That success is merge-candidate suite
+evidence, not a claim that the standalone head checkout was executed. Main-push
+runs test the exact main commit before publication.
+
+Dynamic test targets are restricted to `all` or existing
 Python files/directories under `tests/`, with optional pytest node selectors;
 prose and unsafe targets never reach the test runner.
 The initial review and any target-protocol correction receive the immutable CI

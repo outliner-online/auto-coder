@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,10 +12,12 @@ from auto_coder.utils import CommandResult
 
 
 def test_reusable_ci_requires_verified_canonical_workflow_path() -> None:
-    fact = WorkflowObservation(WorkflowExecutionIdentity("1", "10", 1), CIConclusion.SUCCESS, "renamed", workflow_path=".github/workflows/pr-tests.yml")
+    fact = WorkflowObservation(WorkflowExecutionIdentity("1", "10", 1), CIConclusion.SUCCESS, "renamed", workflow_path=".github/workflows/test-source-for-runtime.yml")
     snapshot = CIObservationSnapshot(ObservationSubject("https://api.github.com", "owner/repo", 7, "a" * 40), ObservationRequest("github-actions", "checks+workflows"), "cycle", 1, ObservationAvailability.KNOWN, (fact,))
     assert canonical_pr_tests_succeeded(GitHubActionsStatusResult(success=True, ids=[10], observation=snapshot)) is True
-    assert canonical_pr_tests_succeeded(GitHubActionsStatusResult(success=True, ids=[10], observation=CIObservationSnapshot(snapshot.subject, snapshot.request, "other", 1, ObservationAvailability.KNOWN, (WorkflowObservation(fact.execution, fact.conclusion, "PR Tests"),)))) is False
+    assert canonical_pr_tests_succeeded(GitHubActionsStatusResult(success=True, ids=[10], observation=CIObservationSnapshot(snapshot.subject, snapshot.request, "other", 1, ObservationAvailability.KNOWN, (WorkflowObservation(fact.execution, fact.conclusion, "Test Source for Runtime"),)))) is False
+    retired = replace(fact, display_name="Test Source for Runtime", workflow_path=".github/workflows/pr-tests.yml")
+    assert canonical_pr_tests_succeeded(GitHubActionsStatusResult(success=True, ids=[10], observation=replace(snapshot, facts=(retired,)))) is False
 
 
 def test_dynamic_target_protocol_rejects_prose_before_execution(tmp_path: Path) -> None:
@@ -62,7 +65,7 @@ def test_production_status_preserves_subject_and_distinct_execution_facts() -> N
     subject = ObservationSubject("https://api.github.com", "owner/repo", 7, "a" * 40)
     request = ObservationRequest("github-actions", "checks+workflows")
     facts = (
-        WorkflowObservation(WorkflowExecutionIdentity("1", "10", 1), CIConclusion.SUCCESS, workflow_path=".github/workflows/pr-tests.yml"),
+        WorkflowObservation(WorkflowExecutionIdentity("1", "10", 1), CIConclusion.SUCCESS, workflow_path=".github/workflows/test-source-for-runtime.yml"),
         WorkflowObservation(WorkflowExecutionIdentity("1", "11", 1), CIConclusion.PENDING, workflow_path=".github/workflows/other.yml"),
     )
     snapshot = CIObservationSnapshot(subject, request, "cycle-current", 4, ObservationAvailability.KNOWN, facts)
@@ -85,7 +88,7 @@ def test_focused_ci_reuse_requires_explicit_exact_target() -> None:
     fact = WorkflowObservation(
         WorkflowExecutionIdentity("1", "10", 1),
         CIConclusion.SUCCESS,
-        workflow_path=".github/workflows/pr-tests.yml",
+        workflow_path=".github/workflows/test-source-for-runtime.yml",
         successful_test_targets=(target,),
     )
     status = GitHubActionsStatusResult(
@@ -122,8 +125,8 @@ def test_standard_github_workflow_payload_cannot_impersonate_focused_target_evid
                     "head_sha": "a" * 40,
                     "status": "completed",
                     "conclusion": "success",
-                    "name": "PR Tests",
-                    "path": ".github/workflows/pr-tests.yml",
+                    "name": "Test Source for Runtime",
+                    "path": ".github/workflows/test-source-for-runtime.yml",
                 }
             ]
         }

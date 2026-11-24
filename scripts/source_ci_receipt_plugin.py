@@ -104,7 +104,14 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     origin = plan.context.origin
     try:
         # Never relabel work from an earlier attempt or a different job.
-        if os.environ.get("GITHUB_RUN_ID") != origin.get("run_id") or os.environ.get("GITHUB_RUN_ATTEMPT") != origin.get("run_attempt") or os.environ.get("GITHUB_WORKFLOW") != WORKFLOW_NAME or os.environ.get("GITHUB_JOB") != SOURCE_JOB or os.environ.get("GITHUB_SHA") != origin.get("event_sha"):
+        if (
+            os.environ.get("GITHUB_RUN_ID") != origin.get("run_id")
+            or os.environ.get("GITHUB_RUN_ATTEMPT") != origin.get("run_attempt")
+            or os.environ.get("GITHUB_WORKFLOW") != WORKFLOW_NAME
+            or os.environ.get("GITHUB_JOB") != SOURCE_JOB
+            or os.environ.get("GITHUB_SHA") != origin.get("event_sha")
+            or os.environ.get("GITHUB_EVENT_NAME") != origin.get("event_name")
+        ):
             raise ValueError("actual producing Actions identity differs from the immutable source plan")
         payload: dict[str, object] = {
             "schema_version": RECEIPT_SCHEMA,
