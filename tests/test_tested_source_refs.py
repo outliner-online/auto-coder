@@ -89,12 +89,14 @@ def assert_required_workflow_profile(workflow: object) -> None:
     assert "Usage:" in quality_runs[7] and "Auto-Coder" in quality_runs[7]
     plan = jobs["source-plan"]
     assert plan["name"] == PLAN_JOB_NAME
-    assert "scripts/plan_ci_shards.py" in next(step["run"] for step in plan["steps"] if step.get("name") == "Collect complete current source tests and immutable shard plan")
-    assert "-m 'not opencode_live'" in next(step["run"] for step in plan["steps"] if step.get("name") == "Collect complete current source tests and immutable shard plan")
+    collection = next(step for step in plan["steps"] if step.get("name") == "Collect complete current source tests and immutable shard plan")
+    assert "scripts/plan_ci_shards.py" in collection["run"]
+    assert "-m 'not opencode_live'" in collection["run"]
+    assert collection["env"]["COVERAGE_FILE"] == "${{ runner.temp }}/source-plan-coverage/coverage.db"
     assert shard["needs"] == ["source-plan"]
     assert shard["strategy"] == {"fail-fast": False, "matrix": "${{ fromJSON(needs.source-plan.outputs.matrix) }}"}
-    assert "runner.temp" not in shard["env"]["PLAYWRIGHT_BROWSERS_PATH"]
-    assert shard["env"]["COVERAGE_FILE"] == "${{ runner.temp }}/source-shard/coverage/coverage.db"
+    for job in jobs.values():
+        assert "runner.temp" not in str(job.get("env", {}))
     complete_steps = {step.get("name"): step for step in shard["steps"] if isinstance(step, dict) and step.get("name")}
     assert_conditional_chromium_install(complete_steps["Install Chromium"])
     assert complete_steps["Verify real headless Chromium"] == {"name": "Verify real headless Chromium", "run": "uv run python scripts/browser_preflight.py"}
@@ -102,6 +104,7 @@ def assert_required_workflow_profile(workflow: object) -> None:
     assert "--ci-plan=" in run and "--ci-shard=${{ matrix.shard }}" in run
     assert "--source-ci-receipt=" in run and "-m 'not opencode_live'" in run
     assert complete_steps["Run complete required source selection"]["env"]["AUTO_CODER_CI_TIMING_DIR"] == "${{ runner.temp }}/source-shard/timing"
+    assert complete_steps["Run complete required source selection"]["env"]["COVERAGE_FILE"] == "${{ runner.temp }}/source-shard/coverage/coverage.db"
     assert "--splitting-algorithm" not in run
     assert run.endswith('--junitxml "$RUNNER_TEMP/source-shard/results.xml"')
     assert "if" not in complete_steps["Run complete required source selection"]
@@ -770,7 +773,7 @@ def test_workflows_keep_source_authority_independent_from_legacy_image_publish()
     assert "docker push" in legacy
     assert "uv run black --check src/ tests/" in source
     assert "uv run mypy --config-file pyproject.toml -p auto_coder" in source
-    assert "-m 'not opencode_live' -vv" in source
+    assert "-m 'not opencode_live' --cov=src/auto_coder --cov-report= -vv" in source
     assert 'AUTO_CODER_REQUIRE_BROWSER: "1"' in source
 
     narrowed = deepcopy(workflow)

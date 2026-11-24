@@ -57,7 +57,6 @@ jobs:
       AUTO_CODER_REQUIRE_BROWSER: "1"
       AUTO_CODER_IMMEDIATE_TEST_FAILURES: "1"
       PYTEST_ADDOPTS: "-o faulthandler_timeout=60 -o faulthandler_exit_on_timeout=false"
-      COVERAGE_FILE: ${{ runner.temp }}/source-plan-coverage/coverage.db
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       count: ${{ steps.matrix.outputs.count }}
@@ -93,6 +92,8 @@ jobs:
           --run-attempt '${{ github.run_attempt }}'
           --output "$RUNNER_TEMP/source-plan/context.json"
       - name: Collect complete current source tests and immutable shard plan
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/source-plan-coverage/coverage.db
         run: >-
           uv run python scripts/plan_ci_shards.py
           --context "$RUNNER_TEMP/source-plan/context.json"
@@ -125,7 +126,6 @@ jobs:
     # Keep Chromium's tested Ubuntu ABI stable during the 26.04 rollout.
     runs-on: ubuntu-24.04
     env:
-      COVERAGE_FILE: ${{ runner.temp }}/source-shard/coverage/coverage.db
       PLAYWRIGHT_BROWSERS_PATH: /tmp/auto-coder-playwright-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
       AUTO_CODER_REQUIRE_BROWSER: "1"
       AUTO_CODER_IMMEDIATE_TEST_FAILURES: "1"
@@ -162,6 +162,7 @@ jobs:
         run: uv run python scripts/browser_preflight.py
       - name: Run complete required source selection
         env:
+          COVERAGE_FILE: ${{ runner.temp }}/source-shard/coverage/coverage.db
           AUTO_CODER_CI_TIMING_DIR: ${{ runner.temp }}/source-shard/timing
         run: >-
           uv run python -m pytest -p scripts.ci_shard_plugin -p scripts.source_ci_receipt_plugin

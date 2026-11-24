@@ -93,9 +93,10 @@ def test_workflow_measures_and_combines_only_verified_complete_source_coverage()
     for job_name in ("source-plan", "complete-source-shard"):
         job = workflow["jobs"][job_name]
         assert "--cov" not in job["env"]["PYTEST_ADDOPTS"]
-        assert job["env"]["COVERAGE_FILE"].startswith("${{ runner.temp }}/")
-        command = next(step["run"] for step in job["steps"] if "--cov=src/auto_coder" in step.get("run", ""))
-        assert "--cov-report=" in command
+        assert all("runner." not in value for value in job["env"].values())
+        measurement = next(step for step in job["steps"] if "--cov=src/auto_coder" in step.get("run", ""))
+        assert measurement["env"]["COVERAGE_FILE"].startswith("${{ runner.temp }}/")
+        assert "--cov-report=" in measurement["run"]
     steps = workflow["jobs"]["complete-source-tests"]["steps"]
     verification = next(i for i, step in enumerate(steps) if step.get("name") == "Verify exact current-attempt shard evidence")
     combining = next(i for i, step in enumerate(steps) if "scripts/combine_source_coverage.py" in step.get("run", ""))
