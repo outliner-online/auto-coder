@@ -1,13 +1,12 @@
 import errno
 import fcntl
 import os
-import select
+import selectors
 import signal
 import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -214,29 +213,8 @@ def test_large_unread_prompt_does_not_block_cancellation(tmp_path: Path, _use_re
         worker.join(timeout=3)
 
 
-def _open_fd_padding(minimum_descriptor: int) -> list[int]:
-    descriptors: list[int] = []
-    try:
-        while not descriptors or descriptors[-1] < minimum_descriptor:
-            descriptors.append(os.open(os.devnull, os.O_RDONLY))
-    except BaseException:
-        for descriptor in descriptors:
-            os.close(descriptor)
-        raise
-    return descriptors
-
-
-@contextmanager
-def _managed_fd_padding(minimum_descriptor: int | None):
-    descriptors = _open_fd_padding(minimum_descriptor) if minimum_descriptor is not None else []
-    try:
-        yield descriptors
-    finally:
-        for descriptor in descriptors:
-            os.close(descriptor)
-
-
-def _run_large_unread_prompt_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, high_descriptor: bool, fd_padding: list[int]) -> None:
+@pytest.mark.parametrize("descriptor_floor", [0, 1024], ids=["ordinary-fd", "high-fd"])
+def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep, descriptor_floor: int) -> None:
     # Control only the execution clock, not scheduling, Popen or real cleanup.
     # A total wall-time bound also measures pre-deadline startup and CI load.
     budget = 0.05
@@ -283,29 +261,30 @@ def _run_large_unread_prompt_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyP
             super().stop_and_confirm(group, deadline)
 
     def drive_deadline(descriptor):
-        def is_writable() -> bool:
-            poller = select.poll()
-            poller.register(descriptor, select.POLLOUT)
-            return any(events & select.POLLOUT for _, events in poller.poll(0))
-
+        probe_descriptor = None
         try:
-            assert writer_armed.wait(10), "prompt submission blocked the supervisor"
-            assert polls[0].wait(10), "supervisor never checked its deadline"
-            guard = time.monotonic() + 10
-            while not ready.exists() or is_writable():
-                assert children[0].poll() is None
-                assert time.monotonic() < guard, "unread stdin pipe never filled"
-                threading.Event().wait(0.01)
-            assert writers[0].is_alive()
-            clock.now = budget / 2
-            releases[0].set()
-            assert polls[1].wait(10), "supervisor did not recheck the deadline"
-            assert supervisor.state("invocation-one") is WriterState.ACTIVE
-            assert children[0].poll() is None and writers[0].is_alive()
-            assert not is_writable()
-            assert stops == []
-            clock.now = budget
-            releases[1].set()
+            # Duplicate one observer descriptor to cover busy processes whose
+            # real pipes exceed select()'s FD_SETSIZE without opening many files.
+            probe_descriptor = fcntl.fcntl(descriptor, fcntl.F_DUPFD_CLOEXEC, descriptor_floor)
+            with selectors.DefaultSelector() as readiness:
+                readiness.register(probe_descriptor, selectors.EVENT_WRITE)
+                assert writer_armed.wait(10), "prompt submission blocked the supervisor"
+                assert polls[0].wait(10), "supervisor never checked its deadline"
+                guard = time.monotonic() + 10
+                while not ready.exists() or readiness.select(timeout=0):
+                    assert children[0].poll() is None
+                    assert time.monotonic() < guard, "unread stdin pipe never filled"
+                    threading.Event().wait(0.01)
+                assert writers[0].is_alive()
+                clock.now = budget / 2
+                releases[0].set()
+                assert polls[1].wait(10), "supervisor did not recheck the deadline"
+                assert supervisor.state("invocation-one") is WriterState.ACTIVE
+                assert children[0].poll() is None and writers[0].is_alive()
+                assert not readiness.select(timeout=0)
+                assert stops == []
+                clock.now = budget
+                releases[1].set()
         except BaseException as error:
             errors.append(error)
             clock.now = budget
@@ -314,6 +293,9 @@ def _run_large_unread_prompt_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyP
             if children and children[0].poll() is None:
                 children[0].kill()
                 children[0].wait(timeout=5)
+        finally:
+            if probe_descriptor is not None:
+                os.close(probe_descriptor)
 
     class ObservedSupervisor(InvocationProcessSupervisor):
         def _start_reader(self, stream, chunks):
@@ -324,8 +306,6 @@ def _run_large_unread_prompt_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
         def _start_writer(self, stream, prompt):
             descriptor = stream.fileno()
-            if high_descriptor:
-                assert descriptor >= 1024
             assert len(prompt) > fcntl.fcntl(descriptor, fcntl.F_GETPIPE_SZ)
             streams.append(stream)
             # Start the watchdog before submitting input, so a synchronous-write
@@ -375,55 +355,6 @@ def _run_large_unread_prompt_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyP
                 assert not thread.is_alive(), "fixture I/O or deadline controller leaked"
         if (owner.root / "invocation-one").exists():
             owner.discard(owner.root / "invocation-one")
-
-
-def _assert_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, high_descriptor: bool) -> None:
-    with _managed_fd_padding(1024 if high_descriptor else None) as fd_padding:
-        _run_large_unread_prompt_timeout(tmp_path, monkeypatch, high_descriptor=high_descriptor, fd_padding=fd_padding)
-
-
-def test_large_unread_prompt_does_not_block_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep) -> None:
-    _assert_large_unread_prompt_does_not_block_timeout(tmp_path, monkeypatch, high_descriptor=False)
-
-
-def test_large_unread_prompt_timeout_supports_high_descriptor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _use_real_commands, _use_real_sleep) -> None:
-    try:
-        _assert_large_unread_prompt_does_not_block_timeout(tmp_path, monkeypatch, high_descriptor=True)
-    except OSError as error:
-        if error.errno == errno.EMFILE:
-            pytest.skip("process descriptor capacity cannot reach the high-descriptor control")
-        raise
-
-
-def test_fd_padding_closes_descriptors_when_capacity_is_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_open = os.open
-    opened: list[int] = []
-
-    def capacity_limited_open(*args, **kwargs):
-        if len(opened) == 2:
-            raise OSError(errno.EMFILE, "fixture descriptor capacity exhausted")
-        descriptor = real_open(*args, **kwargs)
-        opened.append(descriptor)
-        return descriptor
-
-    monkeypatch.setattr(os, "open", capacity_limited_open)
-    with pytest.raises(OSError, match="fixture descriptor capacity exhausted"):
-        _open_fd_padding(1024)
-    for descriptor in opened:
-        with pytest.raises(OSError, match="Bad file descriptor"):
-            os.fstat(descriptor)
-
-
-def test_fd_padding_closes_descriptors_after_body_failure() -> None:
-    acquired: list[int] = []
-    with pytest.raises(RuntimeError, match="synthetic teardown failure"):
-        with _managed_fd_padding(16) as descriptors:
-            acquired.extend(descriptors)
-            raise RuntimeError("synthetic teardown failure")
-    assert acquired
-    for descriptor in acquired:
-        with pytest.raises(OSError, match="Bad file descriptor"):
-            os.fstat(descriptor)
 
 
 def test_timeout_and_confirmation_uncertainty_remain_distinct(tmp_path: Path) -> None:

@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from typing import Optional, Sequence
 
 from .codex_wham_client import WhamTurn
+
+_TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "error", "cancelled", "canceled"})
+_HEX_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+NON_DELIVERY_EVIDENCE_PREFIX = "wham-complete-graph-not-delivered:"
 
 
 def _parents(turns: Sequence[WhamTurn], by_id: dict[str, WhamTurn]) -> Optional[dict[str, Optional[str]]]:
@@ -99,7 +105,77 @@ def followup_completion(task_id: str, baseline_id: str, fingerprint: str, turns:
     if any(value is None for value in user_inputs) or sum(hashlib.sha256(value.encode("utf-8")).hexdigest() == fingerprint for value in user_inputs if value is not None) != 1:
         return None
     responses = [turn for turn in turns if turn.role.lower() in {"assistant", "agent", "bot", "asst"} and parents[turn.id] == user.id]
-    if len(responses) != 1 or responses[0].status.lower() not in {"completed", "failed", "error", "cancelled", "canceled"}:
+    if len(responses) != 1 or responses[0].status.lower() not in _TERMINAL_TURN_STATUSES:
         return None
     response = responses[0]
     return user.id, response.id
+
+
+def followup_non_delivery_evidence(
+    task_id: str,
+    baseline_id: str,
+    fingerprint: str,
+    turns: Sequence[WhamTurn],
+    *,
+    current_assistant_turn_id: Optional[str] = None,
+    current_assistant_turn_status: Optional[str] = None,
+) -> Optional[str]:
+    """Prove definite non-delivery from a complete, coherent, idle WHAM turn graph.
+
+    Returns a deterministic cryptographic evidence ID only when all of the
+    following hold:
+    - The turn set is non-empty, unique, task-scoped, and passes bidirectional
+      parent/child graph verification (``_parents``).
+    - ``baseline_id`` is an assistant turn in the graph and already has at least
+      one later user turn whose child assistant turn reached a terminal status.
+    - Every assistant turn in the graph and the live ``current_assistant_turn``
+      are in a terminal status (nothing is running or queued).
+    - Every user turn exposes readable input text and zero user turns match
+      ``fingerprint``.
+    """
+    if not task_id or not baseline_id or not isinstance(fingerprint, str) or _HEX_SHA256_RE.fullmatch(fingerprint) is None or not turns:
+        return None
+    if not isinstance(current_assistant_turn_id, str) or not current_assistant_turn_id or not isinstance(current_assistant_turn_status, str) or current_assistant_turn_status.lower() not in _TERMINAL_TURN_STATUSES:
+        return None
+    by_id = {turn.id: turn for turn in turns}
+    if len(by_id) != len(turns) or any(not turn.id.startswith(task_id + "~") or turn.role.lower() not in {"user", "human", "assistant", "agent", "bot", "asst"} for turn in turns):
+        return None
+    parents = _parents(turns, by_id)
+    if parents is None:
+        return None
+    baseline = by_id.get(baseline_id)
+    if baseline is None or baseline.role.lower() not in {"assistant", "agent", "bot", "asst"}:
+        return None
+    current_turn = by_id.get(current_assistant_turn_id)
+    if current_turn is None or current_turn.role.lower() not in {"assistant", "agent", "bot", "asst"}:
+        return None
+    assistant_turns = [turn for turn in turns if turn.role.lower() in {"assistant", "agent", "bot", "asst"}]
+    if any(turn.status.lower() not in _TERMINAL_TURN_STATUSES for turn in assistant_turns):
+        return None
+    user_turns = [turn for turn in turns if turn.role.lower() in {"user", "human"}]
+    if not user_turns:
+        return None
+    user_fingerprints: list[tuple[str, str]] = []
+    for turn in user_turns:
+        text = native_user_text(turn)
+        if text is None:
+            return None
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if digest == fingerprint:
+            return None
+        user_fingerprints.append((turn.id, digest))
+    baseline_user_children = [turn for turn in user_turns if parents[turn.id] == baseline_id]
+    has_completed_successor = any(any(turn.status.lower() in _TERMINAL_TURN_STATUSES and parents[turn.id] == user.id for turn in assistant_turns) for user in baseline_user_children)
+    if not has_completed_successor:
+        return None
+    payload = {
+        "version": 1,
+        "task_id": task_id,
+        "baseline_id": baseline_id,
+        "fingerprint": fingerprint,
+        "current_assistant_turn_id": current_assistant_turn_id,
+        "turn_ids": sorted(by_id),
+        "user_fingerprints": sorted(user_fingerprints),
+    }
+    evidence_digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+    return f"{NON_DELIVERY_EVIDENCE_PREFIX}{evidence_digest}"

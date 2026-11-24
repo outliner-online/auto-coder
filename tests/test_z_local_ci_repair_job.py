@@ -176,7 +176,8 @@ class Harness:
         return retained[0].job_id
 
     @contextmanager
-    def authority(self, _github: object, _repository: str, _number: int, expected_head: str):  # type: ignore[no-untyped-def]
+    def authority(self, _github: object, _repository: str, _number: int, expected_head: str, *, recovery_policies=()):  # type: ignore[no-untyped-def]
+        assert recovery_policies == ()
         if self.barrier_entered is not None:
             self.barrier_entered.set()
             assert self.barrier_release is not None and self.barrier_release.wait(5)

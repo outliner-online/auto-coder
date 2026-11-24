@@ -8152,6 +8152,48 @@ def _handle_pr_merge(
                 _record_pr_stage(pr_number, "pr.ci-watch-registration", f"pr#{pr_number} CI watch registration", Outcome.DEFERRED, {"reason": str(exc)})
                 return actions
 
+        # Recovery owns only a selective CI effect. Its receipt is never a
+        # successful test/merge verdict, and ordinary review/check gates still
+        # decide every later action from freshly observed native results.
+        recovery_policies = getattr(config, "CI_CANCELLATION_RECOVERY", ())
+        if watched_head and recovery_policies:
+            from .ci_cancellation_recovery import RecoveryResult, recover_cancelled_jobs
+
+            try:
+                webhooks_verified, cancellation_signal = ci_watch_store.ci_recovery_signal_state(repo_name, watched_head)
+                recovery = recover_cancelled_jobs(github_client, repo_name, pr_number, watched_head, recovery_policies) if webhooks_verified else RecoveryResult("deferred", "webhook_delivery_unverified")
+            except Exception as exc:
+                logger.warning(f"CI cancellation recovery deferred repository={repo_name} pr={pr_number} error={type(exc).__name__}")
+                cancellation_signal = False
+                recovery = RecoveryResult("deferred", "recovery_observation_unavailable")
+            if recovery.status not in {"disabled", "no_candidate"}:
+                actions.append(f"CI cancellation recovery for PR #{pr_number}: {recovery.status} ({recovery.reason})")
+                _record_pr_stage(
+                    pr_number,
+                    "pr.ci-cancellation-recovery",
+                    f"pr#{pr_number} cancelled CI recovery",
+                    Outcome.ACCEPTED_HANDOFF if recovery.status == "accepted" else Outcome.DEFERRED,
+                    {
+                        "effect": "selective-job-rerun",
+                        "status": recovery.status,
+                        "reason": recovery.reason,
+                        "run_id": recovery.run_id,
+                        "attempt": recovery.attempt,
+                        "job_id": recovery.job_id,
+                        "logical_job": recovery.logical_job,
+                        "claim_id": recovery.claim_id,
+                        "cancellation_signal": cancellation_signal,
+                        "ci_success": False,
+                    },
+                )
+            if recovery.status in {"accepted", "indeterminate"}:
+                if processing_status is not None:
+                    processing_status.outcome = PRProcessingOutcome.DEFERRED
+                return actions
+            # A rejected/exhausted/unsafe recovery does not suppress repair of
+            # an independently demonstrated test failure. The ordinary repair
+            # authority below excludes interruptions and their aggregates.
+
         # A stale review-thread resolution (issue #1619) that could not be
         # rolled back in an earlier run is a persistent integrity failure:
         # retry it on every processing run, and refuse to merge while any
@@ -8495,7 +8537,7 @@ def _handle_pr_merge(
             github_client=github_client,
         )
         local_ports = LocalCIRepairPorts(
-            authority=current_ci_failure_authority,
+            authority=lambda client, repository, number, head: current_ci_failure_authority(client, repository, number, head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())),
             prepare_branch=lambda: _checkout_pr_branch(repo_name, pr_data, config, perform_checkout=False),
             branch_context=BranchManager,
             automatic_fix_enabled=lambda: _is_automatic_test_fix_enabled(config, repo_name),
@@ -9851,7 +9893,7 @@ PR Author: {pr_data.get('user', {}).get('login', 'Unknown')}
             return unsent(RepairDisposition.DEFERRED, "graceful shutdown is draining")
 
         expected_head = str(pr_data.get("head", {}).get("sha") or "")
-        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head) as authority:
+        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())) as authority:
             if not authority.allowed:
                 actions.append(f"Deferred Jules CI feedback for PR #{pr_number}: {authority.reason}")
                 return unsent(RepairDisposition.DEFERRED, authority.reason)
@@ -10882,26 +10924,50 @@ def _delegate_cloud_review_thread_repair(
     state_path = _cloud_review_repair_state_path(repo_name)
     prefix = f"{repo_name}#{pr_number}:{provider}:{task_id}:"
     implementer_login = (get_pr_author_login(pr_data) or "").lower()
+
+    def _latest_addressed_reply_index(thread: ReviewThread) -> int:
+        if not implementer_login:
+            return -1
+        latest = -1
+        for idx, comment in enumerate(thread.comments):
+            if idx > 0 and is_same_github_login(comment.author_login, implementer_login) and reply_claims_review_addressed(comment.body) and not is_adjudication_feedback(comment.body):
+                latest = idx
+        return latest
+
+    addressed_through_by_thread = {thread.id: _latest_addressed_reply_index(thread) for thread in unresolved_threads}
+    all_finding_identities = {
+        _review_feedback_identity(prefix, thread, index)
+        for thread in unresolved_threads
+        for index, comment in enumerate(thread.comments)
+        if (index == 0 or not implementer_login or not is_same_github_login(comment.author_login, implementer_login) or reply_requests_review_correction(comment.body)) and not is_adjudication_feedback(comment.body)
+    }
     findings = [
         (thread, comment, _review_feedback_identity(prefix, thread, index))
         for thread in unresolved_threads
         for index, comment in enumerate(thread.comments)
         # A root is reviewer feedback by definition. A shared reviewer/implementer
         # account must explicitly declare corrective guidance; unmarked replies
-        # remain ambiguous. Addressed claims cannot declare corrective guidance.
+        # remain ambiguous. Addressed claims cannot declare corrective guidance,
+        # and comments at or before the latest implementer addressed reply are
+        # already superseded unless newer actionable feedback follows.
         # A structural adjudication envelope (REQ-009) is a machine-readable
         # decision, not free-form reviewer prose; review_adjudication_orchestrator
         # owns routing its effect, so it must never be forwarded here verbatim,
         # authorized or not.
-        if (index == 0 or not implementer_login or not is_same_github_login(comment.author_login, implementer_login) or reply_requests_review_correction(comment.body)) and not is_adjudication_feedback(comment.body)
+        if index > addressed_through_by_thread[thread.id] and (index == 0 or not implementer_login or not is_same_github_login(comment.author_login, implementer_login) or reply_requests_review_correction(comment.body)) and not is_adjudication_feedback(comment.body)
     ]
     diagnostic_candidates = {
         _review_feedback_identity(prefix, thread, index)
         for thread in unresolved_threads
         for index, comment in enumerate(thread.comments)
-        if index > 0 and implementer_login and is_same_github_login(comment.author_login, implementer_login) and not reply_claims_review_addressed(comment.body) and not reply_requests_review_correction(comment.body) and not is_adjudication_feedback(comment.body)
+        if index > addressed_through_by_thread[thread.id]
+        and index > 0
+        and implementer_login
+        and is_same_github_login(comment.author_login, implementer_login)
+        and not reply_claims_review_addressed(comment.body)
+        and not reply_requests_review_correction(comment.body)
+        and not is_adjudication_feedback(comment.body)
     }
-    selected_identities = {identity for _thread, _comment, identity in findings}
     with _cloud_review_delivery_lock:
         try:
             from .strong_correction_scope import has_registered_task, strict_native_evidence
@@ -10909,10 +10975,10 @@ def _delegate_cloud_review_thread_repair(
             if provider == "codex-cloud" and has_registered_task(repo_name, task_id):
                 strict_native_evidence(repo_name)  # Before reconciliation can rewrite filtered legacy rows.
             delivered = _load_delivered_review_feedback(state_path)
-            remote_delivered = _load_pr_delivered_review_feedback(github_client, repo_name, pr_number, sorted(selected_identities | diagnostic_candidates))
+            remote_delivered = _load_pr_delivered_review_feedback(github_client, repo_name, pr_number, sorted(all_finding_identities | diagnostic_candidates))
             # Excluded receipts are diagnostic evidence only: never reconcile
             # or persist these identities through the actionable delivery state.
-            delivered.update(remote_delivered & selected_identities)
+            delivered.update(remote_delivered & all_finding_identities)
             native_uncertain: set[str] = set()
             reconciled = _reconcile_codex_review_feedback(client, provider, task_id, [identity for _thread, _comment, identity in findings if identity not in delivered], uncertain=native_uncertain)
             if reconciled:
@@ -10930,7 +10996,7 @@ def _delegate_cloud_review_thread_repair(
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: prior delivery state could not be read: {exc}"])
         pending = [(thread, comment, identity) for thread, comment, identity in findings if identity not in delivered]
     if not pending:
-        acknowledged = bool(findings) and all(thread.comments and is_same_github_login(thread.comments[-1].author_login, implementer_login) and reply_claims_review_addressed(thread.comments[-1].body) for thread, _comment, _identity in findings)
+        acknowledged = bool(unresolved_threads) and all(len(thread.comments) > 1 and is_same_github_login(thread.comments[-1].author_login, implementer_login) and reply_claims_review_addressed(thread.comments[-1].body) for thread in unresolved_threads)
         _checkpoint_cloud_review_repair(repo_name, pr_data, github_client, selected_origin, acknowledged=acknowledged)
         logger.info(f"All actionable review feedback for PR #{pr_number} was already delegated")
         # Observation only: ordinary implementer replies can be acknowledgments
@@ -11786,7 +11852,7 @@ def _send_codex_cloud_error_feedback(
             details = get_prompt_template("codex_cloud.ci_review_repair_details")
             prompt = build_existing_pr_repair_prompt(target, details)
         expected_head = str(pr_data.get("head", {}).get("sha") or "")
-        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head) as authority:
+        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())) as authority:
             if not authority.allowed:
                 actions.append(f"Deferred Codex Cloud continuation for PR #{pr_number}: {authority.reason}")
                 return CodexCloudFeedbackResult(retryable=True, actions=tuple(actions), deferred=True)

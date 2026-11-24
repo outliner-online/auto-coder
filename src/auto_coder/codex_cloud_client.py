@@ -91,6 +91,187 @@ def _save_pending_followups(path: Path, records: dict[str, PendingCodexFollowUp]
     os.replace(temporary, path)
 
 
+@dataclass(frozen=True)
+class NonDeliveryReconciliationEntry:
+    """Result of evaluating one ambiguous Codex follow-up against WHAM."""
+
+    operation_id: str
+    task_id: str
+    causal_baseline: str
+    request_fingerprint: str
+    member_count: int
+    proven_not_delivered: bool
+    evidence_id: str = ""
+    applied: bool = False
+    reason: str = ""
+
+
+def reconcile_proven_non_delivered_followups(
+    repository: str,
+    task_id: str,
+    wham: CodexWhamClient,
+    *,
+    apply: bool = True,
+) -> list[NonDeliveryReconciliationEntry]:
+    """Evaluate and optionally settle ambiguous follow-ups proven non-delivered by WHAM.
+
+    Queries complete WHAM turn history outside the owner lock, and only settles
+    operations when ``wham.prove_follow_up_not_delivered`` returns a valid
+    ``wham-complete-graph-not-delivered:...`` cryptographic evidence ID and no
+    native journal member for that operation is marked ``delivered``.
+    """
+    from .cloud_run import CloudRunRepository
+    from .codex_followup_causality import NON_DELIVERY_EVIDENCE_PREFIX
+    from .codex_work_accounting import CodexWorkAccounting, CodexWorkPhase, WorkAccountingStatus
+    from .codex_work_reconstruction import production_codex_reconstructor
+    from .implementation_slots import ImplementationOwner, ImplementationSlotRepository
+
+    if not repository or not task_id or not callable(getattr(wham, "prove_follow_up_not_delivered", None)):
+        return []
+    matches = [run for run in CloudRunRepository(repository).list_all() if run.provider == "codex-cloud" and run.task_id == task_id]
+    if len(matches) != 1:
+        return []
+    run = matches[0]
+    slots = ImplementationSlotRepository(repository, 1)
+    owner = ImplementationOwner("issue", run.issue_number)
+    incarnation = slots.owner_incarnation(owner)
+    if not incarnation:
+        return []
+    reconstructor = production_codex_reconstructor(repository, run.issue_number)
+    accounting = CodexWorkAccounting(slots, reconstructor.consistency_ids)
+    if apply:
+        accounting.reconcile_from_receipt(owner, incarnation, reconstructor.reconstruct())
+        snapshot = accounting.snapshot(owner, incarnation)
+        if snapshot.accounting_status is not WorkAccountingStatus.COMPLETE:
+            return []
+        operations = snapshot.operations
+    else:
+        snapshot = accounting.snapshot(owner, incarnation)
+        operations = snapshot.operations if snapshot.accounting_status is WorkAccountingStatus.COMPLETE else reconstructor.reconstruct().operations
+
+    candidates = [
+        op for op in operations if op.kind == "follow-up" and op.task_id == task_id and op.causal_baseline and op.request_fingerprint and op.phase in {CodexWorkPhase.RESERVED, CodexWorkPhase.DELIVERY_UNKNOWN} and (op.send_provenance is None or op.send_provenance.outcome in {"reserved", "unknown"})
+    ]
+    if not candidates:
+        return []
+
+    state_path = _codex_followup_state_path(repository)
+    results: list[NonDeliveryReconciliationEntry] = []
+    for op in candidates:
+        assert op.task_id is not None and op.causal_baseline is not None and op.request_fingerprint is not None
+        members = tuple(sorted(item for item in op.source_request_id.split(",") if item))
+        evidence_id = wham.prove_follow_up_not_delivered(op.task_id, op.causal_baseline, op.request_fingerprint)
+        if not isinstance(evidence_id, str) or not evidence_id.startswith(NON_DELIVERY_EVIDENCE_PREFIX) or len(evidence_id) <= len(NON_DELIVERY_EVIDENCE_PREFIX):
+            results.append(
+                NonDeliveryReconciliationEntry(
+                    operation_id=op.logical_operation_id,
+                    task_id=op.task_id,
+                    causal_baseline=op.causal_baseline,
+                    request_fingerprint=op.request_fingerprint,
+                    member_count=len(members),
+                    proven_not_delivered=False,
+                    reason="complete WHAM turn graph did not prove non-delivery",
+                )
+            )
+            continue
+
+        if not apply:
+            with _followup_state_lock:
+                records = _load_pending_followups(state_path)
+            matched_keys = [key for key, record in records.items() if record.task_id == op.task_id and record.message_fingerprint == op.request_fingerprint and record.pre_send_turn_id == op.causal_baseline]
+            if any(records[key].status == FollowUpDeliveryOutcome.DELIVERED.value for key in matched_keys):
+                results.append(
+                    NonDeliveryReconciliationEntry(
+                        operation_id=op.logical_operation_id,
+                        task_id=op.task_id,
+                        causal_baseline=op.causal_baseline,
+                        request_fingerprint=op.request_fingerprint,
+                        member_count=len(members),
+                        proven_not_delivered=False,
+                        reason="native journal already marks a member delivered",
+                    )
+                )
+                continue
+            results.append(
+                NonDeliveryReconciliationEntry(
+                    operation_id=op.logical_operation_id,
+                    task_id=op.task_id,
+                    causal_baseline=op.causal_baseline,
+                    request_fingerprint=op.request_fingerprint,
+                    member_count=len(members),
+                    proven_not_delivered=True,
+                    evidence_id=evidence_id,
+                    applied=False,
+                    reason="dry-run",
+                )
+            )
+            continue
+
+        with slots.serialize(owner):
+            with _followup_state_lock:
+                records = _load_pending_followups(state_path)
+                matched_keys = [key for key, record in records.items() if record.task_id == op.task_id and record.message_fingerprint == op.request_fingerprint and record.pre_send_turn_id == op.causal_baseline]
+                if any(records[key].status == FollowUpDeliveryOutcome.DELIVERED.value for key in matched_keys):
+                    results.append(
+                        NonDeliveryReconciliationEntry(
+                            operation_id=op.logical_operation_id,
+                            task_id=op.task_id,
+                            causal_baseline=op.causal_baseline,
+                            request_fingerprint=op.request_fingerprint,
+                            member_count=len(members),
+                            proven_not_delivered=False,
+                            reason="native journal already marks a member delivered",
+                        )
+                    )
+                    continue
+                if matched_keys:
+                    for key in matched_keys:
+                        records.pop(key, None)
+                    _save_pending_followups(state_path, records)
+
+            if members:
+                from . import pr_processor as _pr_processor
+
+                review_state_path = _pr_processor._cloud_review_repair_state_path(repository)
+                if review_state_path.exists():
+                    with _pr_processor._cloud_review_delivery_lock:
+                        _pr_processor._record_review_feedback_state(review_state_path, set(), set(), remove_pending=set(members))
+
+            accounting.settle_proven_non_delivery(
+                owner,
+                incarnation,
+                op.logical_operation_id,
+                evidence_id=evidence_id,
+                source_request_id=op.source_request_id,
+                causal_baseline=op.causal_baseline,
+                task_id=op.task_id,
+                request_fingerprint=op.request_fingerprint,
+            )
+            accounting.reconcile_from_receipt(owner, incarnation, reconstructor.reconstruct())
+
+        logger.info(
+            "Settled proven non-delivered Codex follow-up operation={} task={} members={} evidence={}",
+            op.logical_operation_id,
+            op.task_id,
+            len(members),
+            evidence_id,
+        )
+        results.append(
+            NonDeliveryReconciliationEntry(
+                operation_id=op.logical_operation_id,
+                task_id=op.task_id,
+                causal_baseline=op.causal_baseline,
+                request_fingerprint=op.request_fingerprint,
+                member_count=len(members),
+                proven_not_delivered=True,
+                evidence_id=evidence_id,
+                applied=True,
+                reason="settled",
+            )
+        )
+    return results
+
+
 class CodexCloudClient(CloudTaskClientBase):
     """Codex Cloud client for asynchronous cloud task execution and lifecycle management."""
 
@@ -760,6 +941,12 @@ class CodexCloudClient(CloudTaskClientBase):
         except Exception as exc:
             logger.warning(f"Cannot establish Codex retirement fence; request was not sent: {exc}")
             return False
+
+        if fence is not None and work_identity is not None:
+            try:
+                reconcile_proven_non_delivered_followups(self.repo_name or "", task_id, wham, apply=True)
+            except Exception as exc:
+                logger.warning(f"Could not reconcile ambiguous Codex follow-ups for task '{task_id}': {exc}")
 
         def send_registered_followup():
             repair_binding = {}
