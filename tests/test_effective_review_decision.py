@@ -16,7 +16,7 @@ from auto_coder.accepted_finding_bridge import (
     DispositionOutcome,
     ProjectionTarget,
 )
-from auto_coder.adversarial_validator import AdversarialValidationFinding, AdversarialValidationResult, RequirementCoverageEntry, SpecificationGap
+from auto_coder.adversarial_validator import AdversarialValidationFinding, AdversarialValidationResult, ChangeProvenanceItem, RequirementCoverageEntry, SpecificationGap
 from auto_coder.canonical_pr_blocker_ledger import QualifiedRequirement
 from auto_coder.effective_review_decision import EffectiveNextAction, derive_effective_review_decision
 from auto_coder.reviewer_session_registry import TestOracleGap
@@ -180,6 +180,73 @@ def test_unsubstantiated_or_unverified_coverage_never_dispatches_repair(status: 
 
     assert (decision.status, decision.next_action) == ("BLOCKED", EffectiveNextAction.RECONCILIATION)
     assert decision.approval_eligible is False
+
+
+@pytest.mark.parametrize(
+    ("status", "action"),
+    [("NEEDS_FIX", EffectiveNextAction.IMPLEMENTATION_REPAIR), ("NEEDS_TESTS", EffectiveNextAction.FOCUSED_TEST_REPAIR)],
+)
+@pytest.mark.parametrize("unrelated_status", ["UNVERIFIED", "VIOLATED"])
+def test_independent_ordinary_correction_survives_unresolved_unrelated_coverage(status: str, action: EffectiveNextAction, unrelated_status: str) -> None:
+    raw = ordinary_correction(status)
+    raw.requirement_coverage.append(RequirementCoverageEntry("REQ-002", unrelated_status, "Independent boundary needs further evidence"))
+
+    decision = derive_effective_review_decision(raw, projection())
+
+    assert (decision.status, decision.next_action, decision.approval_eligible) == (status, action, False)
+    assert decision.ordinary_findings == tuple(raw.findings)
+    assert decision.ordinary_gaps == tuple(raw.test_oracle_gaps)
+    assert decision.requirement_coverage == tuple(raw.requirement_coverage)
+    assert decision.requirement_coverage[1].status == unrelated_status
+
+    raw.result = "PASS"
+    raw.findings = []
+    raw.test_oracle_gaps = []
+    unresolved = derive_effective_review_decision(raw, projection())
+    assert (unresolved.status, unresolved.next_action, unresolved.approval_eligible) == ("BLOCKED", EffectiveNextAction.RECONCILIATION, False)
+
+
+@pytest.mark.parametrize("status", ["NEEDS_FIX", "NEEDS_TESTS"])
+def test_unverified_correction_requirement_cannot_borrow_unrelated_coverage(status: str) -> None:
+    raw = ordinary_correction(status)
+    raw.requirement_coverage[0].status = "UNVERIFIED"
+    raw.requirement_coverage.append(RequirementCoverageEntry("REQ-002", "VIOLATED", "A different boundary is violated"))
+
+    decision = derive_effective_review_decision(raw, projection())
+
+    assert (decision.status, decision.next_action, decision.approval_eligible) == ("BLOCKED", EffectiveNextAction.RECONCILIATION, False)
+    assert decision.ordinary_findings == ()
+    assert decision.ordinary_gaps == ()
+
+
+@pytest.mark.parametrize("associated_status", ["UNVERIFIED", "MISSING"])
+def test_ordinary_finding_requires_evidence_for_each_associated_requirement(associated_status: str) -> None:
+    raw = ordinary_correction()
+    raw.findings[0].requirement_ids = ["REQ-002"]
+    if associated_status != "MISSING":
+        raw.requirement_coverage.append(RequirementCoverageEntry("REQ-002", associated_status, "This finding spans an unverified boundary"))
+
+    decision = derive_effective_review_decision(raw, projection())
+
+    assert (decision.status, decision.next_action, decision.approval_eligible) == ("BLOCKED", EffectiveNextAction.RECONCILIATION, False)
+    assert decision.ordinary_findings == ()
+
+
+@pytest.mark.parametrize("status", ["NEEDS_FIX", "NEEDS_TESTS"])
+@pytest.mark.parametrize("unsettled_input", ["specification_gap", "unexplained_change"])
+def test_independent_correction_does_not_bypass_unsettled_specification_or_provenance(status: str, unsettled_input: str) -> None:
+    raw = ordinary_correction(status)
+    raw.requirement_coverage.append(RequirementCoverageEntry("REQ-002", "UNVERIFIED", "Unrelated evidence is incomplete"))
+    if unsettled_input == "specification_gap":
+        raw.specification_gaps = [SpecificationGap(question="Which behavior is required?")]
+    else:
+        raw.unexplained_changes = [ChangeProvenanceItem(paths=["src/unrelated.py"], why_unexplained="No contract explanation")]
+
+    decision = derive_effective_review_decision(raw, projection())
+
+    assert (decision.status, decision.next_action, decision.approval_eligible) == ("BLOCKED", EffectiveNextAction.RECONCILIATION, False)
+    assert decision.ordinary_findings == ()
+    assert decision.ordinary_gaps == ()
 
 
 def test_exact_closure_proposal_waits_for_owner_then_accepted_closure_passes() -> None:

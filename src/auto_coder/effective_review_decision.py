@@ -239,12 +239,17 @@ def derive_effective_review_decision(
     demonstrated = tuple(finding for finding in result.findings if finding.evidence_classification == "DEMONSTRATED" and finding.counterexample.strip())
     finding_requirements = {requirement_id for finding in demonstrated for requirement_id in finding.all_requirement_ids}
     coverage_complete = bool(result.requirement_coverage) and all(entry.status in {"VERIFIED", "IRRELEVANT"} or (raw_status == "NEEDS_FIX" and entry.status == "VIOLATED" and entry.requirement_id in finding_requirements) for entry in result.requirement_coverage)
-    ordinary_complete = coverage_complete and not result.specification_gaps and not result.unexplained_changes
+    ordinary_inputs_settled = not result.specification_gaps and not result.unexplained_changes
+    ordinary_complete = coverage_complete and ordinary_inputs_settled
     accepted_identities = {identity for record in projection.records for identity in (record.source_identity, record.canonical_blocker_id, record.known_gap_id) if identity}
     violated = {entry.requirement_id for entry in result.requirement_coverage if entry.status == "VIOLATED"}
     covered = {entry.requirement_id for entry in result.requirement_coverage if entry.status in {"VERIFIED", "VIOLATED"}}
+    # Repair authority belongs to the evidenced requirement. Unrelated incomplete coverage
+    # still prevents clearance, but must not strand a separately established correction.
     ordinary_findings = (
-        tuple(finding for finding in demonstrated if violated.intersection(finding.all_requirement_ids) and not accepted_identities.intersection((finding.finding_identity, finding.correction_identity.removeprefix("canonical:")))) if ordinary_complete and raw_status == "NEEDS_FIX" else ()
+        tuple(finding for finding in demonstrated if violated.intersection(finding.all_requirement_ids) and set(finding.all_requirement_ids) <= covered and not accepted_identities.intersection((finding.finding_identity, finding.correction_identity.removeprefix("canonical:"))))
+        if ordinary_inputs_settled and raw_status == "NEEDS_FIX"
+        else ()
     )
     ordinary_gaps = (
         tuple(
@@ -254,7 +259,7 @@ def derive_effective_review_decision(
             and gap.requirement_id in covered
             and all((gap.gap_id, gap.authoritative_boundary, gap.invariant, gap.plausible_incorrect_implementation, gap.why_tests_still_pass, gap.material_consequence, gap.focused_regression_scenario))
         )
-        if ordinary_complete and raw_status in {"NEEDS_FIX", "NEEDS_TESTS"}
+        if ordinary_inputs_settled and raw_status in {"NEEDS_FIX", "NEEDS_TESTS"}
         else ()
     )
     if implementation or ordinary_findings:
