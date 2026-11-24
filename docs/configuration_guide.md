@@ -574,3 +574,16 @@ To add custom placeholders, modify the `BackendConfig.replace_placeholders()` me
 - [Client Features Documentation](client-features/README.md) - Complete feature reference
 - [Example Configuration File](llm_backend_config.example.toml) - Complete example configuration
 - [Migration Guide for CLI Options](MIGRATION_CLI_OPTIONS.md) - Detailed migration instructions
+
+## Cancelled PR CI recovery
+
+`[[ci_cancellation_recovery.workflows]]` explicitly enables normal PR test
+workflows for one-time selective cancellation recovery. It supports the standard
+`[repository."owner/repo"]` configuration override. Each entry specifies
+`workflow_path`, exact unique `root_job_names`, optional `aggregate_job_names`
+for pure status reducers, and `multi_root_verified` (default `false`). Empty
+configuration performs no automatic reruns. Native webhook-delivery verification,
+current-head/attempt checks, durable effect claims and the normal CI/review/merge
+gates still apply. See [selective cancelled-CI recovery](client-features/cancelled-pr-ci-recovery.md)
+for configuration, persistent database placement and the required non-production
+multi-root fixture evidence.

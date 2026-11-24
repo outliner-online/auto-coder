@@ -160,7 +160,10 @@ membership through the ordinary canonical path; all native correction lanes clai
 possibly overlapping births atomically at this boundary. Unsupported broad lanes
 remain wildcard. Separately actionable scope
 must come from trusted exhaustive records, never UUIDs, strings or digests.
-Legacy #6009 is neither backfilled nor qualified.
+Legacy #6009 is neither backfilled nor qualified as a Strong scope; however, an
+ambiguous follow-up operation can be settled as `definite_non_delivery` when
+complete WHAM history independently proves the request was never accepted (see
+[Complete-graph non-delivery settlement](#complete-graph-non-delivery-settlement)).
 
 `tests/test_codex_send_provenance.py` exercises real ordinary acceptance and native
 pre-wire state, restart, broad continuation with/without force, legacy records,
@@ -235,3 +238,37 @@ producer head ref. Task-URL-only attribution does not retain canonical head proo
 and remains insufficient for cross-subject separation. A record's label alone
 cannot qualify mismatching ownership/launch/head evidence. No new attribution
 record is synthesized at the send fence.
+
+## Complete-graph non-delivery settlement
+
+An ambiguous (`reserved` or `delivery_unknown`) Codex follow-up operation can be
+settled as `SETTLED` with `definite_non_delivery=true` (`accepted=false`) only
+when WHAM supplies complete, fail-closed proof that the prepared message never
+entered the task's turn history:
+
+- `CodexWhamClient.get_task(task_id)` returns a live `WhamTask` whose
+  `current_assistant_turn` is in a terminal status (`completed`, `failed`,
+  `error`, `cancelled`, `canceled`).
+- `CodexWhamClient.get_task_turns(task_id, require_complete=True)` returns an
+  unpaginated, complete turn set whose parent/child graph passes bidirectional
+  acyclicity verification (`codex_followup_causality._parents`), with every
+  assistant turn terminal.
+- Every user turn exposes readable input text (`native_user_text`) and zero user
+  turns match the operation's recorded `request_fingerprint`.
+- The operation's recorded `causal_baseline` already has a completed later
+  `user -> terminal assistant` successor chain, preventing premature settlement
+  of an in-flight POST.
+
+When all checks pass, `followup_non_delivery_evidence` derives a deterministic
+`wham-complete-graph-not-delivered:<sha256>` evidence ID. Under owner
+serialization, `reconcile_proven_non_delivered_followups` verifies no native
+journal member is `delivered`, removes only the proven-non-delivered native and
+shared pending entries, settles the accounted operation via
+`CodexWorkAccounting.settle_proven_non_delivery` (clearing `task_id` to `null`
+to preserve the strict `task_id => accepted` schema invariant while retaining
+`causal_baseline`, `request_fingerprint`, and the cryptographic evidence ID,
+without ever reclassifying `ACCEPTED` work), and refreshes the reconstruction
+receipt. This reconciliation runs automatically
+before overlap fencing in `CodexCloudClient.send_followup` and is also exposed
+for inspection and explicit execution via
+`auto-coder pr-repair reconcile-codex-followups --repo <owner/repo> --pr <number> [--apply] [--json]`.

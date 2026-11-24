@@ -1381,3 +1381,158 @@ def test_supported_external_feedback_producer_cannot_supply_mixed_split_resoluti
     assert snapshot.reconciliation_records == ()
     assert not snapshot.get_blockers_for_alias("external_review_comment", "comment:201")
     github.merge_pull_request.assert_not_called()
+
+
+def test_addressed_thread_supersedes_prior_indeterminate_and_unsent_findings(tmp_path, monkeypatch):
+    """Addressed unresolved threads defer cleanly without retrying or clearing old receipts."""
+    from auto_coder.codex_cloud_client import PendingCodexFollowUp, _save_pending_followups
+    from auto_coder.execution_trace import Outcome, TraceCollector, get_trace_collector
+    from auto_coder.pr_processor import _record_review_feedback_state
+    from auto_coder.review_feedback_marker import REVIEW_ADDRESSED_MARKER, REVIEW_GUIDANCE_MARKER
+
+    prefix = "owner/repo#5262:codex-cloud:task_e_review5262:"
+    thread_with_indeterminate = ReviewThread(
+        id="PRRT_indeterminate_addressed",
+        is_resolved=False,
+        comments=[
+            ReviewThreadComment(database_id=801, body="Initial finding", author_login="maintainer"),
+            ReviewThreadComment(database_id=802, body="Fixed initial finding\n\n" + REVIEW_ADDRESSED_MARKER, author_login="maintainer"),
+            ReviewThreadComment(database_id=803, body="Follow-up guidance\n\n" + REVIEW_GUIDANCE_MARKER, author_login="maintainer"),
+            ReviewThreadComment(database_id=804, body="Unmarked discussion before final guidance", author_login="maintainer"),
+            ReviewThreadComment(database_id=805, body="Final guidance\n\n" + REVIEW_GUIDANCE_MARKER, author_login="maintainer"),
+            ReviewThreadComment(database_id=806, body="Published fix in commit f6e60fa.\\n\\n" + REVIEW_ADDRESSED_MARKER, author_login="MAINTAINER"),
+        ],
+    )
+    thread_with_unsent_root = ReviewThread(
+        id="PRRT_unsent_addressed",
+        is_resolved=False,
+        comments=[
+            ReviewThreadComment(database_id=901, body="Root addressed during CI repair", author_login="reviewer"),
+            ReviewThreadComment(database_id=902, body="Addressed with regression\n\n" + REVIEW_ADDRESSED_MARKER, author_login="maintainer"),
+        ],
+    )
+    old_root_id = _review_feedback_identity(prefix, thread_with_indeterminate, 0)
+    old_guidance_id = _review_feedback_identity(prefix, thread_with_indeterminate, 2)
+    delivered_guidance_id = _review_feedback_identity(prefix, thread_with_indeterminate, 4)
+
+    shared_path = tmp_path / "shared.json"
+    native_path = tmp_path / "native.json"
+    _record_review_feedback_state(shared_path, {delivered_guidance_id}, {old_root_id, old_guidance_id})
+    _save_pending_followups(
+        native_path,
+        {
+            f"key-{idx}": PendingCodexFollowUp(
+                task_id="task_e_review5262",
+                message_fingerprint="a" * 64,
+                pre_send_turn_id="task_e_review5262~assttrn_1",
+                status="indeterminate",
+                logical_identity=ident,
+            )
+            for idx, ident in enumerate((old_root_id, old_guidance_id))
+        },
+    )
+    shared_before = shared_path.read_bytes()
+    native_before = native_path.read_bytes()
+
+    github = _github_client(head_sha="a" * 40)
+    github.get_authenticated_user_login.return_value = "controller"
+    wham = MagicMock()
+    wham.reconcile_follow_up.return_value = None
+    config = AutomationConfig()
+    config.AUTO_MERGE = True
+    threads = (thread_with_indeterminate, thread_with_unsent_root)
+    gate = ClaimedReviewThreadGateState(unresolved=threads, blocking_unresolved=threads, has_blocking_unresolved=True)
+
+    monkeypatch.setattr(TraceCollector, "_instance", None)
+    collector = get_trace_collector()
+    status = ProcessedPRResult(pr_data=_pr_data("a" * 40))
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=shared_path),
+        patch("auto_coder.codex_cloud_client._codex_followup_state_path", return_value=native_path),
+        patch("auto_coder.codex_cloud_client.CodexWhamClient", return_value=wham),
+        patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"}),
+        patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True),
+        patch("auto_coder.pr_processor._check_github_actions_status", side_effect=authoritative_ci_status(success=True, ids=[1])),
+        patch("auto_coder.pr_processor._get_claimed_review_thread_state", return_value=gate) as observe_threads,
+        patch("auto_coder.pr_processor._merge_pr") as merge,
+        collector.start_execution("owner/repo", "pr", 5262, origin="worker"),
+    ):
+        _take_pr_actions(github, "owner/repo", _pr_data("a" * 40), config, status)
+
+        assert status.outcome is PRProcessingOutcome.DEFERRED
+        assert status.error is None
+        wham.send_follow_up.assert_not_called()
+        wham.reconcile_follow_up.assert_not_called()
+        assert shared_path.read_bytes() == shared_before
+        assert native_path.read_bytes() == native_before
+        merge.assert_not_called()
+        github.resolve_review_thread.assert_not_called()
+
+        delegation_event = next(event for event in collector.get_snapshot().events if event.stage_id == "pr.repair-delegation")
+        assert delegation_event.outcome == Outcome.DEFERRED.value
+        assert delegation_event.facts["reason"] == "actionable_feedback_already_delivered"
+
+        # New guidance after the addressed reply is selected again, and the preserved
+        # prior indeterminate PR claim still enforces the mixed-feedback guard.
+        reopened_thread = ReviewThread(
+            id=thread_with_indeterminate.id,
+            is_resolved=False,
+            comments=thread_with_indeterminate.comments + [ReviewThreadComment(database_id=807, body="New follow-up after addressed claim\n\n" + REVIEW_GUIDANCE_MARKER, author_login="maintainer")],
+        )
+        observe_threads.return_value = ClaimedReviewThreadGateState(
+            unresolved=(reopened_thread, thread_with_unsent_root),
+            blocking_unresolved=(reopened_thread, thread_with_unsent_root),
+            has_blocking_unresolved=True,
+        )
+        reopened_status = ProcessedPRResult(pr_data=_pr_data("a" * 40))
+        _take_pr_actions(github, "owner/repo", _pr_data("a" * 40), config, reopened_status)
+
+    assert reopened_status.outcome is PRProcessingOutcome.FAILED
+    assert reopened_status.error is not None and "independent scope resolution" in reopened_status.error
+    wham.send_follow_up.assert_not_called()
+    assert shared_path.read_bytes() == shared_before
+    assert native_path.read_bytes() == native_before
+
+
+@pytest.mark.parametrize("case", ["root_marker", "third_party_marker", "adjudication_marker"])
+def test_addressed_marker_in_root_third_party_or_adjudication_does_not_suppress_delivery(tmp_path, case):
+    """Only a non-root, non-adjudication implementer reply can mark earlier comments addressed."""
+    from auto_coder.review_feedback_marker import REVIEW_ADDRESSED_MARKER
+
+    if case == "root_marker":
+        thread = ReviewThread(
+            id="PRRT_root_marker",
+            is_resolved=False,
+            comments=[ReviewThreadComment(database_id=951, body="Root quoting marker\n\n" + REVIEW_ADDRESSED_MARKER, author_login="maintainer")],
+        )
+    elif case == "third_party_marker":
+        thread = ReviewThread(
+            id="PRRT_third_party_marker",
+            is_resolved=False,
+            comments=[
+                ReviewThreadComment(database_id=952, body="Original finding", author_login="reviewer"),
+                ReviewThreadComment(database_id=953, body="Please include " + REVIEW_ADDRESSED_MARKER + " after fixing", author_login="another-reviewer"),
+            ],
+        )
+    else:
+        adjudication_body = '<!-- auto-coder-review-adjudication:v1 -->\n```json\n{"rationale": "saw ' + REVIEW_ADDRESSED_MARKER + '"}\n```'
+        thread = ReviewThread(
+            id="PRRT_adjudication_marker",
+            is_resolved=False,
+            comments=[
+                ReviewThreadComment(database_id=954, body="Original finding", author_login="reviewer"),
+                ReviewThreadComment(database_id=955, body=adjudication_body, author_login="maintainer"),
+            ],
+        )
+
+    state_path = tmp_path / "repairs.json"
+    github = _github_client()
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", return_value=True) as send_followup,
+    ):
+        result = _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(thread,))
+
+    assert result.delivered is True
+    send_followup.assert_called_once()
+    assert thread.comments[0].body in send_followup.call_args.args[1]

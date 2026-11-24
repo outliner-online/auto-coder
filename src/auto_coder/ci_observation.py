@@ -114,6 +114,8 @@ class WorkflowObservation:
     # Exact pytest targets are optional provider evidence.  An empty tuple must
     # never be inferred from aggregate workflow success.
     successful_test_targets: tuple[str, ...] = ()
+    # Repair-only classification; native conclusions remain merge authority.
+    repair_trigger: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,8 @@ class CheckObservation:
     execution: CheckExecutionIdentity
     conclusion: CIConclusion
     display_name: str = ""
+    # Set only from exact native job evidence, never from a check display name.
+    repair_trigger: bool | None = None
 
 
 CIObservationFact: TypeAlias = WorkflowObservation | CheckObservation
