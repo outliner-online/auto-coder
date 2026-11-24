@@ -252,3 +252,66 @@ def pr_repair_resume(
         click.echo(f"Successfully resumed automatic repair for PR #{pr} (epoch: {expected_epoch} -> {new_epoch})")
         click.echo(f"Granted blockers: {', '.join(grant_result.granted_blocker_ids)}")
         click.echo(f"Scheduled re-evaluation work: {obligation.identity.key()}")
+
+
+@pr_repair_group.command(name="reconcile-codex-followups")
+@click.option("--repo", required=True, help="Repository in owner/repo form, e.g. acme/widgets")
+@click.option("--pr", required=True, type=int, help="Pull request number")
+@click.option("--apply", "apply_changes", is_flag=True, help="Persist proven non-delivery settlements (default: dry-run)")
+@click.option("--json", "json_output", is_flag=True, help="Output result in JSON format")
+def pr_repair_reconcile_codex_followups(repo: str, pr: int, apply_changes: bool, json_output: bool) -> None:
+    """Verify and optionally settle ambiguous Codex follow-ups using complete WHAM history."""
+    from dataclasses import asdict
+
+    from .cloud_run import CloudRunRepository
+    from .codex_cloud_client import NonDeliveryReconciliationEntry, is_valid_codex_cloud_task_id, reconcile_proven_non_delivered_followups
+    from .codex_wham_client import CodexWhamClient
+    from .implementation_slots import ImplementationSlotRepository, ImplementationSlotSnapshot
+
+    all_runs = [run for run in CloudRunRepository(repo).list_all() if run.provider == "codex-cloud" and run.task_id]
+    task_id_set: set[str] = {run.task_id for run in all_runs if pr in run.pull_request_numbers and run.task_id}
+    slot_snapshot = ImplementationSlotRepository(repo, 1).snapshot()
+    if isinstance(slot_snapshot, ImplementationSlotSnapshot):
+        for owner_snap in slot_snapshot.owners:
+            if pr not in owner_snap.implementation_prs:
+                continue
+            for session_id in owner_snap.provider_sessions:
+                if is_valid_codex_cloud_task_id(session_id):
+                    task_id_set.add(session_id)
+            if owner_snap.kind == "issue":
+                for run in all_runs:
+                    if run.issue_number == owner_snap.number and run.task_id:
+                        task_id_set.add(run.task_id)
+
+    task_ids = sorted(task_id_set)
+    if not task_ids:
+        payload = {"repository": repo, "pr_number": pr, "apply": apply_changes, "tasks": [], "entries": []}
+        if json_output:
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            click.echo(f"No tracked Codex Cloud runs found for {repo} #{pr}")
+        return
+
+    wham = CodexWhamClient()
+    all_entries: list[NonDeliveryReconciliationEntry] = []
+    for task_id in task_ids:
+        all_entries.extend(reconcile_proven_non_delivered_followups(repo, task_id, wham, apply=apply_changes))
+
+    payload = {
+        "repository": repo,
+        "pr_number": pr,
+        "apply": apply_changes,
+        "tasks": task_ids,
+        "entries": [asdict(entry) for entry in all_entries],
+    }
+    if json_output:
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    mode = "APPLY" if apply_changes else "DRY-RUN"
+    click.echo(f"=== Codex Follow-Up Non-Delivery Reconciliation ({mode}): {repo} #{pr} ===")
+    if not all_entries:
+        click.echo("No ambiguous Codex follow-up operations found.")
+        return
+    for entry in all_entries:
+        click.echo(f"  - {entry.operation_id} (task={entry.task_id}, members={entry.member_count}): " f"proven_not_delivered={entry.proven_not_delivered} applied={entry.applied} " f"evidence={entry.evidence_id or '-'} reason={entry.reason}")

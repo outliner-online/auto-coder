@@ -37,6 +37,18 @@ to the adjudication orchestrator. The guidance marker grants no adjudication,
 closure, approval, or merge authority. This selection also applies to explicit
 local review corrections after the latest addressed claim.
 
+In cloud review-thread repair intake, comments in an unresolved thread that
+precede a later non-root, non-adjudication reply from the PR implementer
+carrying `<!-- auto-coder-review-addressed:v1 -->` are treated as already
+claimed addressed for repair delegation. Only actionable comments posted after
+that latest addressed reply remain eligible for delivery or native receipt
+reconciliation; when no unaddressed feedback remains, the poll ends any due
+no-commit checkpoint series as acknowledged and defers for independent reviewer
+verification instead of failing on superseded indeterminate receipts or
+resending already-addressed comments. Existing durable receipt and pending
+records are preserved unchanged, mixed-feedback fencing remains active if new
+guidance is posted later, and unresolved review threads continue to block merge.
+
 New guidance uses its native comment identity with the existing receipt and
 pending-reservation protocol. It does not renew an old root request, and editing
 a delivered comment does not allocate a new delivery. Genuinely new guidance

@@ -496,6 +496,37 @@ class CodexWhamClient:
             return True
         return None
 
+    def prove_follow_up_not_delivered(self, task_id: str, pre_send_turn_id: str, message_fingerprint: str) -> Optional[str]:
+        """Prove definite non-delivery from complete, coherent WHAM turn history.
+
+        Fails closed (returns ``None``) unless the live task is terminal,
+        ``get_task_turns(..., require_complete=True)`` returns a complete
+        unpaginated bidirectional turn graph with readable user text for every
+        user turn, none of those user turns match ``message_fingerprint``, and a
+        later completed successor chain already advanced past ``pre_send_turn_id``.
+        """
+        from .codex_followup_causality import followup_non_delivery_evidence
+
+        if not task_id or not pre_send_turn_id or not message_fingerprint:
+            return None
+        task = self.get_task(task_id)
+        if not isinstance(task, WhamTask) or task.id != task_id or not isinstance(task.current_assistant_turn, WhamTurn):
+            return None
+        try:
+            turns = self.get_task_turns(task_id, require_complete=True)
+        except ValueError:
+            return None
+        if not isinstance(turns, list) or not all(isinstance(turn, WhamTurn) for turn in turns):
+            return None
+        return followup_non_delivery_evidence(
+            task_id,
+            pre_send_turn_id,
+            message_fingerprint,
+            turns,
+            current_assistant_turn_id=task.current_assistant_turn.id,
+            current_assistant_turn_status=task.current_assistant_turn.status,
+        )
+
     def send_follow_up(
         self,
         task_id: str,
