@@ -1536,3 +1536,115 @@ def test_addressed_marker_in_root_third_party_or_adjudication_does_not_suppress_
     assert result.delivered is True
     send_followup.assert_called_once()
     assert thread.comments[0].body in send_followup.call_args.args[1]
+
+
+@pytest.mark.parametrize(
+    "case, expected_acknowledgement, expected_sends, expected_reason",
+    [
+        ("addressed", True, 0, "actionable_feedback_already_delivered"),
+        ("escaped_newlines", True, 0, "actionable_feedback_already_delivered"),
+        ("no_receipts", True, 0, "actionable_feedback_already_delivered"),
+        ("unrelated_pending", True, 0, "actionable_feedback_already_delivered"),
+        ("unmarked", False, 0, "unclassified_same_author_reply"),
+        ("foreign_marker", False, 1, ""),
+        ("truncated", False, 0, "actionable_feedback_already_delivered"),
+        ("empty_thread", False, 0, "actionable_feedback_already_delivered"),
+        ("no_threads", False, 0, "actionable_feedback_already_delivered"),
+        ("new_guidance", False, 1, ""),
+        ("delivered_guidance", False, 0, "actionable_feedback_already_delivered"),
+        ("retained_pending", False, 0, "actionable_feedback_already_delivered"),
+        ("unacknowledged_sibling", False, 0, "actionable_feedback_already_delivered"),
+        ("active_handoff", False, 1, ""),
+    ],
+)
+def test_review_repair_acknowledgement_preserves_delivery_and_closure_boundaries(tmp_path, case, expected_acknowledgement, expected_sends, expected_reason):
+    """Only complete acknowledged discussions with no observed pending work permit rereview."""
+    from auto_coder.pr_processor import _record_review_feedback_state
+    from auto_coder.review_feedback_marker import REVIEW_ADDRESSED_MARKER, REVIEW_GUIDANCE_MARKER
+
+    thread = _thread("Implemented and checked the correction\n\n" + REVIEW_ADDRESSED_MARKER)
+    prefix = "owner/repo#5262:codex-cloud:task_e_review5262:"
+    root_identity = _review_feedback_identity(prefix, thread, 0)
+    delivered = {root_identity}
+    pending = set()
+    threads = (thread,)
+    if case == "escaped_newlines":
+        thread.comments[1].body = "Published the correction.\\n\\n" + REVIEW_ADDRESSED_MARKER
+    elif case == "unmarked":
+        thread.comments[1].body = "The implementation appears corrected"
+    elif case == "foreign_marker":
+        thread.comments[1].author_login = "another-reviewer"
+    elif case == "truncated":
+        thread.comments_truncated = True
+    elif case == "empty_thread":
+        thread.comments = []
+    elif case == "no_threads":
+        threads = ()
+    elif case in {"new_guidance", "delivered_guidance"}:
+        thread.comments.append(ReviewThreadComment(database_id=103, body="Cover the remaining rollback case\n" + REVIEW_GUIDANCE_MARKER, author_login="maintainer"))
+        if case == "delivered_guidance":
+            delivered.add(_review_feedback_identity(prefix, thread, 2))
+    elif case == "retained_pending":
+        delivered = set()
+        pending = {root_identity}
+    elif case == "unrelated_pending":
+        pending = {_review_feedback_identity("owner/repo#5263:codex-cloud:task_other:", thread, 0)}
+    elif case == "unacknowledged_sibling":
+        sibling = ReviewThread(id="PRRT_unacknowledged", comments=[ReviewThreadComment(database_id=201, body="Another original concern", author_login="reviewer")])
+        delivered.add(_review_feedback_identity(prefix, sibling, 0))
+        threads = (thread, sibling)
+    elif case == "active_handoff":
+        thread.comments = thread.comments[:1]
+        delivered = set()
+
+    state_path = tmp_path / "review-repairs.json"
+    if case != "no_receipts":
+        _record_review_feedback_state(state_path, delivered, pending)
+    before = state_path.read_bytes() if state_path.exists() else None
+    github = _github_client()
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", return_value=True) as sender,
+    ):
+        result = _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=threads)
+
+    assert result.acknowledged_no_actionable_feedback is expected_acknowledgement
+    assert result.diagnostic_reason == expected_reason
+    assert result.delivered is bool(expected_sends)
+    assert result.deferred is (not bool(expected_sends))
+    assert sender.call_count == expected_sends
+    if not expected_sends:
+        assert (state_path.read_bytes() if state_path.exists() else None) == before
+        github.add_comment_to_pr.assert_not_called()
+    github.resolve_review_thread.assert_not_called()
+    github.reply_to_review_thread.assert_not_called()
+
+
+def test_review_repair_native_uncertainty_prevents_acknowledged_admission(tmp_path):
+    """A native unknown observed during reconciliation still forbids automatic rereview."""
+    from auto_coder.review_feedback_marker import REVIEW_ADDRESSED_MARKER
+
+    thread = _thread("Correction completed\n" + REVIEW_ADDRESSED_MARKER)
+    identity = _review_feedback_identity("owner/repo#5262:codex-cloud:task_e_review5262:", thread, 0)
+    state_path = tmp_path / "review-repairs.json"
+    github = _github_client()
+
+    def observe_unknown(client, provider, task_id, identities, *, uncertain):
+        uncertain.add(identity)
+        return set()
+
+    with (
+        patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state_path),
+        patch("auto_coder.pr_processor._reconcile_codex_review_feedback", side_effect=observe_unknown),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup") as sender,
+    ):
+        result = _delegate_cloud_review_thread_repair("owner/repo", _pr_data(), github_client=github, unresolved_threads=(thread,))
+
+    assert result.acknowledged_no_actionable_feedback is False
+    assert result.diagnostic_reason == "actionable_feedback_already_delivered"
+    assert result.delivered is False
+    assert result.deferred is True
+    assert json.loads(state_path.read_text())["pending_feedback"] == [identity]
+    sender.assert_not_called()
+    github.resolve_review_thread.assert_not_called()
+    github.reply_to_review_thread.assert_not_called()

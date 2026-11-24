@@ -21,6 +21,32 @@ The production regression is
 `test_unresolved_adversarial_finding_revalidates_new_head_or_saved_pass` in
 `tests/test_adversarial_validation_pr_flow.py`.
 
+## Current-head review after acknowledged cloud repairs
+
+An authentic adversarial finding that has no applicable verdict on the current
+head can proceed to independent validation even when ordinary external review
+threads remain unresolved, provided the cloud repair producer observes that
+all selected ordinary discussions are complete, end with the PR implementer's
+explicit addressed marker, and have no newly actionable feedback or observed
+indeterminate delivery for that task. A delivered correction, unclassified
+reply, truncated discussion, pending provenance clarification, exhausted repair
+allowance, or unavailable ownership does not supply this admission.
+
+This observation is carried by
+`CloudReviewRepairResult.acknowledged_no_actionable_feedback`. It grants only
+admission to the existing validator. Ordinary external roots are not added to
+its claimed-thread closure inputs, the configured numeric reviewer allowlist
+is unchanged, and unresolved ordinary threads still block the final merge.
+If the post-Codex review check observes any different ordinary blocking-thread
+snapshot, this automatic admission is not reused. Once a verdict exists for
+the head, normal saved-result recovery, repair and deduplication apply; the
+addressed marker does not force another same-head review.
+
+The transition emits `pr.review-thread-gate` with outcome `DEFERRED`,
+`effect=acknowledged-review-reassessment`, `examined_head`,
+`blocking_thread_ids`, and `revalidation_thread_ids`. These facts distinguish
+review admission from delivery, accepted closure and merge completion.
+
 ## Reusable closure status reply
 
 Each independent `ADDRESSED` decision carries a deterministic binding to the
