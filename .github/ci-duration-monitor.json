@@ -105,24 +105,6 @@
           "guidance": "The retained worker-bridge job runs separate worker-bridge and worker-daemon invocations and emits native result/timing artifacts. If splitting these invocations, preserve both complete explicit test lists, invocation identities, result receipts, and the Supervisor Integration Tests aggregate. Keep real-process cleanup and failure propagation; do not substitute helper-only tests. Verify selected real-process cases with bash scripts/test.sh and inspect resulting artifacts."
         }
       ]
-    },
-    {
-      "path": ".github/workflows/python-314-compatibility.yml",
-      "families": [
-        {
-          "key": "python314",
-          "name": "Python 3.14 compatibility",
-          "job_pattern": "Python 3\\.14 (?:non-live tests \\(\\d+/\\d+\\)|source quality and (?:non-live tests \\(advisory\\)|complete test plan))",
-          "test_step_pattern": "^Run complete non-live test selection$",
-          "require_test_step": true,
-          "source_paths": [
-            ".github/workflows/python-314-compatibility.yml",
-            "tests/test_ci_uv_lock_policy.py",
-            "scripts/browser_preflight.py"
-          ],
-          "guidance": "This advisory workflow checks Python 3.14 using locked dependencies and a complete non-live test selection. Keep the interpreter/lock assertions, real Chromium preflight, and complete not-opencode_live selection. Inspect setup and collection costs before choosing balanced test partitions; preserve advisory status rather than making unrelated merge gates stricter. Run affected lock/workflow regressions through bash scripts/test.sh tests/test_ci_uv_lock_policy.py."
-        }
-      ]
     }
   ]
 }
