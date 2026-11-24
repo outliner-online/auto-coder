@@ -243,3 +243,15 @@ verdict is PASS and the native thread is already resolved. The production-flow
 regression supplies that orthogonal model response before normal retention,
 reconstructs the stores and resumes the original immutable uncertain effect;
 it must remain nonauthorizing without another resolve or false confirmation.
+
+### Closures spanning several Strong rounds
+
+An accepted closure may cover findings that originated in different Strong
+rounds. When a newer retained ordinary PASS replaces the closure source for
+discussion binding, each closed finding is matched to the accepted source
+identity of the round that originated it (not the closing round). A finding from
+an earlier round therefore no longer makes a complete newer binding look
+incomplete, which previously caused the closure thread-resolution effect to
+invalidate the retained binding, re-add the discussion checkpoint and stall the
+PR in a spent reconciliation wait. Regression:
+`tests/test_closure_binding_multi_round.py`.

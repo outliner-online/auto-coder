@@ -739,8 +739,13 @@ def _closure_discussion_binding(repo_name: str, pr_number: int, inputs: TwoTierG
     registered = inputs.gate.closure_evidence().attempts.get(newer.attempt_id)
     if registered is None or (registered.sequence, registered.pr_number, registered.head_sha, registered.status) != (newer.attempt_sequence, pr_number, source.head_sha, "PASS"):
         return original
-    expected_sources = {source_identity_for(source.round_id, item.finding_id) for item in source.dispositions}
-    if not expected_sources <= set(newer.accepted_sources):
+    # A closure can cover findings accepted in several Strong rounds; each source
+    # identity is bound to the round that originated its finding, not the closing round.
+    cycle = inputs.gate.state.snapshot(pr_number)
+    round_by_claim = {item.claim_id: item.round_id for item in cycle.strong_rounds}
+    closed_ids = {item.finding_id for item in source.dispositions}
+    expected_sources = {source_identity_for(round_by_claim[finding.origin_round_id], finding.finding_id) for finding in cycle.findings if finding.finding_id in closed_ids and finding.origin_round_id in round_by_claim}
+    if len(expected_sources) != len(closed_ids) or not expected_sources <= set(newer.accepted_sources):
         return original
     result = newer.restore()
     by_id = {item.thread_id: item for item in result.thread_dispositions}
