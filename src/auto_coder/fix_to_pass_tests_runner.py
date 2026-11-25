@@ -1,7 +1,6 @@
 """Test execution functionality for Auto-Coder automation engine."""
 
 import csv
-import math
 import os
 import re
 import sys
@@ -232,19 +231,6 @@ def run_local_tests(
     - stability_issue: True if test failed in full suite but passed in isolation
     - full_suite_result: Original full suite result (only present if stability_issue is True)
     """
-    # Jules Only Mode: Skip local execution and return as "failing" to trigger LLM fix
-    if config.JULES_ONLY_MODE:
-        logger.info("Jules Only Mode: Skipping local test execution")
-        return {
-            "success": False,
-            "output": "Jules Only Mode: Local test execution skipped. Requesting fix based on issue context.",
-            "errors": "Local tests skipped in Jules Only Mode.",
-            "return_code": 1,
-            "command": "none",
-            "test_file": None,
-            "stability_issue": False,
-        }
-
     # Try to use test_watcher MCP if enabled and available
     if USE_TEST_WATCHER_MCP and not test_file:
         try:
@@ -535,19 +521,16 @@ def apply_workspace_test_fix(
         # Convert legacy dict payloads to TestResult for structured extraction
         tr = _to_test_result(test_result)
 
-        if config.JULES_ONLY_MODE:
-            error_summary = "Jules Only Mode: Local test execution is skipped. Please analyze the codebase and the issue context to implement the requested changes."
-        else:
-            error_summary = extract_important_errors(tr)
-            if not error_summary:
-                logger.info("Skipping LLM workspace fix because no actionable errors were extracted")
-                return WorkspaceFixResult(
-                    summary="No actionable errors found in local test output",
-                    raw_response=None,
-                    backend=backend,
-                    provider=provider,
-                    model=model,
-                )
+        error_summary = extract_important_errors(tr)
+        if not error_summary:
+            logger.info("Skipping LLM workspace fix because no actionable errors were extracted")
+            return WorkspaceFixResult(
+                summary="No actionable errors found in local test output",
+                raw_response=None,
+                backend=backend,
+                provider=provider,
+                model=model,
+            )
 
         # Format attempt history for inclusion in prompt
         history_text = ""
@@ -613,11 +596,7 @@ def fix_to_pass_tests(
     If the LLM makes no edits (no changes to commit) in an iteration, raise an error and stop.
     Returns a summary dict.
     """
-    if config.JULES_ONLY_MODE:
-        attempts_limit = math.inf
-        logger.info("Jules Only Mode: Enabled infinite fix attempts")
-    else:
-        attempts_limit = max_attempts if isinstance(max_attempts, int) and max_attempts > 0 else config.MAX_FIX_ATTEMPTS
+    attempts_limit = max_attempts if isinstance(max_attempts, int) and max_attempts > 0 else config.MAX_FIX_ATTEMPTS
 
     summary: Dict[str, Any] = {
         "mode": "fix-to-pass-tests",
@@ -637,7 +616,6 @@ def fix_to_pass_tests(
     # Track history of previous attempts for context
     attempt_history: list[Dict[str, Any]] = []
 
-    # Support infinite attempts (math.inf) by using a while loop
     attempt = 0  # counts actual test executions
     while True:
         try:
@@ -788,14 +766,9 @@ def fix_to_pass_tests(
         else:
             # Compute change ratios between pre-fix and post-fix results
             try:
-                if config.JULES_ONLY_MODE:
-                    # In Jules-only mode, we don't have real test output changes.
-                    # Always treat as significant to ensure we commit and proceed.
-                    max_change = 1.0
-                else:
-                    change_ratio_tests = change_fraction(baseline_full_output or "", post_full_output or "")
-                    change_ratio_errors = change_fraction(baseline_error_summary or "", post_error_summary or "")
-                    max_change = max(change_ratio_tests, change_ratio_errors)
+                change_ratio_tests = change_fraction(baseline_full_output or "", post_full_output or "")
+                change_ratio_errors = change_fraction(baseline_error_summary or "", post_error_summary or "")
+                max_change = max(change_ratio_tests, change_ratio_errors)
             except Exception:
                 max_change = 1.0  # default to commit if comparison fails
 
@@ -809,7 +782,7 @@ def fix_to_pass_tests(
                 cached_result_attempt = attempt
                 # Stop if finite limit reached
                 try:
-                    if isinstance(attempts_limit, (int, float)) and math.isfinite(float(attempts_limit)) and attempt >= int(attempts_limit):
+                    if attempt >= attempts_limit:
                         break
                 except Exception:
                     pass
@@ -884,11 +857,11 @@ def fix_to_pass_tests(
 
         # Stop if finite limit reached
         try:
-            if isinstance(attempts_limit, (int, float)) and math.isfinite(float(attempts_limit)) and attempt >= int(attempts_limit):
+            if attempt >= attempts_limit:
                 logger.info(f"Reached attempt limit ({attempts_limit}); exiting fix loop")
                 break
         except Exception:
-            # If attempts_limit is not a number, treat as unlimited
+            # Configuration validation owns the numeric attempt-limit contract.
             pass
 
     # Final test after exhausting attempts (optional): do not re-run here because we already

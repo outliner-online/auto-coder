@@ -81,7 +81,6 @@ class AutomationConfig:
     # File paths
     REPORTS_DIR: str = "reports"
     TEST_SCRIPT_PATH: str = "scripts/test.sh"
-    JULES_ONLY_MODE: bool = False
     repo_name: Optional[str] = None
     jules_mode: Optional[bool] = None
     CI_CANCELLATION_RECOVERY: "tuple[RecoveryPolicy, ...]" = ()
@@ -318,7 +317,6 @@ class AutomationConfig:
             object.__setattr__(self, "automatic_test_fix", automatic_test_fix)
         object.__setattr__(self, "PR_LABEL_COPYING_ENABLED", True)
         object.__setattr__(self, "PR_LABEL_MAX_COUNT", 3)
-        object.__setattr__(self, "JULES_ONLY_MODE", False)
         object.__setattr__(self, "jules_mode", jules_mode)
         object.__setattr__(
             self,
@@ -553,12 +551,6 @@ class AutomationConfig:
                     logger.warning("AUTO_CODER_PR_LABEL_PRIORITIES must be a JSON array (list)")
             except json.JSONDecodeError as exc:
                 logger.error(f"Failed to parse AUTO_CODER_PR_LABEL_PRIORITIES: {exc}")
-
-        # Jules Only Mode override
-        jules_only = os.environ.get("AUTOCODER_JULES_ONLY_MODE")
-        if jules_only:
-            object.__setattr__(self, "JULES_ONLY_MODE", jules_only.lower() in ("true", "1", "yes"))
-            logger.info(f"Jules Only Mode set to {self.JULES_ONLY_MODE} from environment")
 
         # GitHub author allowlist overrides from environment variable
         issue_allowlist_env = os.environ.get("AUTO_CODER_ISSUE_ALLOWLIST")
