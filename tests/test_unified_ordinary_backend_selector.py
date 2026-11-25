@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
 from auto_coder.llm_backend_config import LLMBackendConfiguration
 from auto_coder.quota_selector import BackendQuotaEvaluation, rank_high_score_backends_by_quota
+from tests.test_jules_ordinary_startup import _invoke_only, _ordinary_issue_github, _write_config
 
 
 def _mixed_config(selector: dict) -> LLMBackendConfiguration:
@@ -141,6 +143,314 @@ def test_inherited_noedit_filters_task_only_backends():
     assert cloud_only.get_active_noedit_backends() == []
     with pytest.raises(ValueError, match="No synchronous backend"):
         cloud_only.get_noedit_default_backend()
+
+
+def test_ordinary_selector_filters_jules_alias_without_reordering_supported_candidates():
+    config = LLMBackendConfiguration.load_from_dict(
+        {
+            "backend": {"priority_groups": [["retired", "remote"], ["local"]]},
+            "backends": {
+                "retired": {"backend_type": "jules"},
+                "remote": {"backend_type": "codex-cloud"},
+                "local": {"backend_type": "codex"},
+            },
+        }
+    )
+
+    assert config.get_ordinary_priority_groups() == [["remote"], ["local"]]
+
+
+def test_jules_only_ordinary_selector_has_no_dispatch_candidate():
+    config = LLMBackendConfiguration.load_from_dict(
+        {
+            "backend": {"order": ["retired"]},
+            "backends": {"retired": {"backend_type": "jules"}},
+        }
+    )
+
+    assert config.get_ordinary_priority_groups() == []
+
+
+def test_cli_filters_jules_alias_and_dispatches_quota_ranked_supported_winner(tmp_path, monkeypatch):
+    """REQ-006: CLI projection cannot reintroduce a Jules-resolving alias."""
+    _write_config(
+        tmp_path,
+        '[backend]\npriority_groups = [["retired-alias", "codex-first", "claude-winner"]]\n\n'
+        '[backends.retired-alias]\nbackend_type = "jules"\nenabled = true\napi_key = "unused"\n\n'
+        '[backends.codex-first]\nbackend_type = "codex-cloud"\nenabled = true\n\n'
+        '[backends.claude-winner]\nbackend_type = "claude-routine"\nenabled = true\n',
+        monkeypatch,
+    )
+    github = _ordinary_issue_github(2892)
+    quota = {
+        "codex-first": BackendQuotaEvaluation("codex-first", quota_surplus=0.1, actual_remaining_ratio=0.2),
+        "claude-winner": BackendQuotaEvaluation("claude-winner", quota_surplus=0.9, actual_remaining_ratio=1.0),
+    }
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=github),
+        patch("auto_coder.automation_engine.AutomationEngine._check_and_handle_closed_branch", return_value=True),
+        patch("auto_coder.automation_engine.get_current_branch", return_value="main"),
+        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
+        patch("auto_coder.quota_selector.evaluate_backend_quota", side_effect=lambda backend_name, **_kwargs: quota[backend_name]),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.submit_task") as codex_send,
+        patch("auto_coder.claude_routine_client.ClaudeRoutineClient.fire_routine", return_value=("routine-2892", None)) as claude_send,
+        patch("auto_coder.issue_processor.JulesClient.start_session") as jules_send,
+    ):
+        result = _invoke_only("owner/repo", 2892)
+
+    assert result.exit_code == 0, result.output
+    claude_send.assert_called_once()
+    codex_send.assert_not_called()
+    jules_send.assert_not_called()
+    from auto_coder.issue_dispatch import DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+
+    handoff = IssueDispatchGuard().inspect(IssueAttemptIdentity("owner", "repo", 2892, "0"))
+    assert handoff is not None
+    assert handoff.outcome is DispatchOutcome.REMOTE_ACCEPTED
+    assert handoff.backend_name == "claude-winner"
+    assert handoff.provider == "claude-routine"
+    assert handoff.provider_reference == "routine-2892"
+
+
+def test_cli_jules_only_policy_reports_no_dispatch_without_fallback(tmp_path, monkeypatch):
+    """REQ-006: a Jules-only production configuration fails closed at startup."""
+    _write_config(
+        tmp_path,
+        '[backend]\norder = ["retired-alias"]\n\n[backends.retired-alias]\nbackend_type = "jules"\nenabled = true\napi_key = "unused"\n',
+        monkeypatch,
+    )
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance") as github_factory,
+        patch("auto_coder.issue_processor.JulesClient.start_session") as jules_send,
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.submit_task") as codex_send,
+    ):
+        result = _invoke_only("owner/repo", 2893)
+
+    assert result.exit_code != 0
+    assert "ordinary backend candidate pool is empty" in result.output
+    jules_send.assert_not_called()
+    codex_send.assert_not_called()
+    github_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("submission_outcome", ["accepted", "indeterminate"])
+def test_cli_historical_jules_handoff_suppresses_supported_replacement(tmp_path, monkeypatch, submission_outcome):
+    """REQ-006: production persistence retains accepted or uncertain ownership."""
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+
+    issue_number = 2894
+    _write_config(
+        tmp_path,
+        '[backend]\norder = ["supported-cloud"]\n\n[backends.supported-cloud]\nbackend_type = "codex-cloud"\nenabled = true\n',
+        monkeypatch,
+    )
+    task_id = "historical-jules-task" if submission_outcome == "accepted" else ""
+    historical = CloudRun(
+        "owner/repo",
+        issue_number,
+        0,
+        "jules",
+        task_id=task_id,
+        backend_name="historical-jules",
+        submission_outcome=submission_outcome,
+    )
+    stored, created = CloudRunRepository("owner/repo").acquire_submission_claim(historical)
+    assert created is True
+    assert stored == historical
+    if task_id:
+        assert CloudManager("owner/repo").add_session(
+            issue_number,
+            task_id,
+            provider="jules",
+            backend_name="historical-jules",
+        )
+
+    github = _ordinary_issue_github(issue_number)
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=github),
+        patch("auto_coder.automation_engine.AutomationEngine._check_and_handle_closed_branch", return_value=True),
+        patch("auto_coder.automation_engine.get_current_branch", return_value="main"),
+        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.submit_task") as codex_send,
+        patch("auto_coder.issue_processor.JulesClient.start_session") as jules_send,
+    ):
+        result = _invoke_only("owner/repo", issue_number)
+
+    assert result.exit_code == 0, result.output
+    codex_send.assert_not_called()
+    jules_send.assert_not_called()
+    from auto_coder.issue_dispatch import DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+
+    retained = IssueDispatchGuard().inspect(IssueAttemptIdentity("owner", "repo", issue_number, "0"))
+    assert retained is not None
+    expected = DispatchOutcome.REMOTE_ACCEPTED if submission_outcome == "accepted" else DispatchOutcome.INDETERMINATE
+    assert retained.outcome is expected
+    assert retained.provider == "jules"
+    assert retained.backend_name == "historical-jules"
+    assert retained.provider_reference == task_id
+
+
+def test_cli_difficult_issue_retains_indeterminate_jules_handoff_before_claude_send(tmp_path, monkeypatch):
+    """REQ-004: the difficult route shares the durable attempt dispatch guard."""
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+    from auto_coder.issue_dispatch import DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+
+    issue_number = 2895
+    _write_config(
+        tmp_path,
+        '[backend]\norder = ["ordinary-cloud"]\n\n' '[backend_with_high_score_cloud]\norder = ["difficult-claude"]\n\n' '[backends.ordinary-cloud]\nbackend_type = "codex-cloud"\nenabled = true\n\n' '[backends.difficult-claude]\nbackend_type = "claude-routine"\nenabled = true\n',
+        monkeypatch,
+    )
+    historical = CloudRun(
+        "owner/repo",
+        issue_number,
+        0,
+        "jules",
+        backend_name="historical-jules",
+        submission_outcome="indeterminate",
+    )
+    stored, created = CloudRunRepository("owner/repo").acquire_submission_claim(historical)
+    assert created is True
+    assert stored == historical
+    github = _ordinary_issue_github(issue_number)
+    github.get_issue_dispatch_snapshot_strict.return_value["labels"].append({"name": "difficult"})
+
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=github),
+        patch("auto_coder.automation_engine.AutomationEngine._check_and_handle_closed_branch", return_value=True),
+        patch("auto_coder.automation_engine.get_current_branch", return_value="main"),
+        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
+        patch("auto_coder.claude_routine_client.ClaudeRoutineClient.fire_routine") as claude_send,
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.submit_task") as codex_send,
+    ):
+        result = _invoke_only("owner/repo", issue_number)
+
+    assert result.exit_code == 0, result.output
+    claude_send.assert_not_called()
+    codex_send.assert_not_called()
+    retained = IssueDispatchGuard().inspect(IssueAttemptIdentity("owner", "repo", issue_number, "0"))
+    assert retained is not None
+    assert retained.outcome is DispatchOutcome.INDETERMINATE
+    assert retained.provider == "jules"
+    assert retained.backend_name == "historical-jules"
+
+
+def test_cli_difficult_issue_without_high_score_config_retains_indeterminate_jules_handoff(tmp_path, monkeypatch):
+    """REQ-004: the difficult local fallback cannot bypass historical ownership."""
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+    from auto_coder.issue_dispatch import DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+
+    issue_number = 2896
+    _write_config(
+        tmp_path,
+        '[backend]\norder = ["ordinary-local"]\n\n' '[backends.ordinary-local]\nbackend_type = "codex"\nenabled = true\n',
+        monkeypatch,
+    )
+    historical = CloudRun(
+        "owner/repo",
+        issue_number,
+        0,
+        "jules",
+        backend_name="historical-jules",
+        submission_outcome="indeterminate",
+    )
+    stored, created = CloudRunRepository("owner/repo").acquire_submission_claim(historical)
+    assert created is True
+    assert stored == historical
+    github = _ordinary_issue_github(issue_number)
+    github.get_issue_dispatch_snapshot_strict.return_value["labels"].append({"name": "difficult"})
+
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=github),
+        patch("auto_coder.automation_engine.AutomationEngine._check_and_handle_closed_branch", return_value=True),
+        patch("auto_coder.automation_engine.get_current_branch", return_value="main"),
+        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
+        patch("auto_coder.issue_processor._take_issue_actions") as local_send,
+    ):
+        result = _invoke_only("owner/repo", issue_number)
+
+    assert result.exit_code == 0, result.output
+    local_send.assert_not_called()
+    retained = IssueDispatchGuard().inspect(IssueAttemptIdentity("owner", "repo", issue_number, "0"))
+    assert retained is not None
+    assert retained.outcome is DispatchOutcome.INDETERMINATE
+    assert retained.provider == "jules"
+    assert retained.backend_name == "historical-jules"
+
+
+def test_production_dispatch_skips_raw_jules_alias_before_local_fallback(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    from auto_coder.automation_config import AutomationConfig
+    from auto_coder.issue_dispatch import DispatchOutcome
+    from auto_coder.issue_processor import _dispatch_issue_candidates
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = LLMBackendConfiguration.load_from_dict(
+        {
+            "backend": {"order": ["retired", "codex"]},
+            "backends": {"retired": {"backend_type": "jules"}},
+        }
+    )
+    local = MagicMock(return_value=["local completed"])
+    monkeypatch.setattr("auto_coder.llm_backend_config.get_llm_config", lambda **_kwargs: config)
+    monkeypatch.setattr("auto_coder.issue_processor._take_issue_actions", local)
+    monkeypatch.setattr("auto_coder.issue_processor.get_current_attempt", lambda *_args: 0)
+    monkeypatch.setattr("auto_coder.cli_helpers.build_backend_manager", lambda **_kwargs: MagicMock())
+
+    execution = _dispatch_issue_candidates(
+        "owner/repo",
+        {"number": 2891, "title": "Retired provider", "labels": []},
+        AutomationConfig(),
+        MagicMock(),
+        ["retired", "codex"],
+    )
+
+    assert execution.result.outcome is DispatchOutcome.LOCAL_COMPLETED
+    assert execution.result.backend_name == "codex"
+    local.assert_called_once()
+
+
+def test_historical_jules_acceptance_suppresses_supported_replacement(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    from auto_coder.automation_config import AutomationConfig
+    from auto_coder.issue_dispatch import AdapterOutcome, CandidateHandoff, DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+    from auto_coder.issue_processor import _dispatch_issue_candidates
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    identity = IssueAttemptIdentity("owner", "repo", 2891, "0")
+    guard = IssueDispatchGuard()
+    accepted = guard.dispatch_candidates(
+        identity,
+        [CandidateHandoff("jules", "jules")],
+        lambda _candidate: AdapterOutcome(DispatchOutcome.REMOTE_ACCEPTED, "historical-session"),
+    )
+    assert accepted.outcome is DispatchOutcome.REMOTE_ACCEPTED
+
+    config = LLMBackendConfiguration.load_from_dict({"backend": {"order": ["codex"]}})
+    local = MagicMock(return_value=["must not run"])
+    monkeypatch.setattr("auto_coder.llm_backend_config.get_llm_config", lambda **_kwargs: config)
+    monkeypatch.setattr("auto_coder.issue_processor._take_issue_actions", local)
+    monkeypatch.setattr("auto_coder.issue_processor.get_current_attempt", lambda *_args: 0)
+
+    execution = _dispatch_issue_candidates(
+        "owner/repo",
+        {"number": 2891, "title": "Owned attempt", "labels": []},
+        AutomationConfig(),
+        MagicMock(),
+        ["codex"],
+    )
+
+    assert execution.result.outcome is DispatchOutcome.REMOTE_ACCEPTED
+    assert execution.result.provider_reference == "historical-session"
+    local.assert_not_called()
 
 
 def test_message_manager_never_constructs_inherited_cloud_candidate(monkeypatch):

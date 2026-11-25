@@ -25,7 +25,7 @@ def test_process_issues_only_rejects_real_disabled_only_pool_before_prerequisite
     with (
         patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
         patch("auto_coder.cli_commands_main.get_llm_config", return_value=config),
-        patch("auto_coder.cli_commands_main.is_jules_mode_enabled", return_value=False),
+        patch("auto_coder.cli_commands_main.is_cloud_mode_enabled", return_value=False),
         patch("auto_coder.cli_commands_main.check_backend_prerequisites", prerequisites),
         patch("auto_coder.cli_commands_main.build_backend_manager_from_config", build_manager),
     ):
@@ -82,7 +82,7 @@ def test_process_issues_only_passes_configured_cloud_mode(mode):
     with (
         patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value=repo_name),
         patch("auto_coder.cli_commands_main.get_llm_config", return_value=llm_config),
-        patch("auto_coder.cli_commands_main.is_jules_mode_enabled", return_value=True) as cloud_mode,
+        patch("auto_coder.cli_commands_main.is_cloud_mode_enabled", return_value=True) as cloud_mode,
         patch("auto_coder.cli_commands_main.build_models_map", return_value={}),
         patch("auto_coder.cli_commands_main.check_backend_prerequisites") as prerequisites,
         patch("auto_coder.cli_commands_main.ensure_test_script_or_fail") as test_script,
@@ -163,7 +163,7 @@ def test_process_issues_only_respects_no_jules_mode_cli_flag():
     with (
         patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value=repo_name),
         patch("auto_coder.cli_commands_main.get_llm_config", return_value=llm_config),
-        patch("auto_coder.cli_commands_main.is_jules_mode_enabled", return_value=True) as cloud_mode,
+        patch("auto_coder.cli_commands_main.is_cloud_mode_enabled", return_value=True) as cloud_mode,
         patch("auto_coder.cli_commands_main.build_models_map", return_value={}),
         patch("auto_coder.cli_commands_main.check_backend_prerequisites"),
         patch("auto_coder.cli_commands_main.ensure_test_script_or_fail"),
@@ -191,17 +191,10 @@ def test_process_issues_only_respects_no_jules_mode_cli_flag():
             parent=parent,
         )
 
-    assert result.exit_code == 0
-    # is_jules_mode_enabled should NOT be consulted when explicit CLI flag is given
+    assert result.exit_code == 2
+    assert "is retired" in result.output
     cloud_mode.assert_not_called()
-    engine.process_single.assert_called_once_with(
-        repo_name,
-        "issue",
-        1591,
-        jules_mode=False,
-        explicit_only=True,
-        force=False,
-    )
+    engine.process_single.assert_not_called()
 
 
 def test_process_issues_only_respects_jules_mode_cli_flag():
@@ -236,7 +229,7 @@ def test_process_issues_only_respects_jules_mode_cli_flag():
     with (
         patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value=repo_name),
         patch("auto_coder.cli_commands_main.get_llm_config", return_value=llm_config),
-        patch("auto_coder.cli_commands_main.is_jules_mode_enabled", return_value=False) as cloud_mode,
+        patch("auto_coder.cli_commands_main.is_cloud_mode_enabled", return_value=False) as cloud_mode,
         patch("auto_coder.cli_commands_main.build_models_map", return_value={}),
         patch("auto_coder.cli_commands_main.check_backend_prerequisites"),
         patch("auto_coder.cli_commands_main.ensure_test_script_or_fail"),
@@ -264,16 +257,10 @@ def test_process_issues_only_respects_jules_mode_cli_flag():
             parent=parent,
         )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 2
+    assert "is retired" in result.output
     cloud_mode.assert_not_called()
-    engine.process_single.assert_called_once_with(
-        repo_name,
-        "issue",
-        1591,
-        jules_mode=True,
-        explicit_only=True,
-        force=False,
-    )
+    engine.process_single.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -410,7 +397,7 @@ def test_process_issues_only_completion_status_uses_target_outcome(processing_re
     with (
         patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value=repo_name),
         patch("auto_coder.cli_commands_main.get_llm_config", return_value=llm_config),
-        patch("auto_coder.cli_commands_main.is_jules_mode_enabled", return_value=False),
+        patch("auto_coder.cli_commands_main.is_cloud_mode_enabled", return_value=False),
         patch("auto_coder.cli_commands_main.build_models_map", return_value={}),
         patch("auto_coder.cli_commands_main.check_backend_prerequisites"),
         patch("auto_coder.cli_commands_main.ensure_test_script_or_fail"),
@@ -484,7 +471,7 @@ def test_process_issues_only_preserves_production_deferred_issue_outcome():
     with (
         patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value=repo_name),
         patch("auto_coder.cli_commands_main.get_llm_config", return_value=llm_config),
-        patch("auto_coder.cli_commands_main.is_jules_mode_enabled", return_value=False),
+        patch("auto_coder.cli_commands_main.is_cloud_mode_enabled", return_value=False),
         patch("auto_coder.cli_commands_main.build_models_map", return_value={}),
         patch("auto_coder.cli_commands_main.check_backend_prerequisites"),
         patch("auto_coder.cli_commands_main.ensure_test_script_or_fail"),

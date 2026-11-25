@@ -158,11 +158,9 @@ class TestDispatchRouteRecorded:
 
     @patch("auto_coder.automation_engine.LabelManager")
     @patch("auto_coder.issue_processor._process_issue_high_score_cloud")
-    @patch("auto_coder.issue_processor._process_issue_jules_mode")
-    def test_non_difficult_issue_routes_to_cloud(self, mock_jules_mode, mock_high_score_cloud, mock_label_manager):
-        from auto_coder.cloud_manager import CloudTaskBinding
+    def test_non_difficult_issue_routes_to_cloud(self, mock_high_score_cloud, mock_label_manager):
+        from auto_coder.codex_cloud_client import CodexSubmissionOutcome, CodexSubmissionResult
 
-        mock_jules_mode.return_value = ["Jules action"]
         mock_ctx = MagicMock()
         mock_ctx.__bool__.return_value = True
         mock_label_manager.return_value.__enter__.return_value = mock_ctx
@@ -176,15 +174,20 @@ class TestDispatchRouteRecorded:
         engine = AutomationEngine(mock_github, config)
         candidate = Candidate(type="issue", priority=100, data={"number": 602, "title": "Simple bug", "labels": [{"name": "bug"}]})
 
-        jules_config = LLMBackendConfiguration.load_from_dict({"backend": {"order": ["jules"]}})
+        cloud_config = LLMBackendConfiguration.load_from_dict(
+            {
+                "backend": {"order": ["codex-cloud"]},
+                "backends": {"codex-cloud": {"backend_type": "codex-cloud"}},
+            }
+        )
         with (
-            patch("auto_coder.llm_backend_config.get_llm_config", return_value=jules_config),
+            patch("auto_coder.llm_backend_config.get_llm_config", return_value=cloud_config),
             patch(
-                "auto_coder.issue_processor.CloudManager.get_binding",
-                return_value=CloudTaskBinding("jules", "sessions/provider-602", "jules"),
+                "auto_coder.codex_cloud_client.CodexCloudClient.submit_task",
+                return_value=CodexSubmissionResult(CodexSubmissionOutcome.ACCEPTED, "task-602"),
             ),
         ):
-            result = engine._process_single_candidate_unified("owner/repo", candidate, config, jules_mode=True)
+            result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
         assert result.success is True
         mock_high_score_cloud.assert_not_called()

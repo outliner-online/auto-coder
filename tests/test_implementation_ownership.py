@@ -632,13 +632,18 @@ def test_ordinary_cloud_handoff_reopens_accepted_dispatch_and_provider_owner(tmp
     config.issue_decomposition_validation = False
     engine, github = _ready_engine(tmp_path, monkeypatch, {1: snapshot}, config)
     github.get_issue_comments_strict.return_value = []
-    llm_config = LLMBackendConfiguration.load_from_dict({"backends": {"controlled-jules": {"backend_type": "jules", "api_key": "test-key"}}})
-    monkeypatch.setattr("auto_coder.issue_processor._ordinary_issue_candidates", lambda _repo: ["controlled-jules"])
+    llm_config = LLMBackendConfiguration.load_from_dict({"backends": {"controlled-codex": {"backend_type": "codex-cloud"}}})
+    monkeypatch.setattr("auto_coder.issue_processor._ordinary_issue_candidates", lambda _repo: ["controlled-codex"])
     monkeypatch.setattr("auto_coder.llm_backend_config.get_llm_config", lambda **_kwargs: llm_config)
     monkeypatch.setattr("auto_coder.issue_processor.get_current_attempt", lambda *_args: 0)
     monkeypatch.setattr("auto_coder.issue_processor.get_commit_log", lambda *_args, **_kwargs: "baseline")
     monkeypatch.setattr("auto_coder.automation_engine.resolve_authoritative_item_type", lambda *_args: "issue")
-    monkeypatch.setattr("auto_coder.jules_client.JulesClient.start_session", lambda *_args, **_kwargs: "session-retained")
+    from auto_coder.codex_cloud_client import CodexSubmissionOutcome, CodexSubmissionResult
+
+    monkeypatch.setattr(
+        "auto_coder.codex_cloud_client.CodexCloudClient.submit_task",
+        lambda *_args, **_kwargs: CodexSubmissionResult(CodexSubmissionOutcome.ACCEPTED, "task-retained"),
+    )
 
     result = engine._process_single_candidate_unified(
         REPO,
@@ -649,16 +654,16 @@ def test_ordinary_cloud_handoff_reopens_accepted_dispatch_and_provider_owner(tmp
 
     assert result.dispatch_result is not None
     assert result.dispatch_result.outcome is DispatchOutcome.REMOTE_ACCEPTED
-    assert result.dispatch_result.provider == "jules"
-    assert result.dispatch_result.provider_reference == "session-retained"
+    assert result.dispatch_result.provider == "codex-cloud"
+    assert result.dispatch_result.provider_reference == "task-retained"
     owner = ImplementationOwner("issue", 1)
     assert engine.implementation_slots.active_execution_ids(owner) == ()
 
     reopened_dispatch = IssueDispatchGuard().inspect(IssueAttemptIdentity("owner", "repo", 1, "0"))
     assert reopened_dispatch is not None
     assert reopened_dispatch.outcome is DispatchOutcome.REMOTE_ACCEPTED
-    assert reopened_dispatch.provider == "jules"
-    assert reopened_dispatch.provider_reference == "session-retained"
+    assert reopened_dispatch.provider == "codex-cloud"
+    assert reopened_dispatch.provider_reference == "task-retained"
     reopened_slots = ImplementationSlotRepository(
         REPO,
         1,

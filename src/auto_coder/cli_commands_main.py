@@ -18,7 +18,7 @@ from .cli_helpers import build_backend_manager_from_config, build_message_backen
 from .cli_ui import Spinner, create_terminal_link, print_completion_message, print_configuration_summary, sleep_with_countdown
 from .git_utils import extract_number_from_branch, get_current_branch
 from .health_monitor import get_health_monitor, start_health_monitoring
-from .llm_backend_config import TASK_ONLY_BACKEND_TYPES, get_llm_config, is_jules_mode_enabled, set_active_repo_name
+from .llm_backend_config import TASK_ONLY_BACKEND_TYPES, get_llm_config, is_cloud_mode_enabled, is_jules_mode_enabled, set_active_repo_name
 from .logger_config import get_logger, setup_logger
 from .pr_processing_evidence import SCHEMA_VERSION, begin_invocation_observation, observed_invocations, redacted_dict
 from .progress_footer import setup_progress_footer_logging
@@ -242,9 +242,8 @@ def process_issues(
 
     config = get_llm_config(repo_name=repo_name)
     if jules_mode is not None:
-        configured_cloud_mode = jules_mode
-    else:
-        configured_cloud_mode = is_jules_mode_enabled(repo_name=repo_name)
+        raise click.UsageError("--jules-mode/--no-jules-mode is retired; configure supported providers in [backend]")
+    configured_cloud_mode = is_cloud_mode_enabled(repo_name=repo_name)
 
     selected_backends = [name for group in config.get_ordinary_priority_groups() for name in group]
     if not selected_backends and not resume:
@@ -1070,9 +1069,8 @@ def serve(
     message_manager = build_message_backend_manager(models=models)
 
     if jules_mode is not None:
-        configured_cloud_mode = jules_mode
-    else:
-        configured_cloud_mode = is_jules_mode_enabled(repo_name=repo_name)
+        raise click.UsageError("--jules-mode/--no-jules-mode is retired; configure supported providers in [backend]")
+    configured_cloud_mode = is_cloud_mode_enabled(repo_name=repo_name)
 
     # Configure engine behavior flags
     engine_config = AutomationConfig()

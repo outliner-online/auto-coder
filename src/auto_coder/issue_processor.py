@@ -1177,6 +1177,7 @@ def _process_issue_high_score_cloud(
     implementation_slots: Optional[ImplementationSlotRepository] = None,
     manual_retry: bool = False,
     retry_authority: Optional[ImplementationRetryRequest] = None,
+    dispatch_observer: Optional[Callable[[IssueDispatchExecution], None]] = None,
 ) -> List[str]:
     """Process an issue using the backend_with_high_score_cloud configuration with failover support.
 
@@ -1208,71 +1209,37 @@ def _process_issue_high_score_cloud(
     if candidates:
         from .quota_selector import rank_high_score_backends_by_quota
 
+        candidates = [name for name in candidates if llm_config.resolve_backend_type(name) in {"codex-cloud", "claude-routine"}]
         candidates = rank_high_score_backends_by_quota(candidates, llm_config)
         if not candidates:
             raise CloudSubmissionNotStartedError("No configured high-score Cloud backend is eligible to submit work")
 
-    rejected_submissions = 0
-    for backend_name in candidates:
-        b_cfg = llm_config.get_backend_config(backend_name)
-        backend_type = (b_cfg and b_cfg.backend_type) or backend_name
-        issue_number = issue_data["number"]
-        _record_dispatch_stage(
-            issue_number,
-            "issue.dispatch.selection",
-            f"issue#{issue_number} dispatch candidate selected",
-            Outcome.UNKNOWN,
-            {"candidate_pool": "high-score-cloud", "backend_type": backend_type, "backend_name": backend_name},
-            kind=EventKind.STAGE_STARTED,
+    if candidates:
+        dispatch = _dispatch_issue_candidates(
+            repo_name,
+            issue_data,
+            config,
+            github_client,
+            candidates,
+            label_context=label_context,
+            implementation_slots=implementation_slots,
+            retry_authority=retry_authority,
         )
+        if dispatch_observer is not None:
+            dispatch_observer(dispatch)
+        return dispatch.actions or [dispatch.result.diagnostic]
 
-        try:
-            if backend_type == "claude-routine":
-                return _process_issue_claude_routine_mode(
-                    repo_name,
-                    issue_data,
-                    config,
-                    github_client,
-                    backend_name=backend_name,
-                    label_context=label_context,
-                    **({"manual_retry": True} if manual_retry else {}),  # type: ignore[arg-type]
-                    **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
-                )
-            elif backend_type == "codex-cloud":
-                return _process_issue_codex_cloud_mode(
-                    repo_name,
-                    issue_data,
-                    config,
-                    github_client,
-                    backend_name=backend_name,
-                    label_context=label_context,
-                    **({"implementation_slots": implementation_slots} if implementation_slots is not None else {}),  # type: ignore[arg-type]
-                    **({"manual_retry": True} if manual_retry else {}),  # type: ignore[arg-type]
-                    **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
-                )
-            elif backend_type == "jules":
-                return _process_issue_jules_mode(
-                    repo_name,
-                    issue_data,
-                    config,
-                    github_client,
-                    label_context=label_context,
-                    **({"implementation_slots": implementation_slots} if implementation_slots is not None else {}),  # type: ignore[arg-type]
-                    **({"backend_name": backend_name} if backend_name != "jules" or retry_authority is not None else {}),  # type: ignore[arg-type]
-                    **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
-                )
-        except (AutoCoderUsageLimitError, CloudSubmissionNotStartedError) as e:
-            rejected_submissions += 1
-            logger.warning(f"Cloud backend '{backend_name}' rejected submission: {e}. Trying next backend.")
-            continue
-        except Exception as e:
-            if manual_retry or retry_authority is not None:
-                raise
-            logger.warning(f"Cloud backend '{backend_name}' failed: {e}. Trying next backend.")
-            continue
+    from .issue_dispatch import IssueAttemptIdentity, IssueDispatchGuard
 
-    if candidates and rejected_submissions == len(candidates):
-        raise CloudSubmissionNotStartedError("All configured high-score Cloud backends rejected submission before remote work started")
+    owner, repository = repo_name.split("/", 1)
+    issue_number = int(issue_data["number"])
+    attempt_id = retry_authority.attempt_id if retry_authority is not None else str(get_current_attempt(repo_name, issue_number))
+    retained = IssueDispatchGuard().inspect(IssueAttemptIdentity(owner, repository, issue_number, attempt_id))
+    if retained is not None:
+        dispatch = IssueDispatchExecution(retained, [retained.diagnostic])
+        if dispatch_observer is not None:
+            dispatch_observer(dispatch)
+        return dispatch.actions
 
     from .cli_helpers import create_high_score_backend_manager, create_high_score_cloud_backend_manager
 
@@ -1355,7 +1322,6 @@ def _dispatch_issue_candidates(
             effects=OrdinaryIssueAdapterEffects(
                 process_codex_cloud=_process_issue_codex_cloud_mode,
                 process_claude_routine=_process_issue_claude_routine_mode,
-                process_jules=_process_issue_jules_mode,
                 take_local_actions=_take_issue_actions,
                 record_dispatch_stage=_record_dispatch_stage,
             ),

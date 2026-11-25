@@ -8557,6 +8557,7 @@ class AutomationEngine:
                             self.github,
                             label_context=should_process,
                             implementation_slots=implementation_slots,
+                            dispatch_observer=lambda dispatch: setattr(result, "dispatch_result", dispatch.result),
                             **({"manual_retry": True} if manual_retry else {}),  # type: ignore[arg-type]
                             **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
                         )
@@ -8969,13 +8970,15 @@ class AutomationEngine:
         if candidate.type == "issue":
             self._get_local_job_store()
 
-        # Check if Jules mode should be used based on configuration
+        # Supported cloud policy must not depend on Jules availability.  Keep
+        # the legacy Jules signal only for historical reconciliation paths;
+        # ordinary candidate projection independently excludes new Jules work.
         if self.config.jules_mode is not None:
             jules_mode = self.config.jules_mode
         else:
-            from .llm_backend_config import is_jules_mode_enabled
+            from .llm_backend_config import is_cloud_mode_enabled, is_jules_mode_enabled
 
-            jules_mode = is_jules_mode_enabled(repo_name=repo_name)
+            jules_mode = is_cloud_mode_enabled(repo_name=repo_name) or is_jules_mode_enabled(repo_name=repo_name)
 
         return self._process_single_candidate_unified(
             repo_name,
@@ -9199,12 +9202,9 @@ class AutomationEngine:
         with active_repo_context(repo_name):
             os.environ["REPO_NAME"] = repo_name
             self.config.repo_name = repo_name
-            # Check if Jules mode should be used based on configuration
-            from .llm_backend_config import is_jules_mode_enabled
+            from .llm_backend_config import is_cloud_mode_enabled, is_jules_mode_enabled
 
-            # Both must be true for Jules mode to be enabled
-            # jules_mode parameter is requested state, and is_jules_mode_enabled checks config
-            jules_mode = jules_mode and is_jules_mode_enabled(repo_name=repo_name)
+            jules_mode = jules_mode and (is_cloud_mode_enabled(repo_name=repo_name) or is_jules_mode_enabled(repo_name=repo_name))
             from datetime import datetime
 
             with ProgressStage("Processing single PR/IS"):
