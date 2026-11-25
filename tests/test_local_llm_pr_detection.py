@@ -9,6 +9,7 @@ from auto_coder.automation_config import AutomationConfig
 from auto_coder.ci_repair_authority import CIRepairAuthority
 from auto_coder.conflict_resolver import _perform_base_branch_merge_and_conflict_resolution
 from auto_coder.github_app_reviewer import ReviewPublicationResult
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.issue_processor import _create_pr_for_issue
 from auto_coder.pr_processor import PRActionList, _handle_pr_merge, _is_local_llm_pr, is_local_llm_pr
 from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsStatusResult
@@ -186,6 +187,8 @@ class TestHandlePrMergeFixLimitation:
         config = AutomationConfig()
         config.AUTO_MERGE = True
         github_client = MagicMock()
+        github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+        github_client.get_pr_comments_strict.return_value = []
         github_client.get_pr_review_threads_strict.return_value = []
 
         # 1. Local PR with passing checks
@@ -227,6 +230,8 @@ class TestHandlePrMergeFixLimitation:
         config = AutomationConfig()
         config.SKIP_MAIN_UPDATE_WHEN_CHECKS_FAIL = True
         github_client = MagicMock()
+        github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+        github_client.get_pr_comments_strict.return_value = []
         github_client.get_pr_review_threads_strict.return_value = []
 
         local_pr = {
@@ -255,6 +260,8 @@ class TestHandlePrMergeFixLimitation:
         """Non-local PR with CI failure skips local LLM fix loop."""
         config = AutomationConfig()
         github_client = MagicMock()
+        github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+        github_client.get_pr_comments_strict.return_value = []
         github_client.get_pr_review_threads_strict.return_value = []
 
         non_local_pr = {

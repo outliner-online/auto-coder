@@ -21,6 +21,7 @@ from auto_coder.ci_observation import (
 from auto_coder.ci_repair_authority import CIRepairAuthority
 from auto_coder.cloud_manager import CloudManager
 from auto_coder.cloud_run import CloudRun, CloudRunRepository
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.pr_processor import (
     CodexCloudFeedbackResult,
     _send_codex_cloud_error_feedback,
@@ -62,6 +63,9 @@ class TestCodexCloudPRCIFlow:
     def mock_github_client(self):
         client = MagicMock()
         client.token = "fake-github-token"
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
+        client.get_pr_review_threads_strict.return_value = []
+        client.get_pr_comments_strict.return_value = []
         client.get_repository.return_value = MagicMock()
         return client
 

@@ -20,6 +20,7 @@ from auto_coder.automation_engine import AutomationEngine, _ValidationPublicatio
 from auto_coder.dashboard import init_dashboard
 from auto_coder.entity_invalidation import DurableInvalidationQueue, EntityIdentity
 from auto_coder.execution_trace import EventKind, Outcome, TraceCollector, get_trace_collector
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.github_pending_work import PendingObligation, PendingReason, WorkIdentity
 from auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
 from auto_coder.reissue_required_store import ReissueRequiredStore
@@ -834,6 +835,7 @@ class TestNewOriginCoverage:
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 2701, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
         client = MagicMock()
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
         client.get_pr_review_threads_strict.return_value = []
         scheduler = AdversarialValidationScheduler(concurrency=2)
 
@@ -1012,6 +1014,7 @@ class TestOutcomeMatrixCoverage:
         config = AutomationConfig()
         pr_data = {"number": 3001, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": "a" * 40}}
         client = MagicMock()
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
         client.get_pr_review_threads_strict.return_value = []
 
         with get_trace_collector().start_execution("owner/repo", "pr", 3001, origin="worker"):
@@ -1545,11 +1548,14 @@ def test_pr_no_commit_checkpoint_reaches_mounted_detail(mock_ui, tmp_path, monke
     }
     github = MagicMock()
     github.get_pr_comments.return_value = []
+    github.get_pr_comments_strict.return_value = []
+    github.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
     github.get_pull_request_metadata_strict.return_value = data
     github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(data["head"]["ref"], data["head"]["sha"], "main")
     native = MagicMock()
     native.send_followup.return_value = True
     thread = ReviewThread(id="navigation", comments=[ReviewThreadComment(database_id=101, author_login="reviewer", body="Fix the navigation race")])
+    github.get_pr_review_threads_strict.return_value = [thread]
     config = AutomationConfig()
     config.AUTO_MERGE = True
     passing = [True]

@@ -357,9 +357,11 @@ class TestHandlePrMergeJulesPR:
         mock_run_command,
     ):
         """A Jules PR older than the timeout is closed; no local fixes are applied."""
+        from src.auto_coder.github_controller_auth import ControllerIdentity
         from src.auto_coder.utils import CommandResult
 
         github_client = Mock()
+        github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
         github_client.get_pr_review_threads_strict.return_value = []
         config = AutomationConfig()
         config.JULES_PR_CI_TIMEOUT_HOURS = 12
@@ -401,9 +403,11 @@ class TestHandlePrMergeJulesPR:
         mock_run_command,
     ):
         """Repeated CI failures never trigger local auto-fix commits on a Jules PR."""
+        from src.auto_coder.github_controller_auth import ControllerIdentity
         from src.auto_coder.utils import CommandResult
 
         github_client = Mock()
+        github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
         github_client.get_pr_review_threads_strict.return_value = []
         config = AutomationConfig()
         config.JULES_PR_CI_TIMEOUT_HOURS = 12

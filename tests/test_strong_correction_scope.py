@@ -14,6 +14,7 @@ from auto_coder.cloud_run import CloudRun, CloudRunRepository
 from auto_coder.codex_cloud_client import _codex_followup_state_path
 from auto_coder.codex_wham_client import FollowUpDeliveryOutcome, FollowUpDeliveryResult
 from auto_coder.codex_work_accounting import CodexWorkAccounting
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.pr_processor import _cloud_review_repair_state_path, _delegate_cloud_review_thread_repair
 from auto_coder.pr_review_cycle import ContractSnapshot, FindingDisposition, PrReviewCycleRepository, RoundProvenance
@@ -123,6 +124,7 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
     )
     state = {"head": HEAD, "threads": []}
     github = MagicMock()
+    github.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
 
     def data():
         return {"number": PR, "state": "open", "body": "Fixes #9", "head": {"ref": "work-branch", "sha": state["head"], "repo": {"full_name": REPO}}, "base": {"ref": "main", "sha": BASE, "repo": {"id": 3}}, "labels": [], "user": {"login": "maintainer"}}
@@ -131,6 +133,7 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
     github.get_pull_request_repair_metadata_strict.side_effect = lambda *_args: PullRequestRepairMetadata("work-branch", state["head"], "main")
     github.get_pr_review_threads_strict.side_effect = lambda *_args: state["threads"]
     github.get_pr_comments.return_value = []
+    github.get_pr_comments_strict.return_value = []
     wham = MagicMock()
     wham.resolve_latest_assistant_turn.return_value = TASK + "~assttrn_1"
     wham.reconcile_follow_up.return_value = False

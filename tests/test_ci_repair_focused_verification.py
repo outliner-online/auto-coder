@@ -37,6 +37,7 @@ from src.auto_coder.ci_repair_verification import (
     follow_up_budget_exhausted,
     verify_targets,
 )
+from src.auto_coder.github_controller_auth import ControllerIdentity
 from src.auto_coder.invocation_admission import ci_repair_designated
 from src.auto_coder.pr_repair_dispatch import RepairDisposition, RepairFactState
 from src.auto_coder.prompt_loader import render_prompt
@@ -325,6 +326,7 @@ def test_handle_pr_merge_origin_reaches_every_target_and_initial_correction(harn
         "base": {"ref": "main", "sha": "b1", "repo": {"full_name": "o/r"}},
     }
     client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
     client.get_pr_review_threads_strict.return_value = []
     client.get_pull_request_metadata_strict.return_value = pr
     observed = CIObservationSnapshot(
@@ -443,6 +445,7 @@ def _run_production_base_update(
         "base": {"ref": "main"},
     }
     client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
     client.get_pr_review_threads_strict.return_value = []
     config = AutomationConfig(automatic_test_fix=False)
     config.SKIP_MAIN_UPDATE_WHEN_CHECKS_FAIL = False

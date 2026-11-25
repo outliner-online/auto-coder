@@ -25,6 +25,7 @@ from auto_coder.adversarial_validator import (
 )
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.automation_engine import AutomationEngine
+from auto_coder.controller_identity_history import ControllerIdentity
 from auto_coder.llm_backend_config import (
     get_feature_switch_from_config,
     get_pr_adversarial_validation_from_config,
@@ -259,6 +260,8 @@ class TestAS001DisabledOnGreenPRSkipsValidatorAndMerges:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock()
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
 
@@ -342,6 +345,8 @@ class TestAS002ExistingVerdictDoesNotBlockOrDeprioritize:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock()
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         client.get_pr_reviews_strict.return_value = [_adversarial_review(head_sha, "NEEDS_FIX")]
@@ -385,6 +390,8 @@ class TestAS003ValidatorThreadsNonBlockingAndUntouched:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = GitHubClient(token="fake_token")
+        client.get_authenticated_controller_identity = MagicMock(return_value=ControllerIdentity("controller", account_id=501))
+        client.get_authenticated_user_login = MagicMock(return_value="controller")
         validator_thread = _make_adversarial_thread(thread_id="thread-adv-1")
         client.get_pr_review_threads_strict = MagicMock(return_value=[validator_thread])
         client.get_pull_request = MagicMock(return_value={"head": {"sha": head_sha}})
@@ -453,6 +460,8 @@ class TestAS004HumanReviewThreadRemainsBlocking:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = GitHubClient(token="fake_token")
+        client.get_authenticated_controller_identity = MagicMock(return_value=ControllerIdentity("controller", account_id=501))
+        client.get_authenticated_user_login = MagicMock(return_value="controller")
         human_thread = _make_human_thread(thread_id="thread-human-1")
         adv_thread = _make_adversarial_thread(thread_id="thread-adv-1")
         client.get_pr_review_threads_strict = MagicMock(return_value=[human_thread, adv_thread])
@@ -498,6 +507,8 @@ class TestAS005NonAdversarialMergeGatesStillApply:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock()
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
 
@@ -523,6 +534,8 @@ class TestAS005NonAdversarialMergeGatesStillApply:
         pr_data = _pr_data(100, head_sha, mergeable=False, linked_issue=42)
 
         client = MagicMock()
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
 
@@ -548,6 +561,8 @@ class TestAS005NonAdversarialMergeGatesStillApply:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock()
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
 
