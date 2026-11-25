@@ -772,6 +772,94 @@ class CodexCloudClient(CloudTaskClientBase):
         logger.info(f"Reconciled previously ambiguous Codex follow-up '{logical_identity}' as delivered")
         return FollowUpDeliveryOutcome.DELIVERED
 
+    def has_completed_review_feedback(self, task_id: str, logical_identities: tuple[str, ...], repair_target: ExistingPrRepairTarget) -> bool:
+        """Observe completed ordinary feedback without authorizing closure or rewriting receipts.
+
+        A task-level completed status can describe activity before an accepted
+        follow-up. Each selected native receipt must also have a completed
+        assistant turn after its recorded pre-send baseline. The caller retains
+        responsibility for current-head validation and every native review gate.
+        """
+        if (
+            not is_valid_codex_cloud_task_id(task_id)
+            or not logical_identities
+            or any(not isinstance(identity, str) or not identity for identity in logical_identities)
+            or len(set(logical_identities)) != len(logical_identities)
+            or self.repo_name != repair_target.repo_name
+            or type(repair_target.pr_number) is not int
+            or repair_target.pr_number <= 0
+            or not all(isinstance(value, str) and value for value in (repair_target.repo_name, repair_target.head_branch, repair_target.base_branch, repair_target.head_sha))
+        ):
+            return False
+        state_path = _codex_followup_state_path(self.repo_name)
+        selected_keys = {hashlib.sha256(f"{task_id}\0{identity}".encode("utf-8")).hexdigest(): identity for identity in logical_identities}
+        turn_pattern = re.compile(rf"{re.escape(task_id)}~[A-Za-z0-9_-]+")
+
+        def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            values: dict[str, object] = {}
+            for key, value in pairs:
+                if key in values:
+                    raise ValueError("Duplicate native follow-up field")
+                values[key] = value
+            return values
+
+        def read_owned_receipts() -> dict[str, PendingCodexFollowUp]:
+            with _followup_state_lock:
+                document = json.loads(state_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+            if not isinstance(document, dict):
+                raise ValueError("Native follow-up journal is not an object")
+            owned: dict[str, PendingCodexFollowUp] = {}
+            for key, value in document.items():
+                if not isinstance(value, dict) or not isinstance(value.get("task_id"), str) or not value["task_id"]:
+                    raise ValueError("Native follow-up ownership is unavailable")
+                if value["task_id"] != task_id:
+                    if key in selected_keys:
+                        raise ValueError("Selected follow-up has a different owner")
+                    continue
+                record = PendingCodexFollowUp(**value)
+                if not isinstance(record.logical_identity, str) or not record.logical_identity:
+                    raise ValueError("Native follow-up identity is unavailable")
+                expected_key = hashlib.sha256(f"{task_id}\0{record.logical_identity}".encode("utf-8")).hexdigest()
+                if key != expected_key or record.status != FollowUpDeliveryOutcome.DELIVERED.value:
+                    raise ValueError("Native follow-up delivery is ambiguous")
+                if not isinstance(record.pre_send_turn_id, str) or not turn_pattern.fullmatch(record.pre_send_turn_id):
+                    raise ValueError("Native follow-up baseline is unavailable")
+                owned[key] = record
+            return owned
+
+        try:
+            initial = read_owned_receipts()
+            baselines: set[str] = set()
+            for key, identity in selected_keys.items():
+                record = initial.get(key)
+                if (
+                    record is None
+                    or record.logical_identity != identity
+                    or record.repair_repository != repair_target.repo_name
+                    or type(record.repair_pr_number) is not int
+                    or record.repair_pr_number != repair_target.pr_number
+                    or record.repair_head_branch != repair_target.head_branch
+                    or record.repair_base_branch != repair_target.base_branch
+                    or not isinstance(record.repair_head_sha, str)
+                    or not record.repair_head_sha
+                ):
+                    return False
+                baselines.add(record.pre_send_turn_id)
+            task = self.get_task(task_id)
+            if not isinstance(task, CloudTask) or task.task_id != task_id or task.state is not CloudTaskState.COMPLETED:
+                return False
+            wham = self.wham_client or CodexWhamClient()
+            for baseline in sorted(baselines):
+                completed = wham.resolve_completed_assistant_turn_after(task_id, baseline)
+                if not isinstance(completed, str) or not turn_pattern.fullmatch(completed) or completed == baseline:
+                    return False
+            # Another task may update this shared journal while provider reads
+            # run. Only changes to this owning task invalidate its observation.
+            return read_owned_receipts() == initial
+        except Exception as exc:
+            logger.warning("Completed review feedback could not be established for task {}: {}", task_id, type(exc).__name__)
+            return False
+
     def get_followup_remediation_baseline(self, task_id: str, logical_identities: tuple[str, ...]) -> str:
         """Return the pre-send assistant turn durably captured for a follow-up."""
         state_path = _codex_followup_state_path(self.repo_name)

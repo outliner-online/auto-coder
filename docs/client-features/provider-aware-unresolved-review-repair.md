@@ -70,9 +70,11 @@ from historical prose. Auto-Coder does not annotate old comments, clear receipt
 state, force reevaluation, resend requests or restart active work for recovery.
 Ordinary independent adjudication and closure gates still apply.
 
-A poll finding only prior delivery receipts is deferred while the unresolved
-thread remains blocked. It does not claim a fresh accepted handoff. Receipts
-prove prior delegation, not current implementation progress or completed repair.
+A poll finding only prior delivery receipts reports a deferred repair while
+the unresolved thread remains blocked. It does not claim a fresh accepted
+handoff. Receipts prove prior delegation, not current implementation progress
+or completed repair. The independently verified completed-Codex observation
+described below can separately admit a first current-head review.
 
 The existing `pr.repair-delegation` trace includes `head_sha` from the evaluated
 PR snapshot and a fixed `reason` for receipt-only waits:
@@ -103,6 +105,38 @@ author login, task identity, receipt content or new API is added. The snapshot
 head is not a new authoritative head lookup, and no reason establishes provider
 liveness, completed repair, safe replay, or permission to merge. Private retained
 review/publication evidence remains the separate scope of #2753.
+
+## Independent reassessment after completed Codex feedback
+
+A completed cloud correction may have changed the head while leaving an honest
+partial or blocked implementation response. The original delivery identity stays
+consumed, and a changed head still ends the old no-commit checkpoint series.
+Neither condition is evidence that the original concern was fixed.
+
+For ordinary Codex feedback, the controller can instead observe completion for
+independent review admission. Every selected actionable identity must have a
+confirmed delivery receipt, with complete current discussion and no uncertain
+source. It rechecks the exact current PR and originating task ownership. The
+provider must report `COMPLETED`, and its native chronological history must
+show a completed assistant turn later than each selected request's retained
+pre-send baseline. A terminal task unrelated to those sends, unavailable history, active
+work, new feedback or unknown delivery cannot supply this observation.
+
+The first current-head independent validator may then proceed without an
+addressed marker or an older App finding. The controller does not turn the
+implementer's unmarked explanation into corrective guidance, replay old
+feedback, alter receipt state or restart the completed task. The existing
+reviewer limit and saved-verdict deduplication still apply. A changed ordinary
+blocking-thread snapshot at the post-Codex recheck invalidates the admission.
+Ordinary external roots retain their closure and merge restrictions; provider
+completion is not implementation verification.
+
+The separate `pr.review-thread-gate` event is deferred with
+`effect=completed-cloud-review-reassessment`, `examined_head` and
+`blocking_thread_ids`. It exposes no task identity or comment content. The
+preceding receipt-only repair event remains deferred, and the later validation,
+correction, closure and merge events keep their own meanings. See
+[Independent review-thread completion validation](independent-review-thread-completion-validation.md#first-current-head-review-after-completed-codex-feedback).
 
 ## Mixed native Codex delivery evidence
 

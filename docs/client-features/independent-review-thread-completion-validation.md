@@ -47,6 +47,45 @@ The transition emits `pr.review-thread-gate` with outcome `DEFERRED`,
 `blocking_thread_ids`, and `revalidation_thread_ids`. These facts distinguish
 review admission from delivery, accepted closure and merge completion.
 
+## First current-head review after completed Codex feedback
+
+An ordinary Codex Cloud repair can finish with a partial correction or a
+reported verification blocker, leaving its external thread unresolved and
+without an addressed marker. Confirmed delivery deduplication still prevents
+resending the same feedback. When there is no applicable saved verdict for the
+current head, Auto-Coder can admit its first independent validation after
+observing all of the following together:
+
+- Every selected actionable feedback identity has confirmed delivery evidence,
+  and the complete discussion contains no newly actionable or uncertain source.
+- The authoritative current PR and existing originating Codex task still have
+  the exact expected ownership and target.
+- The provider reports the task as `COMPLETED`, and native chronological
+  history shows a completed assistant turn later than every selected feedback
+  request's retained pre-send baseline.
+
+An addressed marker and an older authenticated App finding are not required for
+this path. An unmarked same-author reply remains diagnostic discussion; its prose
+is not reclassified as new corrective guidance. Provider completion alone does
+not establish that the implementation satisfies the review or Issue contract.
+Missing, truncated, unavailable, mismatched or uncertain evidence retains the
+existing wait, as do active provider work and exhausted repair allowance.
+
+The observation grants admission to the existing validator only. Ordinary
+external roots are not promoted into claimed-thread closure inputs or resolved,
+and their final merge gate remains active. A changed post-Codex blocking-thread
+snapshot cannot reuse this admission. The configured review-count limit,
+saved-verdict recovery and same-head deduplication still apply. This does not
+resend feedback, clear receipts, manufacture acceptance clocks or renew the
+no-commit checkpoint budget after a head change.
+
+Production emits `pr.review-thread-gate` with outcome `DEFERRED`,
+`effect=completed-cloud-review-reassessment`, `examined_head` and
+`blocking_thread_ids`. The event records review admission, not a fresh repair
+handoff, accepted closure or successful merge. Regression coverage is in
+`tests/test_completed_cloud_review_reassessment.py` and
+`tests/test_codex_completed_review_feedback.py`.
+
 ## Reusable closure status reply
 
 Each independent `ADDRESSED` decision carries a deterministic binding to the

@@ -255,3 +255,18 @@ is separate from the preceding deferred repair observation and the following
 validator result. It is not an explicit force request, an external-thread
 closure, or merge completion. Changed post-Codex discussion, newly actionable
 feedback and observed uncertain delivery retain their existing waits.
+
+A completed Codex correction with confirmed delivery receipts and a native
+completed assistant turn later than each retained pre-send baseline can admit
+its first independent current-head review even when the implementer's latest
+reply reports incomplete work and has no addressed marker. The existing
+review-thread gate records `DEFERRED` with
+`effect=completed-cloud-review-reassessment`, `examined_head` and
+`blocking_thread_ids`. This event exposes no task identity or comment content,
+and the preceding receipt-only repair event remains deferred. Provider completion
+is not independent verification: ordinary external threads stay unresolved and
+block merge, while review history separately records the validator's actual
+execution and result. Changed discussion, uncertain delivery, active provider
+work, the reviewer limit and saved-verdict deduplication retain their existing
+admission behavior. Runnable regressions are listed in
+`docs/dashboard-observability.md`.
