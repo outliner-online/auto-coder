@@ -546,6 +546,8 @@ class AdversarialValidationResult:
     # Diagnostic-only link to the attempt-local response this result was parsed
     # from; empty for a local outcome with no semantic answer. Never authority.
     source_response_id: str = field(default="", repr=False)
+    # Binds a deferred result to the actual specification and PR prose reviewed.
+    review_input_context_identity: str = field(default="", repr=False)
 
     @property
     def is_pass(self) -> bool:
@@ -1398,7 +1400,7 @@ def build_adversarial_validation_context(
 
     # Extract linked issues context (from body, title, branch name, session)
     resolution = resolve_issue_oracles(client, repo_name, pr_data=pr_data, pr_body=pr_body, bypass_cache=bypass_cache)
-    issue_context = get_linked_issues_context(client, repo_name, pr_body=pr_body, pr_data=pr_data, resolution=resolution)
+    issue_context = get_linked_issues_context(client, repo_name, pr_body=pr_body, pr_data=pr_data, resolution=resolution, strict=bypass_cache)
     manifest = build_issue_requirement_manifest(resolution)
     if not bypass_cache:
         # A cache-bypassing call only reconfirms a snapshot; the first construction is what the reviewer consumes.
@@ -1429,6 +1431,19 @@ def build_adversarial_validation_context(
         file_change_identities={str(record.get("filename", "")): identity for record in changed_file_records if str(record.get("filename", "")) and (identity := _complete_file_change_identity(record))},
         requirement_manifest_identity=_requirement_manifest_identity(manifest.requirements),
     )
+
+
+def validation_input_identity(context: AdversarialValidationContext) -> str:
+    """Bind a retained proposal to the actual review inputs, including prose."""
+    payload = {
+        "repository": context.repo_name,
+        "pr_number": context.pr_number,
+        "title": context.pr_title,
+        "body": context.pr_body,
+        "issue_context": context.issue_context,
+        "validation_snapshot": context.validation_snapshot,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def validation_snapshot_is_current(
@@ -4494,6 +4509,7 @@ def run_adversarial_validation(
             )
 
     result = _apply_coverage_and_verdict_precedence(result, context)
+    result.review_input_context_identity = validation_input_identity(context)
     result.accepted_finding_projection = project_accepted_findings(bridge, projection_target, claimed_review_threads, accepted_finding_dispositions(result, claimed_review_threads, accepted_projection, head_sha)) if accepted_projection.records else accepted_projection
 
     if was_resumed:

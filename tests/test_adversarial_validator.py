@@ -1926,6 +1926,9 @@ class TestBuildAdversarialValidationContext:
             def get_parent_issue_details(self, repo_name, issue_number):
                 return None
 
+            def get_parent_issue_details_strict(self, repo_name, issue_number):
+                return None
+
         client = FakeClient()
         pr_data = {"number": 42, "title": "Implement feature", "body": "Fixes #10"}
 

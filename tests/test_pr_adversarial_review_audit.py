@@ -56,6 +56,7 @@ from tests.ci_observation_fakes import authoritative_ci_status
 
 REPO_NAME = "owner/repo"
 PR_NUMBER = 4242
+PR_CREATED_AT = "2026-01-01T00:00:00Z"
 ISSUE_NUMBER = 99
 
 VALID_ISSUE_BODY = '## Objective\nAdd a greet() function that returns the string "hello".\n\n## Requirements\nREQ-001: greet() returns the string hello.\n'
@@ -128,20 +129,40 @@ def _add_dynamic_check_script(repo: Path, head_sha: str) -> str:
 PR_DIFF = "diff --git a/sample.py b/sample.py\nindex e69de29..1234567 100644\n--- a/sample.py\n+++ b/sample.py\n@@ -1,2 +1,2 @@\n-def greet():\n-    return 'placeholder'\n+def greet():\n+    return \"hello\"\n"
 
 
-def _build_github_client(head_sha: str, issue_body: str = VALID_ISSUE_BODY) -> MagicMock:
-    client = MagicMock()
+class AuditGitHubClient(MagicMock):
+    """Expose the fresh-read API through the controlled GitHub boundary."""
+
+    def get_pr_diff_strict(self, repo_name, pr_number):
+        return self.get_pr_diff(repo_name, pr_number)
+
+    def get_pr_changed_file_count_strict(self, repo_name, pr_number):
+        return self.get_pr_changed_file_count(repo_name, pr_number)
+
+    def get_issue_dispatch_snapshot_strict(self, repo_name, issue_number):
+        return self.get_issue(repo_name, issue_number)
+
+    def get_parent_issue_details_strict(self, repo_name, issue_number):
+        return self.get_parent_issue_details(repo_name, issue_number)
+
+
+def _build_github_client(head_sha: str, issue_body: str = VALID_ISSUE_BODY, *, repo: Optional[Path] = None, base_sha: Optional[str] = None) -> MagicMock:
+    client = AuditGitHubClient()
     client.get_pr_diff.return_value = PR_DIFF
     client.get_pr_changed_file_count.return_value = 1
     client.get_issue.return_value = {"number": ISSUE_NUMBER, "title": "Add greet()", "body": issue_body, "state": "open"}
     client.get_parent_issue_details.return_value = None
     client.get_pr_comments.return_value = []
     client.get_pr_reviews_strict.return_value = []
-    client.get_pull_request.return_value = {"head": {"sha": head_sha}}
+    client.get_pull_request.return_value = _build_pr_data(head_sha, repo=repo, base_sha=base_sha)
+    client.get_pull_request_metadata_strict.return_value = _build_pr_data(head_sha, repo=repo, base_sha=base_sha)
     client.get_pull_request_head_sha_strict.return_value = head_sha
     return client
 
 
-def _build_pr_data(head_sha: str) -> Dict[str, object]:
+def _build_pr_data(head_sha: str, *, repo: Optional[Path] = None, base_sha: Optional[str] = None) -> Dict[str, object]:
+    if base_sha is None:
+        assert repo is not None, "The GitHub fixture must bind a concrete reviewed base."
+        base_sha = _git(["rev-parse", f"{head_sha}^"], repo)
     return {
         "number": PR_NUMBER,
         "title": "Implement greet()",
@@ -149,7 +170,9 @@ def _build_pr_data(head_sha: str) -> Dict[str, object]:
         "labels": [],
         "user": {"login": "accepted-author"},
         "head": {"ref": "feature-branch", "sha": head_sha},
-        "base": {"ref": "main"},
+        "base": {"ref": "main", "sha": base_sha},
+        "state": "open",
+        "created_at": PR_CREATED_AT,
     }
 
 
@@ -267,8 +290,8 @@ class TestReq010OneCallExecution:
         repo, head_sha = _build_pr_repo(tmp_path)
         validation_worktree = tmp_path / "validation-worktree"
         _git(["worktree", "add", "--detach", str(validation_worktree), head_sha], repo)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         ready = tmp_path / "muse-ready"
         release = tmp_path / "muse-release"
@@ -391,8 +414,8 @@ for line in sys.stdin:
 
     def test_pass_payload_is_one_executed_review_with_one_invocation(self, tmp_path, monkeypatch, audit_store):
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         reviewer = MockReviewerClient("reviewer", responses=[PASS_PAYLOAD])
         manager = _build_backend_manager(monkeypatch, {"reviewer": reviewer}, "reviewer")
@@ -436,8 +459,8 @@ for line in sys.stdin:
 
     def test_non_json_response_is_one_executed_review_with_native_error(self, tmp_path, monkeypatch, audit_store):
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         reviewer = MockReviewerClient("reviewer", responses=[NON_JSON_PAYLOAD])
         manager = _build_backend_manager(monkeypatch, {"reviewer": reviewer}, "reviewer")
@@ -464,8 +487,8 @@ for line in sys.stdin:
         retained in full; the audit never presents unconditional merge
         readiness from the bare PASS verdict alone."""
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         payload = (
             '{"result":"PASS","summary":"greet() returns hello, but scope is unclear.",'
@@ -504,8 +527,8 @@ for line in sys.stdin:
         is retained in full through real parsing/normalization; merge
         approval is never synthesized for a non-PASS verdict."""
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         payload = (
             '{"result":"NEEDS_FIX","summary":"Found 1 specification violation in greet() output.",'
@@ -555,8 +578,8 @@ for line in sys.stdin:
         recovery plus a scoped decision-critical evidence gap) is retained in
         full; INCONCLUSIVE never becomes an approved/merged PR."""
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         payload = (
             '{"result":"INCONCLUSIVE","summary":"greet() behavior could not be fully confirmed on the reviewed head.",'
@@ -601,8 +624,8 @@ for line in sys.stdin:
 class TestReq011ReuseBypassLocalOnly:
     def test_post_feature_reuse_links_producing_review_with_zero_new_invocations(self, tmp_path, monkeypatch, audit_store):
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         reviewer = MockReviewerClient("reviewer", responses=[PASS_PAYLOAD])
         manager = _build_backend_manager(monkeypatch, {"reviewer": reviewer}, "reviewer")
@@ -637,8 +660,8 @@ class TestReq011ReuseBypassLocalOnly:
 
     def test_legacy_reuse_has_unavailable_source_provenance(self, tmp_path, monkeypatch, audit_store):
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
 
         from auto_coder.adversarial_validator import format_adversarial_validation_comment
@@ -664,8 +687,8 @@ class TestReq011ReuseBypassLocalOnly:
 
     def test_duplicate_requirement_id_is_local_only_blocked_before_invocation(self, tmp_path, monkeypatch, audit_store):
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha, issue_body=DUPLICATE_REQUIREMENT_ISSUE_BODY)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, issue_body=DUPLICATE_REQUIREMENT_ISSUE_BODY, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         # No reviewer client registered at all: any invocation attempt fails loudly.
         manager = MagicMock()
@@ -688,8 +711,8 @@ class TestReq011ReuseBypassLocalOnly:
 
     def test_disabled_validation_is_bypassed_with_no_verdict(self, tmp_path, monkeypatch, audit_store):
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         config.ENABLE_ADVERSARIAL_VALIDATION = False
         config.pr_adversarial_validation = False
@@ -715,8 +738,8 @@ class TestReq011ReuseBypassLocalOnly:
         policy actually invokes the analyzer again (here: --force), has a
         distinct review_id despite reusing the same provider session."""
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         reviewer = MockReviewerClient("reviewer", responses=[PASS_PAYLOAD, PASS_PAYLOAD], session_id="reused-session")
         manager = _build_backend_manager(monkeypatch, {"reviewer": reviewer}, "reviewer")
@@ -767,8 +790,8 @@ class TestReq011ReuseBypassLocalOnly:
 class TestReq012MultiCallFixtures:
     def test_backend_fallback_is_one_review_with_two_ordered_invocations(self, tmp_path, monkeypatch, audit_store):
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
 
         reviewer_a = MockReviewerClient("reviewer-a", raise_once=AutoCoderUsageLimitError("quota exceeded"))
@@ -803,8 +826,8 @@ class TestReq012MultiCallFixtures:
     def test_dynamic_followup_is_one_review_with_two_ordered_invocations(self, tmp_path, monkeypatch, audit_store):
         repo, head_sha = _build_pr_repo(tmp_path)
         head_sha = _add_dynamic_check_script(repo, head_sha)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         config.TEST_SCRIPT_PATH = str(repo / "scripts" / "test.sh")
 
@@ -869,8 +892,8 @@ class TestReq013PairedComparison:
         # instrumentation never leaks into the paired instrumented call.
         with pytest.MonkeyPatch.context() as mp:
             repo, head_sha = _build_pr_repo(tmp_path / ("instrumented" if instrumented else "baseline"))
-            client = _build_github_client(head_sha)
-            pr_data = _build_pr_data(head_sha)
+            client = _build_github_client(head_sha, repo=repo)
+            pr_data = _build_pr_data(head_sha, repo=repo)
             config = _build_config()
             reviewer = MockReviewerClient("reviewer", responses=[PASS_PAYLOAD])
             manager = _build_backend_manager(mp, {"reviewer": reviewer}, "reviewer")
@@ -916,8 +939,8 @@ class TestReq013PairedComparison:
 
 
 def _two_tier_reprocessing_setup(monkeypatch, tmp_path, gate, inputs, head_sha):
-    client = _build_github_client(head_sha)
-    pr_data = _build_pr_data(head_sha)
+    client = _build_github_client(head_sha, base_sha=inputs.base_sha)
+    pr_data = _build_pr_data(head_sha, base_sha=inputs.base_sha)
     config = _build_config()
     config.MAX_ADVERSARIAL_VALIDATIONS = 0
     _apply_standard_merge_gates(monkeypatch, mergeable=True, merge_result=False)
@@ -1038,7 +1061,7 @@ def test_production_recheck_reuses_completion_won_after_preliminary_read(tmp_pat
     policy = StrongPolicyIdentity("strong", "model=strong", "v1")
     base, head = "b" * 40, "a" * 40
     gate_b = TwoTierPrGate(REPO_NAME)
-    gate_b.ordinary_pass(PR_NUMBER, head, base, contract)
+    gate_b.ordinary_pass(PR_NUMBER, head, base, contract, opening_token=f"created:{PR_CREATED_AT}")
     inputs = TwoTierGateInputs(gate_b, contract, policy, head, base)
     client, pr_data, config = _two_tier_reprocessing_setup(monkeypatch, tmp_path, gate_b, inputs, head)
     preliminary_read = threading.Event()
@@ -1074,7 +1097,7 @@ def test_production_recheck_reuses_completion_won_after_preliminary_read(tmp_pat
     assert not worker.is_alive()
     model.assert_not_called()
     assert len(outcomes) == 1
-    assert any("reused existing STRONG_PASS completion" in action for action in outcomes[0])
+    assert any("reused existing STRONG_PASS completion" in action for action in outcomes[0]), outcomes[0]
     after = gate_b.state.snapshot(PR_NUMBER)
     assert after.completion == completed.completion
     assert after.active_claim is None
@@ -1092,8 +1115,8 @@ class TestStaleHeadPublicationAndRestart:
         """AS-006: a completed review remains readable after PR closure/session
         cleanup and after the audit root is reopened as a fresh store (restart)."""
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         reviewer = MockReviewerClient("reviewer", responses=[PASS_PAYLOAD])
         manager = _build_backend_manager(monkeypatch, {"reviewer": reviewer}, "reviewer")
@@ -1130,8 +1153,8 @@ class TestStaleHeadPublicationAndRestart:
         separate appended effect, and the semantic review report is untouched
         throughout."""
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         reviewer = MockReviewerClient("reviewer", responses=[PASS_PAYLOAD])
         manager = _build_backend_manager(monkeypatch, {"reviewer": reviewer}, "reviewer")
@@ -1163,8 +1186,8 @@ class TestStaleHeadPublicationAndRestart:
         and completes first, then H1's late completion is observed as
         superseded rather than approving/overwriting the newer head."""
         repo, h1_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(h1_sha)
-        pr_data = _build_pr_data(h1_sha)
+        client = _build_github_client(h1_sha, repo=repo)
+        pr_data = _build_pr_data(h1_sha, repo=repo)
         config = _build_config()
 
         # A second, independent attempt for the SAME head races ahead and
@@ -1217,8 +1240,8 @@ class TestStaleHeadPublicationAndRestart:
         intact, publication is never attempted, and the observation is a
         separate 'superseded' effect rather than an overwrite."""
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         # An explicit provider session makes run_adversarial_validation build
         # a reviewer_session_checkpoint, which is what reaches the
@@ -1257,15 +1280,15 @@ class TestStaleHeadPublicationAndRestart:
         assert record.effects[0].details.get("phase") == "gap-state-acceptance"
         assert record.effects[0].details.get("observed_head") == "0" * 40
 
-    def test_head_observation_failure_before_durable_acceptance_appends_failed_effect(self, tmp_path, monkeypatch, audit_store):
+    def test_head_observation_failure_before_durable_acceptance_appends_pending_effect(self, tmp_path, monkeypatch, audit_store):
         """REQ-006: the authoritative head check itself raises at the
         gap-state-acceptance boundary (a transient GitHub failure). The
         review's own retained PASS result for the original head stays
-        intact, publication is never attempted, and the raised check is its
-        own appended 'failed' effect rather than leaving zero observations."""
+        intact, publication is never attempted, and the unavailable check is
+        retained as a pending acceptance observation with its retry deadline."""
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         # An explicit provider session makes run_adversarial_validation build
         # a reviewer_session_checkpoint, which is what reaches the
@@ -1289,7 +1312,8 @@ class TestStaleHeadPublicationAndRestart:
 
         assert reviewer.calls == ["fresh"]
         assert not publish_calls, "a result rejected for an unconfirmable head must not publish"
-        assert any("authoritative head could not be confirmed" in action for action in actions)
+        assert any("current inputs await confirmation" in action for action in actions)
+        assert actions.retry_not_before > time.time()
 
         records = _get_only_evaluation(audit_store, REPO_NAME)
         assert len(records) == 1
@@ -1298,10 +1322,18 @@ class TestStaleHeadPublicationAndRestart:
         assert record.native_verdict == "PASS"
         assert record.reviewed_generation == head_sha
         effect_dispositions = [effect.disposition for effect in record.effects]
-        assert effect_dispositions == ["failed"]
+        assert effect_dispositions == ["pending"]
         assert record.effects[0].details is not None
         assert record.effects[0].details.get("phase") == "gap-state-acceptance"
-        assert record.effects[0].details.get("reason") == "head observation unavailable"
+        assert record.effects[0].details.get("reason") == "head_observation_unavailable"
+        assert record.effects[0].details.get("retry_not_before") == actions.retry_not_before
+
+        from auto_coder.deferred_pr_validation import DeferredPRValidationStore
+
+        pending = DeferredPRValidationStore(REPO_NAME).load(PR_NUMBER)
+        assert pending is not None and pending.review_id == record.review_id
+        assert pending.restore_result().result == record.native_verdict
+        assert pending.head_sha == head_sha
 
     def test_changed_validation_snapshot_before_acceptance_is_superseded(self, tmp_path, monkeypatch, audit_store):
         """REQ-006: recovered file evidence exists from a prior session, but
@@ -1311,8 +1343,8 @@ class TestStaleHeadPublicationAndRestart:
         from auto_coder.reviewer_session_registry import RecoveredFileEvidence, ReviewerSession, ReviewerSessionRegistry
 
         repo, head_sha = _build_pr_repo(tmp_path)
-        client = _build_github_client(head_sha)
-        pr_data = _build_pr_data(head_sha)
+        client = _build_github_client(head_sha, repo=repo)
+        pr_data = _build_pr_data(head_sha, repo=repo)
         config = _build_config()
         reviewer = MockReviewerClient("reviewer", responses=[PASS_PAYLOAD], session_id="fresh-session")
         manager = _build_backend_manager(monkeypatch, {"reviewer": reviewer}, "reviewer")
@@ -1340,21 +1372,17 @@ class TestStaleHeadPublicationAndRestart:
         _apply_standard_merge_gates(monkeypatch, mergeable=True, merge_result=True)
         _wire_backend(monkeypatch, manager)
         monkeypatch.setattr("auto_coder.pr_processor.isolated_pr_head_worktree", lambda *a, **k: _static_worktree(repo))
-        # validation_snapshot_is_current is the real GitHub-freshness boundary
-        # check itself (not the validator/parser), called at two real
-        # boundaries: once inside run_adversarial_validation's own recovery-
-        # ledger check (which must see the snapshot as still current so the
-        # review actually executes and a checkpoint is built), and again at
-        # pr_processor's later gap-state-acceptance boundary (simulating a
-        # real TOCTOU: the PR state changed in between the two checks).
-        snapshot_check_calls = {"count": 0}
+        # Change the external Issue snapshot only when the processor reaches
+        # its post-review HEAD observation. The validator's earlier recovery
+        # check sees the original contract; acceptance sees the actual changed
+        # Requirement through the real current-context builder.
+        original_issue = dict(client.get_issue.return_value)
 
-        def _snapshot_current_then_stale(*args, **kwargs):
-            snapshot_check_calls["count"] += 1
-            return snapshot_check_calls["count"] == 1
+        def _advance_requirement_at_acceptance(*_args, **_kwargs):
+            client.get_issue.return_value = {**original_issue, "body": VALID_ISSUE_BODY + "REQ-002: greet() must reject a missing name.\n"}
+            return head_sha
 
-        monkeypatch.setattr("auto_coder.adversarial_validator.validation_snapshot_is_current", _snapshot_current_then_stale)
-        monkeypatch.setattr("auto_coder.pr_processor.validation_snapshot_is_current", _snapshot_current_then_stale)
+        client.get_pull_request_head_sha_strict.side_effect = _advance_requirement_at_acceptance
         publish_calls: List[str] = []
         monkeypatch.setattr(
             "auto_coder.pr_processor.publish_adversarial_review",
@@ -1379,4 +1407,4 @@ class TestStaleHeadPublicationAndRestart:
         assert effect_dispositions == ["superseded"]
         assert record.effects[0].details is not None
         assert record.effects[0].details.get("phase") == "gap-state-acceptance"
-        assert record.effects[0].details.get("reason") == "validation snapshot changed or could not be confirmed"
+        assert record.effects[0].details.get("reason") == "validation inputs changed before acceptance"
