@@ -32,6 +32,7 @@ from auto_coder.durable_repair_allowance import RepairAllowanceLedger
 from auto_coder.execution_trace import Outcome, TraceCollector, get_trace_collector
 from auto_coder.github_app_reviewer import ReviewPublicationResult
 from auto_coder.github_ci_observer import fence_active_ci_observations
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.local_ci_repair_execution import LocalCIRepairResult
 from auto_coder.local_review_repair import LocalReviewRepairRequest, admit_local_repair_allowance
@@ -593,6 +594,10 @@ def _run_ci_consumer(snapshot, *, head=H1, remote_head=None, thread_state=None, 
     remote_head = head if remote_head is None else remote_head
     pr_data = {"number": PR_NUMBER, "body": body, "labels": [], "head": {"ref": "feature", "sha": head}}
     client = MagicMock(token="controlled-token")
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=101)
+    client.get_authenticated_user_login.return_value = "controller"
+    client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = []
+    client.get_pr_review_threads_strict.return_value = list(thread_state.unresolved or thread_state.blocking_unresolved) if thread_state is not None else []
     client.get_pull_request.return_value = {"head": {"sha": remote_head}}
     cycles = iter(range(20))
 
@@ -1981,6 +1986,9 @@ def test_durable_review_repair_receipt_replays_through_pr_entry_without_local_ef
         "base": {"ref": "main", "sha": "base-1"},
     }
     client = MagicMock(token="controlled-token")
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=101)
+    client.get_authenticated_user_login.return_value = "controller"
+    client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = []
     client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(head_ref="cloud/feature", head_sha=H1, base_ref="main")
     provider = MagicMock()
     provider.send_followup.return_value = True

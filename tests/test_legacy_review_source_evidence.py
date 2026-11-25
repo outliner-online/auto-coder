@@ -14,6 +14,7 @@ from auto_coder.cloud_run import CloudRun, CloudRunRepository
 from auto_coder.codex_cloud_client import _codex_followup_state_path
 from auto_coder.codex_wham_client import FollowUpDeliveryOutcome, FollowUpDeliveryResult
 from auto_coder.codex_work_accounting import CodexWorkAccounting
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.pr_processor import ClaimedReviewThreadGateState, _cloud_review_repair_state_path, _handle_pr_merge, _review_feedback_identity
 from auto_coder.pr_repair import ExistingPrRepairTarget, build_existing_pr_repair_prompt
@@ -39,7 +40,9 @@ def ordinary(tmp_path, monkeypatch):
     new = next(thread for thread in threads if thread.comments[0].database_id == 110)
     data = {"number": PR, "body": "Fixes #9", "head": {"ref": "work-branch", "sha": HEAD, "repo": {"full_name": REPO}}, "base": {"ref": "main", "sha": "b" * 40, "repo": {"id": 3}}, "labels": [], "user": {"login": "maintainer"}}
     github = MagicMock()
-    github.get_pr_comments.return_value = []
+    github.get_authenticated_controller_identity.return_value = ControllerIdentity("maintainer", account_id=101)
+    github.get_authenticated_user_login.return_value = "maintainer"
+    github.get_pr_comments.return_value = github.get_pr_comments_strict.return_value = []
     github.get_pr_review_threads_strict.return_value = threads
     github.get_pull_request_metadata_strict.return_value = {**data, "state": "open"}
     github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata("work-branch", HEAD, "main")

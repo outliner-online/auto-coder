@@ -104,7 +104,35 @@ class GitHubReadCancelled(RuntimeError):
     """An unsent read whose caller can now use local observation evidence."""
 
 
+class GitHubMutationAuthorityRetry(RuntimeError):
+    """An unsent request needs new credential proof after admission waited."""
+
+
 _read_cancellation: ContextVar[Callable[[GitHubRequestContext], bool] | None] = ContextVar("github_read_cancellation", default=None)
+
+
+@dataclass(frozen=True)
+class _MutationAuthorityGuard:
+    prepare: Callable[[httpx.Request, GitHubRequestContext], None]
+    revalidate: Callable[[httpx.Request, GitHubRequestContext], None]
+
+
+_mutation_authority_guards: ContextVar[tuple[_MutationAuthorityGuard, ...]] = ContextVar("github_mutation_authority_guards", default=())
+
+
+@contextmanager
+def guard_github_mutations(prepare: Callable[[httpx.Request, GitHubRequestContext], None], revalidate: Callable[[httpx.Request, GitHubRequestContext], None]) -> Iterator[None]:
+    """Revalidate and bind scoped controller authority at the actual wire boundary.
+
+    Proof reads run before admission reserves the governor's single wire slot.
+    Final revalidation is local-only and runs after admission, just before send.
+    Nested critical sections retain every outer guard.
+    """
+    token = _mutation_authority_guards.set((*_mutation_authority_guards.get(), _MutationAuthorityGuard(prepare, revalidate)))
+    try:
+        yield
+    finally:
+        _mutation_authority_guards.reset(token)
 
 
 @contextmanager
@@ -366,15 +394,45 @@ class DiagnosticTransport(httpx.BaseTransport):
                 kind = "read" if re.match(r"(?i)^(?:query\b|\{)", stripped) else "mutation"
             except (TypeError, ValueError, UnicodeDecodeError):
                 kind = "mutation"
-        context = GitHubRequestContext(str(request.extensions.get("auto_coder_operation_id", uuid.uuid4())), str(uuid.uuid4()), self._subsystem, origin, method, kind, endpoint, repository, item, "bypass" if strict_read else "normal", strict_read)
-        header_credentials = tuple(value for key, value in request.headers.items() if key.lower() in ("authorization", "cookie"))
-        credentials = header_credentials + tuple(part for value in header_credentials for part in value.split() if len(part) >= 4)
-        if self._admission_hook is not None and self._admission_hook(context) is False:
-            outcome = GitHubRequestOutcome(context, None, GitHubApiOutcome.REFUSED, RequestProvenance.NETWORK, DeliveryCertainty.DEFINITELY_NOT_SENT, GitHubResponseMetadata(), 0.0)
-            log_outcome(outcome, "refused")
+        guards = _mutation_authority_guards.get() if kind == "mutation" else ()
+        operation_id = str(request.extensions.get("auto_coder_operation_id", uuid.uuid4()))
+
+        def refuse_authority(context: GitHubRequestContext) -> GitHubRequestRefused:
+            outcome = GitHubRequestOutcome(context, None, GitHubApiOutcome.REFUSED, RequestProvenance.NETWORK, DeliveryCertainty.DEFINITELY_NOT_SENT, GitHubResponseMetadata(), 0.0, "Controller authority changed or is unavailable before dispatch")
+            log_outcome(outcome, "controller_authority_refused")
             if self._observation_hook:
                 self._observation_hook(outcome)
-            raise GitHubRequestRefused(outcome)
+            return GitHubRequestRefused(outcome)
+
+        for preparation in range(3):
+            context = GitHubRequestContext(operation_id, str(uuid.uuid4()), self._subsystem, origin, method, kind, endpoint, repository, item, "bypass" if strict_read else "normal", strict_read)
+            try:
+                for guard in guards:
+                    guard.prepare(request, context)
+            except Exception as exc:
+                raise refuse_authority(context) from exc
+            if self._admission_hook is not None and self._admission_hook(context) is False:
+                outcome = GitHubRequestOutcome(context, None, GitHubApiOutcome.REFUSED, RequestProvenance.NETWORK, DeliveryCertainty.DEFINITELY_NOT_SENT, GitHubResponseMetadata(), 0.0)
+                log_outcome(outcome, "refused")
+                if self._observation_hook:
+                    self._observation_hook(outcome)
+                raise GitHubRequestRefused(outcome)
+            try:
+                for guard in guards:
+                    guard.revalidate(request, context)
+            except GitHubMutationAuthorityRetry as exc:
+                refused = refuse_authority(context)
+                # The typed definitely-unsent outcome releases this exact
+                # admission reservation before any credential-proof GET. No
+                # effect has been sent or is being replayed by this bounded loop.
+                if preparation == 2:
+                    raise refused from exc
+                continue
+            except Exception as exc:
+                raise refuse_authority(context) from exc
+            break
+        header_credentials = tuple(value for key, value in request.headers.items() if key.lower() in ("authorization", "cookie"))
+        credentials = header_credentials + tuple(part for value in header_credentials for part in value.split() if len(part) >= 4)
         started = time.monotonic()
         logger.bind(github_request=asdict(context)).debug("github_request_diagnostic wire_attempt")
         try:

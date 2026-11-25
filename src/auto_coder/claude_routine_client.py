@@ -543,6 +543,9 @@ class ClaudeRoutineClient(CloudTaskClientBase):
                     retry_at = observed_at + seconds
             return True, certainty, retry_at
 
+        from .controller_identity_history import assert_active_controller_authority
+
+        assert_active_controller_authority()
         try:
             result = CommandExecutor.run_command(cmd, env=env)
             limited, certainty, retry_after = provider_limit(f"{result.stderr or ''}\n{result.stdout or ''}")

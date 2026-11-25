@@ -34,6 +34,7 @@ from .github_request_outcome import (
     DeliveryCertainty,
     DiagnosticTransport,
     GitHubApiOutcome,
+    GitHubMutationAuthorityRetry,
     GitHubRequestContext,
     GitHubRequestError,
     GitHubRequestOutcome,
@@ -44,6 +45,7 @@ from .github_request_outcome import (
     boundary_hooks,
     finalize_response,
     github_http_client,
+    guard_github_mutations,
     instrument_github_client,
     log_outcome,
     response_metadata,
@@ -51,7 +53,9 @@ from .github_request_outcome import (
 )
 
 if TYPE_CHECKING:
+    from ..controller_identity_history import ControllerAuthorSet, ControllerHistoryCache
     from ..github_app_reviewer import ReviewerAppIdentity
+    from ..github_controller_auth import ControllerIdentity
     from ..issue_review_publication import PublicationReceipt
 
 logger = get_logger(__name__)
@@ -78,6 +82,30 @@ class GitDataResponse:
 
     status: int
     data: object = None
+
+
+@dataclass(frozen=True)
+class _ControllerCredentialSnapshot:
+    """A token-specific proof adapter that never reselects the caller's token."""
+
+    client: "GitHubClient" = field(repr=False)
+    token: str = field(repr=False)
+    _controller_history_cache: "ControllerHistoryCache" = field(repr=False)
+    proven_identity: Optional["ControllerIdentity"] = None
+    local_only: bool = False
+    api_origin: str = "https://api.github.com"
+
+    def get_authenticated_controller_identity(self, repo_name: str | None = None) -> "ControllerIdentity":
+        if self.proven_identity is not None:
+            return self.proven_identity
+        if self.local_only:
+            raise RuntimeError("Controller identity proof is unavailable at dispatch")
+        return self.client._controller_identity_for_token(self.token, repo_name)
+
+    def resolve_github_account_identity(self, login: str) -> "ControllerIdentity":
+        if self.local_only:
+            raise RuntimeError("Controller history changed at dispatch")
+        return self.client._account_identity_for_token(self.token, login)
 
 
 class GitHubGitDataClient:
@@ -947,6 +975,7 @@ class GitHubClient:
         self._issue_read_lock = threading.Lock()
         self._issue_read_generation: dict[str, int] = {}
         self._issue_read_observed: dict[tuple[str, int, str], int] = {}
+        self._controller_identity_cache: dict[str, "ControllerIdentity"] = {}
 
         # Memory cache for open issues to avoid re-fetching in loops
         self._open_issues_cache: Optional[List[Dict[str, Any]]] = None
@@ -2256,31 +2285,104 @@ class GitHubClient:
             raise RuntimeError("GitHub did not return the authenticated user's login")
         return login
 
-    def get_authenticated_controller_identity(self):
+    def get_authenticated_controller_identity(self, repo_name: str | None = None) -> "ControllerIdentity":
         """Return the positive account ID and canonical login proven by this token."""
+        return self._controller_identity_for_token(self.token, repo_name)
+
+    def _controller_identity_for_token(self, token: str, repo_name: str | None = None) -> "ControllerIdentity":
+        """Prove a selected credential without selecting it again during the read."""
         from ..github_controller_auth import ControllerIdentity
 
-        api = get_ghapi_client(self.token)
-        user = api.users.get_authenticated()
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("The active controller credential is unavailable")
+        token_key = hashlib.sha256(token.encode()).hexdigest()
+        cached = self._controller_identity_cache.get(token_key)
+        if cached is not None:
+            return cached
+        api = get_ghapi_client(token)
+        user = api("/user", verb="GET", headers={"Cache-Control": "no-cache"})
         login = user.get("login") if isinstance(user, dict) else getattr(user, "login", None)
         account_id = user.get("id") if isinstance(user, dict) else getattr(user, "id", None)
         if not isinstance(login, str) or not login or not isinstance(account_id, int) or isinstance(account_id, bool) or account_id <= 0:
             raise RuntimeError("GitHub did not return the authenticated account identity")
-        return ControllerIdentity(login, account_id=account_id)
+        identity = ControllerIdentity(login, account_id=account_id)
+        self._controller_identity_cache[token_key] = identity
+        return identity
 
-    def resolve_github_account_identity(self, login: str):
+    def resolve_github_account_identity(self, login: str) -> "ControllerIdentity":
         """Resolve a configured login through GitHub without inferring controller role."""
+        return self._account_identity_for_token(self.token, login)
+
+    def _account_identity_for_token(self, token: str, login: str) -> "ControllerIdentity":
+        """Resolve historical account evidence under one selected credential."""
+        from urllib.parse import quote
+
         from ..github_controller_auth import ControllerIdentity
 
         if not isinstance(login, str) or not login.strip():
             raise ValueError("A GitHub account login is required")
-        api = get_ghapi_client(self.token)
-        user = api.users.get_by_username(login.strip())
+        api = get_ghapi_client(token)
+        user = api(f"/users/{quote(login.strip(), safe='')}", verb="GET", headers={"Cache-Control": "no-cache"})
         canonical = user.get("login") if isinstance(user, dict) else getattr(user, "login", None)
         account_id = user.get("id") if isinstance(user, dict) else getattr(user, "id", None)
         if not isinstance(canonical, str) or not canonical or not isinstance(account_id, int) or isinstance(account_id, bool) or account_id <= 0:
             raise RuntimeError("GitHub account identity response was malformed")
         return ControllerIdentity(canonical, account_id=account_id)
+
+    @contextmanager
+    def controller_authority_scope(self, repo_name: str, author_set: "ControllerAuthorSet") -> Iterator[None]:
+        """Pin operational authority and bind each native send to its checked token.
+
+        The request may have been assembled before a token refresh. At the wire
+        boundary, prove the currently selected token, compare the pinned author
+        association, and bind that exact token to the request. Nothing reselects
+        credentials after the check. Dedicated reviewer-App traffic is separate.
+        """
+        from ..controller_identity_history import ControllerHistoryCache, ControllerIdentityHistoryError, controller_author_set_for_client
+
+        prepared: _ControllerCredentialSnapshot | None = None
+
+        def relevant(context: GitHubRequestContext) -> bool:
+            return context.subsystem in ("ghapi", "controller-strict")
+
+        def prepare_authority(request: httpx.Request, context: GitHubRequestContext) -> None:
+            nonlocal prepared
+            if not relevant(context):
+                return
+            cache = getattr(self, "_controller_history_cache", None)
+            if not isinstance(cache, ControllerHistoryCache):
+                cache = ControllerHistoryCache()
+                self._controller_history_cache = cache
+            selected_token = self.token
+            current = controller_author_set_for_client(_ControllerCredentialSnapshot(self, selected_token, cache), repo_name)
+            if current.fingerprint != author_set.fingerprint:
+                raise ControllerIdentityHistoryError("Controller identity or history changed before dispatch")
+            if self.token != selected_token:
+                raise ControllerIdentityHistoryError("Controller credential selection changed during authority proof")
+            # A private successful-resolution copy makes final revalidation
+            # local-only, without taking a peer's lock while holding admission.
+            with cache.lock:
+                local_cache = ControllerHistoryCache(cache.declaration_key, cache.prior)
+            prepared = _ControllerCredentialSnapshot(self, selected_token, local_cache, current.current, True)
+
+        def bind_authority(request: httpx.Request, context: GitHubRequestContext) -> None:
+            if not relevant(context):
+                return
+            if context.api_origin != author_set.api_origin or (context.repository is not None and context.repository.casefold() != repo_name.casefold()):
+                raise ControllerIdentityHistoryError("Controller operation target changed before dispatch")
+            if prepared is None:
+                raise ControllerIdentityHistoryError("Controller operation credential proof is unavailable")
+            if self.token != prepared.token:
+                raise GitHubMutationAuthorityRetry("Controller credential changed while waiting for dispatch")
+            current = controller_author_set_for_client(prepared, repo_name)
+            if current.fingerprint != author_set.fingerprint:
+                raise ControllerIdentityHistoryError("Controller identity or history changed before dispatch")
+            if self.token != prepared.token:
+                raise GitHubMutationAuthorityRetry("Controller credential changed during dispatch validation")
+            request.headers["Authorization"] = f"Bearer {prepared.token}"
+
+        with guard_github_mutations(prepare_authority, bind_authority):
+            yield
 
     def _get_pr_review_threads(self, repo_name: str, pr_number: int) -> List[ReviewThread]:
         """Fetch all review-thread pages and let callers decide error handling."""
@@ -2942,8 +3044,43 @@ class GitHubClient:
         return self.get_issue_comments(repo_name, pr_number)
 
     def get_pr_comments_strict(self, repo_name: str, pr_number: int) -> List[Dict[str, Any]]:
-        """Get PR conversation comments while preserving REST lookup failures."""
-        return self.get_issue_comments_strict(repo_name, pr_number)
+        """Read every native conversation page without cached or partial results."""
+        owner, repo = repo_name.split("/")
+        url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
+        headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json", "Cache-Control": "no-cache"}
+        result: list[dict] = []
+        observed_ids: set[int] = set()
+        for page in range(1, COMMENTS_MAX_PAGES + 1):
+            response = _strict_request("GET", url, headers=headers, params={"per_page": 100, "page": page}, follow_redirects=False, timeout=30)
+            response.raise_for_status()
+            try:
+                comments = response.json()
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise RuntimeError("Native PR conversation response was not valid JSON") from exc
+            if not isinstance(comments, list) or len(comments) > 100:
+                raise RuntimeError("Native PR conversation page is malformed")
+            for comment in comments:
+                if not isinstance(comment, dict):
+                    raise RuntimeError("Native PR conversation contains a malformed comment")
+                comment_id, body, user = comment.get("id"), comment.get("body"), comment.get("user")
+                if type(comment_id) is not int or comment_id <= 0 or not isinstance(body, str) or comment_id in observed_ids:
+                    raise RuntimeError("Native PR conversation comment identity/body is invalid or repeated")
+                if user is not None and (not isinstance(user, dict) or type(user.get("id")) is not int or user["id"] <= 0 or not isinstance(user.get("login"), str) or not user["login"].strip()):
+                    raise RuntimeError("Native PR conversation author identity is malformed")
+                observed_ids.add(comment_id)
+                result.append({"id": comment_id, "body": body, "created_at": comment.get("created_at"), "user": {"login": user["login"], "id": user["id"]} if user is not None else None})
+            next_url = response.links.get("next", {}).get("url")
+            if next_url is not None:
+                try:
+                    target, expected = httpx.URL(next_url), httpx.URL(url)
+                    valid_next = (target.scheme, target.host, target.port, target.path) == (expected.scheme, expected.host, expected.port, expected.path) and not target.userinfo and not target.fragment and target.params.get("page") == str(page + 1) and target.params.get("per_page") == "100"
+                except (TypeError, ValueError, httpx.InvalidURL):
+                    valid_next = False
+                if not valid_next or not comments:
+                    raise RuntimeError("Native PR conversation pagination is incomplete or invalid")
+            elif len(comments) < 100:
+                return result
+        raise RuntimeError(f"Native PR conversation is incomplete after {COMMENTS_MAX_PAGES} pages")
 
     def get_issue_comments_strict(self, repo_name: str, issue_number: int) -> List[Dict[str, Any]]:
         """Get Issue comments freshly while preserving REST lookup failures."""

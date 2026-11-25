@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Protocol
 
+from .controller_identity_history import assert_active_controller_authority
 from .pr_repair import ExistingPrRepairTarget
 from .runtime_locks import file_lock
 
@@ -124,6 +125,9 @@ class NoCommitRecovery:
         # flight. Merge only this guarded target, preserving their latest rows.
         with review_repair_state_lock(self.path):
             current = self._records()
+            settles_acceptance = bool(accepted_identities) or any(value.pr_number == pr_number and value.status == "accepted" and current.get(key) != value for key, value in records.items())
+            if settles_acceptance:
+                assert_active_controller_authority()
             current.update({key: value for key, value in records.items() if value.pr_number == pr_number})
             document = self._document()
             document["no_commit_series"] = {key: asdict(value) for key, value in current.items()}
@@ -142,6 +146,10 @@ class NoCommitRecovery:
                 json.dump(document, output, indent=2, sort_keys=True)
                 output.flush()
                 os.fsync(output.fileno())
+            if settles_acceptance:
+                # This writer also promotes shared feedback receipts. Preserve
+                # the accepted observation if authority changed during I/O.
+                assert_active_controller_authority()
             os.replace(temporary, self.path)
 
     @staticmethod

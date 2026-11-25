@@ -27,6 +27,7 @@ from .canonical_pr_blocker_ledger import (
     StaleLedgerRevisionError,
     UnknownBlockerReferenceError,
 )
+from .controller_identity_history import ControllerAuthorSet, ControllerIdentityHistoryError, assert_controller_authority, controller_authority_scope
 from .logger_config import get_logger
 from .review_thread_closure_receipt import ClosureReceipt, closure_receipt_lock, observe_closure_receipt, put_receipt
 from .review_thread_validation import (
@@ -510,7 +511,7 @@ def execute_durable_thread_closures(
 ) -> ClosureExecutionResult:
     """Serialize receipt observation and effects across all local PR callers."""
     try:
-        with closure_receipt_lock(repo_name, pr_number, api_origin=api_origin):
+        with closure_receipt_lock(repo_name, pr_number, api_origin=api_origin), controller_authority_scope(github_client, repo_name) as author_set:
             return _execute_durable_thread_closures(
                 github_client,
                 repo_name,
@@ -522,13 +523,14 @@ def execute_durable_thread_closures(
                 stale_registry=stale_registry,
                 expected_ledger_revision=expected_ledger_revision,
                 claimed_threads=claimed_threads,
+                author_set=author_set,
             )
-    except (LockAcquisitionTimeout, OSError) as exc:
+    except (LockAcquisitionTimeout, OSError, ControllerIdentityHistoryError) as exc:
         selected_ids = tuple(dict.fromkeys(e.thread_id for e in evaluations if e.thread_id))
         logger.warning(f"Closure receipt processing deferred for {repo_name}#{pr_number}: {exc}")
         return ClosureExecutionResult(
             unresolved_thread_ids=selected_ids,
-            errors=tuple(f"{thread_id}|receipt-lock|{exc}" for thread_id in selected_ids),
+            errors=tuple(f"{thread_id}|{'controller-authority' if isinstance(exc, ControllerIdentityHistoryError) else 'receipt-lock'}|{exc}" for thread_id in selected_ids),
         )
 
 
@@ -573,6 +575,7 @@ def _execute_durable_thread_closures(
     stale_registry: Optional[StaleReviewThreadRegistry] = None,
     expected_ledger_revision: Optional[int] = None,
     claimed_threads: Sequence[ClaimedReviewThread] = (),
+    author_set: ControllerAuthorSet,
 ) -> ClosureExecutionResult:
     """Persist accepted closures to the ledger and resolve eligible review threads.
 
@@ -589,7 +592,7 @@ def _execute_durable_thread_closures(
     norm_origin = normalize_api_origin(api_origin)
     rollback_registry = stale_registry or StaleReviewThreadRegistry()
 
-    def _discussion_digest(observation: Any, authenticated_controller_login: str) -> str:
+    def _discussion_digest(observation: Any, authenticated_controller_login: str | ControllerAuthorSet) -> str:
         from .review_thread_validation import substantive_discussion_digest
 
         return substantive_discussion_digest(observation.thread, authenticated_controller_login)
@@ -599,7 +602,7 @@ def _execute_durable_thread_closures(
         if not claimed_thread.discussion_evidence_digest:
             return None
         try:
-            substantive = _discussion_digest(observation, observation.authenticated_login)
+            substantive = _discussion_digest(observation, author_set)
             complete = _discussion_digest(observation, "")
             if claimed_thread.discussion_evidence_digest in (substantive, complete):
                 return substantive
@@ -733,6 +736,7 @@ def _execute_durable_thread_closures(
                 continue
 
             try:
+                assert_controller_authority(github_client, repo_name, author_set)
                 current_snapshot = ledger.record_transition(
                     api_origin=norm_origin,
                     repository=repo_name,
@@ -877,12 +881,12 @@ def _execute_durable_thread_closures(
         same_head_confirmed = False
         if receipt is not None and receipt.phase == "RESOLVED" and receipt.validated_head_sha == validated_head_sha:
             try:
-                same_head_confirmed = _discussion_digest(observation, observation.authenticated_login) == validated_discussion_digests.get(thread_id)
+                same_head_confirmed = _discussion_digest(observation, author_set) == validated_discussion_digests.get(thread_id)
             except Exception:
                 same_head_confirmed = False
         if (same_operation or same_head_confirmed) and observation.thread.is_resolved and receipt is not None and receipt.phase in ("PENDING", "RESOLVED"):
             try:
-                discussion_is_current = _discussion_digest(observation, observation.authenticated_login) == validated_discussion_digests.get(thread_id)
+                discussion_is_current = _discussion_digest(observation, author_set) == validated_discussion_digests.get(thread_id)
             except Exception:
                 discussion_is_current = False
             if not discussion_is_current:
@@ -904,6 +908,7 @@ def _execute_durable_thread_closures(
                     put_receipt(github_client, observation, replace(receipt, phase="RESOLVED"))
                 except Exception as exc:
                     errors.append(f"{thread_id}|marker-cleanup|{exc}")
+            assert_controller_authority(github_client, repo_name, author_set)
             resolved_thread_ids.append(thread_id)
             continue
 
@@ -919,7 +924,7 @@ def _execute_durable_thread_closures(
         observed_discussion_digest: Optional[str] = None
         expected_discussion_digest = validated_discussion_digests.get(thread_id)
         try:
-            observed_discussion_digest = _discussion_digest(observation, observation.authenticated_login)
+            observed_discussion_digest = _discussion_digest(observation, author_set)
             discussion_is_current = observed_discussion_digest == expected_discussion_digest
         except Exception as exc:
             logger.error(f"Could not verify discussion evidence for thread {thread_id}: {exc}")
@@ -977,7 +982,9 @@ def _execute_durable_thread_closures(
 
         # Resolve mutation
         try:
+            assert_controller_authority(github_client, repo_name, author_set)
             github_client.resolve_review_thread(thread_id)
+            assert_controller_authority(github_client, repo_name, author_set)
         except Exception as exc:
             logger.error(f"Failed to resolve review thread {thread_id}: {exc}")
             errors.append(f"{thread_id}|resolve-confirmation|Resolve delivery or confirmation failed: {exc}")
@@ -1000,7 +1007,9 @@ def _execute_durable_thread_closures(
             last_exc: Optional[Exception] = None
             for attempt in range(1, UNRESOLVE_ROLLBACK_MAX_ATTEMPTS + 1):
                 try:
+                    assert_controller_authority(github_client, repo_name, author_set)
                     github_client.unresolve_review_thread(thread_id)
+                    assert_controller_authority(github_client, repo_name, author_set)
                     last_exc = None
                     break
                 except Exception as exc:
@@ -1027,6 +1036,7 @@ def _execute_durable_thread_closures(
                         pass
                 else:
                     try:
+                        assert_controller_authority(github_client, repo_name, author_set)
                         rollback_registry.clear(repo_name, thread_id)
                     except Exception:
                         pass
@@ -1047,9 +1057,11 @@ def _execute_durable_thread_closures(
                 logger.error(f"Resolved thread {thread_id} but failed to complete its receipt: {exc}")
                 errors.append(f"{thread_id}|marker-cleanup|{exc}")
 
+        assert_controller_authority(github_client, repo_name, author_set)
         resolved_thread_ids.append(thread_id)
 
     selected_ids = tuple(dict.fromkeys(e.thread_id for e in evaluations if e.thread_id))
+    assert_controller_authority(github_client, repo_name, author_set)
     return ClosureExecutionResult(
         accepted_closures=tuple(persisted_evaluations),
         resolved_thread_ids=tuple(resolved_thread_ids),

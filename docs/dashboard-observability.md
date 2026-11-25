@@ -665,6 +665,30 @@ route changes are needed.
 in the same test module drives restart recovery of the cross-store disagreement
 through PR processing and confirms convergence without a duplicate ordinary
 review or merge.
+Historical controller migration (issue #2875) keeps the existing processing
+origins and stage schemas. Unavailable account/history evidence and incomplete
+native PR conversation reads return the existing deferred/blocked repair results;
+no `Cloud Review Repair` or `Cloud Task Adversarial Feedback` success is emitted
+for an unconfirmed settlement. Accepted-but-unsettled feedback is retained in the
+existing review-repair JSON as `observed_feedback`, allowing later reconciliation
+without a second provider send. Closure failures retain the original reply and
+rollback obligation, and use the existing `pr.review-thread-closure` unfinished
+reason. The detail view already displays these action/stage reasons, so no renderer
+or event-schema migration is required. Run `bash scripts/test.sh
+tests/test_controller_feedback_history.py tests/test_review_thread_closure_receipt.py
+tests/test_pr_review_effects.py` for native consumer recovery, post-acceptance
+settlement refusal and duplicate-suppression evidence; the feedback tests assert
+that the existing success traces are absent while authority is unavailable.
+At the native GitHub boundary, refused authority uses the existing `REFUSED` /
+`DEFINITELY_NOT_SENT` request outcome with diagnostic
+`controller_authority_refused`. The governor releases only that request's owned
+reservation, using the existing `released` decision and `definitely_not_sent`
+reason; it records no mutation completion or rate-budget consumption. Native
+barrier and real single-slot governor regressions are
+`tests/test_controller_authority_transport.py` and
+`tests/test_github_authority_governor.py`. These preserve the same diagnostic
+schema and dashboard projection.
+
 Issue #2260 adds `pr.review-thread-closure` to the existing PR stage timeline.
 Blocked events expose `confirmed_count`, `unfinished_count`, and an `unfinished`
 array whose entries contain the exact thread ID, failed or unconfirmed phase,

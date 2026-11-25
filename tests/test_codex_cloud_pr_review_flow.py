@@ -41,6 +41,8 @@ def durable_codex_cloud_origin():
 def _github_client(head_sha: str = "head-1", head_ref: str = "codex/review-5262") -> MagicMock:
     client = MagicMock()
     client.get_pr_comments.return_value = []
+    client.get_pr_comments_strict = client.get_pr_comments
+    client.get_authenticated_user_login.return_value = "controller"
     client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(head_ref=head_ref, head_sha=head_sha, base_ref="main")
     return client
 
@@ -265,7 +267,7 @@ def test_non_codex_pr_preserves_generic_review_gate() -> None:
 
 
 def test_single_pr_merge_entry_validates_claimed_thread_without_redelegating() -> None:
-    client = MagicMock()
+    client = _github_client()
     client.get_pull_request.return_value = {"head": {"sha": "head-1"}}
     claimed = ClaimedReviewThread(
         thread_id="PRRT_thread_1",
@@ -366,7 +368,7 @@ def test_passing_codex_pr_delegates_blocking_review_threads(
     )
     config = AutomationConfig()
     config.AUTO_MERGE = True
-    client = MagicMock()
+    client = _github_client()
 
     actions = _handle_pr_merge(client, "owner/repo", _pr_data(), config, {})
 
@@ -428,7 +430,7 @@ def test_passing_jules_pr_routes_review_repair_from_durable_origin(tmp_path) -> 
 
 def test_unresolved_repair_without_durable_owner_fails_processing_visibly() -> None:
     thread = _thread()
-    client = MagicMock()
+    client = _github_client()
     config = AutomationConfig()
     config.AUTO_MERGE = True
     status = ProcessedPRResult(pr_data=_pr_data())
@@ -485,7 +487,7 @@ def test_accepted_repair_without_any_durable_receipt_is_not_redelivered(tmp_path
         patch("auto_coder.pr_processor._record_pr_delivered_review_feedback", side_effect=RuntimeError("GitHub receipt unavailable")),
     )
 
-    with common_patches[0], common_patches[1], common_patches[2], common_patches[3], common_patches[4], common_patches[5], common_patches[6], common_patches[7], common_patches[8]:
+    with common_patches[0], common_patches[1], common_patches[2], common_patches[3], common_patches[4], common_patches[5], common_patches[6], common_patches[7], common_patches[8], patch("auto_coder.pr_processor._record_observed_review_feedback", side_effect=OSError("local disk unavailable")):
         first_status = ProcessedPRResult(pr_data=_pr_data())
         first_actions = _take_pr_actions(client, "owner/repo", _pr_data(), config, first_status)
         second_status = ProcessedPRResult(pr_data=_pr_data())
@@ -515,6 +517,7 @@ def test_new_finding_remains_deliverable_beside_indeterminate_old_finding(tmp_pa
         patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=tmp_path / "repairs.json"),
         patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=CloudTaskBinding(provider="jules", task_id="existing-jules-session")),
         patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider", return_value=provider),
+        patch("auto_coder.pr_processor._record_observed_review_feedback", side_effect=OSError("local disk unavailable")),
         patch("auto_coder.pr_processor._record_delivered_review_feedback", side_effect=OSError("local disk unavailable")),
         patch("auto_coder.pr_processor._record_pr_delivered_review_feedback", side_effect=RuntimeError("GitHub receipt unavailable")),
     ):
