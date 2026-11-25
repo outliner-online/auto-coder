@@ -39,6 +39,13 @@ the result repository remain provider runtime state and are not source results.
 
 ### No-edit (read-only) execution
 
+In a non-root Linux container, supervised OpenCode no-edit turns use the
+[direct-process completion policy](codex-direct-process-completion.md) without
+requiring writable cgroups. The launcher still enforces the private filesystem
+policy, observes the actual CLI exit, and validates the event stream. It does
+not certify termination of all descendants. Editable OpenCode turns and
+root-controlled reviews retain the existing cgroup settlement policy.
+
 A no-edit call (`_run_llm_cli(prompt, is_noedit=True)`) runs OpenCode through
 a freshly generated, randomly named agent (`autocoder-noedit-<random>`)
 defined entirely through the `OPENCODE_CONFIG_CONTENT` environment variable

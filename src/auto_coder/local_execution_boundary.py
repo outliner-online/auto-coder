@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import os
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -14,6 +15,12 @@ from typing import Generator, Optional
 from loguru import logger
 
 from .worktree_utils import LocalWorkspaceBinding
+
+
+def uses_direct_process_supervision(backend_type: str, *, editable: bool) -> bool:
+    """Select the non-root OpenCode review or existing Codex launch policy."""
+    backend = backend_type.lower()
+    return backend == "codex" or (backend == "opencode" and not editable and os.geteuid() != 0)
 
 
 class LocalBoundaryError(RuntimeError):
@@ -58,11 +65,13 @@ class LocalBoundaryEvidence:
     def lifecycle_complete(self) -> bool:
         """Use the backend-specific completion criterion without inventing facts.
 
-        Local Codex accepts direct-process completion. Descendant writer
+        Local Codex and non-root OpenCode review accept direct-process completion. Descendant writer
         settlement remains a separate, potentially unknown observation.
         """
         if self.backend_type.lower() == "codex":
             return self.direct_process_completion is EvidenceStatus.ESTABLISHED
+        if self.backend_type.lower() == "opencode" and not self.editable:
+            return self.direct_process_completion is EvidenceStatus.ESTABLISHED or self.writer_completion is EvidenceStatus.ESTABLISHED
         return self.writer_completion is EvidenceStatus.ESTABLISHED
 
     @property

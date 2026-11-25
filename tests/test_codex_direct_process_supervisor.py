@@ -67,9 +67,9 @@ def test_root_controller_rejected_before_start(tmp_path, monkeypatch):
     assert not result.direct_process_complete
 
 
-def test_opencode_still_requires_cgroup_owner(tmp_path):
+def test_editable_opencode_still_requires_cgroup_owner(tmp_path):
     request, _ = launch(tmp_path, "print(1)")
-    result = InvocationProcessSupervisor().run(replace(request, backend_type="opencode"))
+    result = InvocationProcessSupervisor().run(replace(request, backend_type="opencode", effective_mode="editable"))
     assert result.outcome is InvocationOutcome.PRESTART_UNAVAILABLE
     assert not result.direct_process_complete
 
@@ -161,3 +161,20 @@ def test_cleanup_only_denial_is_retained_in_boundary_and_diagnostics(tmp_path):
     assert "cleanup-only write denial" in result.detail
     assert boundary.evidence().policy_violation
     assert boundary.evidence().writer_completion is EvidenceStatus.UNKNOWN
+
+
+def test_nonroot_opencode_review_uses_direct_completion(tmp_path):
+    sentinel = tmp_path / "protected"
+    sentinel.write_text("original")
+    code = f"import pathlib; p=pathlib.Path({str(sentinel)!r});\ntry: p.write_text('corrupt')\nexcept PermissionError: print('DENIED', flush=True)\n"
+    request, original = launch(tmp_path, code)
+    binding = original.binding
+    boundary = LocalExecutionBoundary(binding, "opencode", editable=False)
+    result = InvocationProcessSupervisor().run(replace(request, backend_type="opencode"), boundary=boundary)
+    assert result.outcome is InvocationOutcome.SUCCEEDED, result
+    assert result.stdout.strip() == "DENIED"
+    assert sentinel.read_text() == "original"
+    assert result.direct_process_complete and not result.writer_complete
+    assert boundary.evidence().writer_completion is EvidenceStatus.UNKNOWN
+    assert boundary.evidence().confined_result_authorized
+    assert not boundary.evidence().handoff_authorized

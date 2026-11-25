@@ -30,6 +30,7 @@ from .llm_client_base import LLMClientBase
 from .local_execution_boundary import get_current_local_execution_boundary
 from .logger_config import get_logger
 from .prompt_loader import render_prompt
+from .security_utils import redact_string
 from .usage_marker_utils import has_http_429_marker, has_usage_marker_match
 from .utils import _COMMAND_EXECUTION_CWD, CommandExecutor, prepare_retained_provider_environment
 
@@ -994,8 +995,11 @@ class OpenCodeClient(LLMClientBase):
                 self._assert_git_lifecycle_preserved(before, cwd)
             if workspace_before is not None:
                 self._assert_noedit_workspace_preserved(workspace_before, cwd)
-            if result.writer_settled is False:
-                raise LocalWriterSettlementError("OpenCode writer settlement is uncertain; provider replacement is withheld")
+            if result.direct_process_complete is False or (result.direct_process_complete is None and result.writer_settled is False):
+                diagnostic = redact_string(result.stderr)[:2000] or "writer settlement is uncertain"
+                raise LocalWriterSettlementError(f"OpenCode execution safety could not be established; provider replacement is withheld: {diagnostic}")
+            if result.returncode == 0 and not result.success:
+                raise RuntimeError(f"OpenCode execution protection failed: {redact_string(result.stderr)[:2000]}")
             if "timed out" in result.stderr.lower():
                 raise AutoCoderTimeoutError(f"OpenCode CLI timed out after {self.timeout} seconds")
             return self._extract_final_answer(

@@ -782,3 +782,37 @@ def test_ac005_incompatible_case_fails_explicitly_without_stale_content_or_recre
     assert manager._last_continue_session_resumed is False
     # No worktree was recreated to satisfy the continuation.
     assert subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True).stdout == worktree_listing_before
+
+
+def test_nonroot_adversarial_review_uses_real_supervisor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, opencode_cli: str, scripted_provider, _use_real_commands) -> None:
+    """Exercise the production review route, real CLI, and actual non-root launcher."""
+    from src.auto_coder.cli_helpers import resolve_adversarial_validation_availability
+    from src.auto_coder.llm_backend_config import reset_llm_config
+
+    repo = _repository(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    (repo / "evidence.txt").write_text("SENTINEL_SUPERVISED_REVIEW_41\n")
+    _git(repo, "add", "evidence.txt")
+    _git(repo, "commit", "-m", "add review evidence")
+    before = _snapshot_tree(repo)
+    provider = scripted_provider([_read_tool_turn(Path("evidence.txt")), _echo_tool_result_turn()])
+    _write_home_config(home, provider_name="fakeprov", model_name="fake-model", base_url=provider.base_url)
+    cfg = home / "llm_config.toml"
+    cfg.write_text('[backend]\norder = ["opencode-review"]\n' '[backend_pr_adversarial_validation]\norder = ["opencode-review"]\n' '[backends.opencode-review]\nbackend_type = "opencode"\nmodel = "fakeprov/fake-model"\ntimeout = 60\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AUTO_CODER_CONFIG_PATH", str(cfg))
+    monkeypatch.setenv("AUTOCODER_OPENCODE_CLI", opencode_cli)
+    monkeypatch.setattr(OpenCodeClient, "supports_supervised_local_turn", True)
+    monkeypatch.chdir(repo)
+    reset_llm_config()
+    try:
+        manager = resolve_adversarial_validation_availability("pr", execution_cwd=str(repo)).backend_manager
+        assert manager is not None
+        answer = manager._run_llm_cli("Read evidence.txt without modifying it.", is_noedit=True)
+        assert "SENTINEL_SUPERVISED_REVIEW_41" in answer
+        assert manager.get_last_backend_and_model() == ("opencode-review", "fakeprov/fake-model")
+        assert len(provider.requests) >= 2
+        assert _snapshot_tree(repo) == before
+    finally:
+        reset_llm_config()

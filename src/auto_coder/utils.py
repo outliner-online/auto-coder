@@ -92,7 +92,9 @@ def _prepare_invocation_runtime(context: _SupervisedCommandContext, environment:
     owner = getattr(context.supervisor, "owner", None)
     uid = getattr(owner, "worker_uid", None)
     gid = getattr(owner, "worker_gid", None)
-    if context.boundary.backend_type.lower() != "codex" and uid is not None and gid is not None:
+    from .local_execution_boundary import uses_direct_process_supervision
+
+    if not uses_direct_process_supervision(context.boundary.backend_type, editable=context.boundary.editable) and uid is not None and gid is not None:
         _chown_tree(runtime, uid, gid)
     environment["HOME"] = str(home)
     environment["CODEX_HOME"] = str(home / ".codex")
@@ -920,7 +922,9 @@ class CommandExecutor:
             owner = getattr(supervised.supervisor, "owner", None)
             worker_uid = getattr(owner, "worker_uid", None)
             worker_gid = getattr(owner, "worker_gid", None)
-            direct_mode = boundary.backend_type.lower() == "codex"
+            from .local_execution_boundary import uses_direct_process_supervision
+
+            direct_mode = uses_direct_process_supervision(boundary.backend_type, editable=boundary.editable)
             if direct_mode:
                 worker_uid, worker_gid = os.geteuid(), os.getegid()
             private_runtime: Optional[Path] = None

@@ -6,7 +6,11 @@ For Codex, references below to mandatory cgroup/root-controller setup and
 all-descendant settlement are superseded by non-root launch and direct-process
 completion with descendant termination explicitly unproven. Filesystem/no-edit,
 invocation identity, and independent continuation authorization remain required.
-OpenCode and other backends retain their existing completion policy.
+Non-root OpenCode no-edit turns also use direct-process completion without a
+writable cgroup or worker identity switch. Their existing no-edit agent,
+filesystem policy, and result validation remain mandatory. Editable and
+root-controlled OpenCode turns and other backends retain their existing
+completion policies.
 
 The invocation process supervisor always installs `LandlockFilesystemPolicy` before
 it releases a provider executable; an explicit policy set that does not establish
