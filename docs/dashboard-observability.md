@@ -3603,9 +3603,15 @@ drives the real PR gate, delegate, trace collector and public event projection
 over controlled GitHub/provider I/O. It checks ordinary same-author replies,
 addressed claims (including contradictory guidance), third-party reviews,
 adjudication envelopes, confirmed/pending native identities, fixed public facts,
-unchanged receipt bytes and zero sends/mutations for waits. Fresh third-party
-feedback remains a positive one-send control. This is controlled integration
-evidence, not a claim of live recovery or private retained-store diagnostics.
+unchanged receipt bytes and zero sends/mutations for waits. This receipt-only
+fixture explicitly disables independent validation and asserts that it is not
+invoked; newly admitted validation can legitimately persist a separate report
+snapshot. Review-enabled first-admission behavior and its dashboard projection
+are covered by
+`tests/test_adversarial_validation_pr_flow.py::TestClaimedReviewThreadValidationFlow::test_acknowledged_mixed_reviews_admit_only_current_head_reassessment`.
+Fresh third-party feedback remains a positive one-send control. This is
+controlled integration evidence, not a claim of live recovery or private
+retained-store diagnostics.
 
 The same regression now covers an absent local receipt file with authenticated
 PR-side receipts for both the root and an excluded same-author reply whose
