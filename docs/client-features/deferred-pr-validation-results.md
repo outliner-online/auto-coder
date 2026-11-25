@@ -38,11 +38,13 @@ An unavailable current observation leaves the result pending. This includes
 parent Issue descriptions supplied as background to the original review: an
 unavailable parent lookup is not treated as an absent or changed parent. Parent
 context does not expand the child Issue's requirements, and reading legacy
-`Parent-Issue` metadata does not modify the GitHub hierarchy. A confirmed change
-to the evaluated target or input, or a newer applicable attempt, supersedes the
-pending proposal. Normal current-context admission then decides whether a new
-review can run. Corrupt or unreadable pending state cannot be
-interpreted as permission to publish or merge. Successful resumption retires
+`Parent-Issue` metadata does not modify the GitHub hierarchy. Complete prose
+comparison is required when consuming a deferred result; the existing child
+Requirement and diff snapshot checks keep their established availability rules.
+A confirmed change to the evaluated target or input, or a newer applicable
+attempt, supersedes the pending proposal. Normal current-context admission then
+decides whether a new review can run. Corrupt or unreadable pending state cannot
+be interpreted as permission to publish or merge. Successful resumption retires
 only the consumed attempt's pending record, preserving independently newer work.
 
 If the controller stops after GitHub accepts the native review but before local
@@ -75,11 +77,12 @@ PR completion. See [dashboard review history](dashboard-llm-review-history.md).
 
 Run `bash scripts/test.sh tests/test_deferred_pr_validation.py
  tests/test_deferred_pr_validation_store.py tests/test_issue_context.py
- tests/test_issue_context_strict.py` for the controller flow, durable store and
-complete current-context boundaries. The joined regression observes a real
-normalized reviewer result, refuses its first HEAD confirmation, reconstructs
-state, and verifies
-same-attempt consumption with one model call and no effects during the wait.
+ tests/test_issue_context_strict.py
+ tests/test_adversarial_validator.py::TestBuildAdversarialValidationContext` for
+the controller flow, durable store and complete current-context boundaries.
+The joined regression observes a real normalized reviewer result, refuses its
+first HEAD confirmation, reconstructs state, and verifies same-attempt
+consumption with one model call and no effects during the wait.
 Changed-input and unavailable-input cases check rejection and continued waiting;
 the Decision Log regression checks the facts emitted by production processing.
 Strict parent-context regressions distinguish unavailable retrieval from

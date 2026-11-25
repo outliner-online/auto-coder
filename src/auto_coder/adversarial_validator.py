@@ -1283,6 +1283,7 @@ def build_adversarial_validation_context(
     config: AutomationConfig,
     github_client: Optional[Any] = None,
     bypass_cache: bool = False,
+    strict_issue_context: bool = False,
 ) -> AdversarialValidationContext:
     """Compile issue specification, PR diff, and changed tests for validation.
 
@@ -1299,6 +1300,9 @@ def build_adversarial_validation_context(
             changed-file listing, and linked Issue body instead of the
             ordinary cached lookups. Use only to reconfirm a validation
             snapshot is still current; the general path stays cached.
+        strict_issue_context: Require complete linked and parent Issue prose
+            when comparing a deferred review's actual inputs. Ordinary snapshot
+            checks retain their child Requirement and diff availability rules.
 
     Returns:
         AdversarialValidationContext populated with review data
@@ -1400,7 +1404,7 @@ def build_adversarial_validation_context(
 
     # Extract linked issues context (from body, title, branch name, session)
     resolution = resolve_issue_oracles(client, repo_name, pr_data=pr_data, pr_body=pr_body, bypass_cache=bypass_cache)
-    issue_context = get_linked_issues_context(client, repo_name, pr_body=pr_body, pr_data=pr_data, resolution=resolution, strict=bypass_cache)
+    issue_context = get_linked_issues_context(client, repo_name, pr_body=pr_body, pr_data=pr_data, resolution=resolution, strict=strict_issue_context)
     manifest = build_issue_requirement_manifest(resolution)
     if not bypass_cache:
         # A cache-bypassing call only reconfirms a snapshot; the first construction is what the reviewer consumes.

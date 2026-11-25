@@ -6411,7 +6411,7 @@ def _deferred_validation_inputs_current(pending: DeferredPRValidation, pr_data: 
     live = _strict_pull_request_target(github_client, pending.repository, pending.pr_number)
     if (str(live["head"]["sha"]), str(live["base"]["sha"])) != (pending.head_sha, pending.base_sha):
         return False
-    current = build_adversarial_validation_context(pending.repository, live, config, github_client, bypass_cache=True)
+    current = build_adversarial_validation_context(pending.repository, live, config, github_client, bypass_cache=True, strict_issue_context=True)
     if current.evidence_retrieval_error or current.requirement_manifest_error or not current.pr_diff or not current.issue_context:
         raise RuntimeError("Current validation evidence could not be completely observed")
     return current.validation_snapshot == pending.validation_snapshot and validation_input_identity(current) == pending.input_snapshot
