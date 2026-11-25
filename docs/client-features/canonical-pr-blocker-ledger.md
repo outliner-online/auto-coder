@@ -66,6 +66,20 @@ same implementation owner, so presentation cannot create another repair allowanc
 Existing duplicate owners are never deleted, merged, closed or budget-reset by
 this mapping.
 
+External GitHub review roots retained as raw prose have an
+`external_review_comment` provenance alias and no qualified requirement records.
+Their thread-level tracking boundary is not a registered implementation
+correction scope. The ordinary review context retains these records in
+`external_review_context`, including the original source text and tracking
+identity, but does not export an executable canonical correction reference for
+them. The ledger, open blocker disposition, and claimed-addressed thread scope
+remain unchanged. Once current evidence establishes a correction without a
+matching supplied reference, the reviewer uses a new observation label and the
+current manifest's qualified requirements and production boundary. Normal
+reconciliation still decides ownership; source context grants no closure or
+repair allowance authority. Registered ordinary correction references retain
+strict scope and invocation authentication.
+
 An unknown canonical reference, a duplicated reference in the controller context,
 or a contradictory binding invalidates the ordinary review response before any
 thread closure or finding reconciliation. The result
