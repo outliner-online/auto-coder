@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -54,6 +56,32 @@ def test_app_reservation_atomically_binds_sender_and_refuses_changed_principal(t
     refused = reopened.reserve_app_attempt(identity, EffectName.MERGE, _binding(installation_id=23), now=5)
     assert refused.refusal is ReservationRefusal.PRINCIPAL_MISMATCH
     assert reopened.get(identity).effect(EffectName.MERGE).attempt_id == reserved.attempt_id
+
+
+@pytest.mark.parametrize("contender", [_binding(), _binding(installation_id=23)])
+def test_concurrent_app_reservations_have_one_durable_owner(tmp_path, contender):
+    """A contested reservation has one winner without binding overwrite."""
+    path = tmp_path / "merge.db"
+    identity = _identity()
+    first_store = MergeOperationStore(path)
+    second_store = MergeOperationStore(path)
+    first_store.get_or_create(identity, expected_head_sha="H", merge_method="squash", approval_credential_role="bot", reviewer_identity="r", needs_approval=False, now=1)
+    barrier = threading.Barrier(2)
+
+    def reserve(store, binding):
+        barrier.wait()
+        return store.reserve_app_attempt(identity, EffectName.MERGE, binding, now=2)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(reserve, first_store, _binding())
+        second_future = pool.submit(reserve, second_store, contender)
+        results = (first_future.result(), second_future.result())
+
+    assert sum(result.granted for result in results) == 1
+    winner = next(result for result in results if result.granted)
+    durable = MergeOperationStore(path).get(identity).effect(EffectName.MERGE)
+    assert durable.attempt_id == winner.attempt_id
+    assert durable.sender_binding == winner.operation.effect(EffectName.MERGE).sender_binding
 
 
 def test_bound_unsent_attempt_continues_only_with_same_principal_after_restart(tmp_path):
