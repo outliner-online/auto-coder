@@ -174,12 +174,17 @@ It retrieves issues and error-related PRs from GitHub to build and fix the appli
   LLMs must not post comments on PRs. During implementation, local LLM backends may
   inspect and edit the working tree and run tests, but must not change branches/HEAD,
   stage, commit, push, merge, rebase, or mutate GitHub lifecycle state. Auto-Coder owns
-  those operations through its centralized helpers. During review or validation,
-  backends operate strictly in read-only mode without mutating the working tree or
-  repository state.
-  No review or comment text output is allowed.
-  On success, output only a single line beginning with `ACTION_SUMMARY:`.
-  If the issue cannot be fixed, output `CANNOT_FIX`.
+  those operations through its centralized helpers. Controller-designated ordinary
+  PR adversarial reviews and Strong Audit may also edit source/tests and run focused
+  verification in their private workspace. Retain only intended corrections and
+  keep disposable output under `.agent-tmp/` or repository-ignored locations.
+  The controller publishes reviewer corrections to the existing PR; their original
+  verdict cannot approve the changed candidate, which requires independent review
+  and CI. Issue/specification review and explicitly no-edit verification remain
+  read-only. Reviewers return the structured response required by their review
+  prompt, without posting comments or claiming publication/merge authority.
+  Implementation success outputs only a single line beginning with `ACTION_SUMMARY:`;
+  if the issue cannot be fixed, output `CANNOT_FIX`.
 * **TEST_SCRIPT_PATH (`scripts/test.sh`) Policy:**
   * The `scripts/test.sh` used during execution is the one in the *target repository*. Optimizing the one in this repository has no effect.
   * Automated routines (`run_local_tests`, `run_pr_tests`, etc.) must never call `pytest` directly—they must always invoke `$TEST_SCRIPT_PATH`.

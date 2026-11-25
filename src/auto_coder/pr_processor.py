@@ -73,6 +73,7 @@ from .codex_pr_attribution import AttributionDisposition, CodexPrAttributionRepo
 from .conflict_resolver import ConflictPublicationDisposition, _get_merge_conflict_info, resolve_merge_conflicts_with_llm, resolve_pr_merge_conflicts
 from .deferred_pr_validation import DeferredPRValidation, DeferredPRValidationStateError, DeferredPRValidationStore, deferred_validation_policy_identity
 from .dispatch_claim_store import DispatchIdentity, DispatchOutcome, get_dispatch_claim_store
+from .editable_review import ReviewChangesProduced, assert_review_workspace_unchanged, bind_editable_review, capture_review_workspace, publish_review_changes, resume_pending_review_publication
 from .effective_decision_application import (
     HANDOFF_DISPATCHED,
     HANDOFF_PENDING,
@@ -117,13 +118,14 @@ from .github_app_reviewer import ExactReviewComment, GitHubAppReviewer, Reviewer
 from .github_pending_work import WorkIdentity, get_pending_work_store
 from .github_request_governor import GitHubRequestDeferred
 from .implementation_slots import ImplementationOwner, ImplementationSlotRepository
-from .invocation_admission import bind_ci_repair_designation, bind_invocation_target
+from .invocation_admission import bind_ci_repair_designation, bind_invocation_target, bind_pr_review_designation
 from .issue_context import extract_linked_issues_from_pr_body, get_linked_issues_context, resolve_issue_oracles, validate_issue_references
 from .issue_stage_routing import IMPLEMENTATION_STAGE, ImplementationRetryRequest, IssueStageRoutingStore
 from .label_manager import LabelManager, LabelOperationError, filter_legacy_auto_coder_label
 from .llm_backend_config import get_pr_review_allowlist_from_config, get_review_adjudicator_allowlist_from_config
 from .local_ci_repair_execution import CorrectionPorts, LocalCIRepairPorts, LocalCIRepairRequest, LocalCIRepairResult, execute_correction, execute_local_ci_repair
 from .local_job_handoff import LocalJobKind, LocalJobRecord, LocalJobState, LocalJobStore
+from .local_review_repair import LocalReviewRepairOutcome
 from .logger_config import get_gh_logger, get_logger
 from .ordinary_closure_evidence import ApplicationStatus, ClosureEvidenceRecord, EvidenceState, ObservedTarget, restore_ordinary_result
 from .ordinary_correction_references import build_correction_reference_context
@@ -331,6 +333,8 @@ class TwoTierGateInputs:
     policy: StrongPolicyIdentity
     head_sha: str
     base_sha: str
+    head_repository: str = ""
+    head_ref: str = ""
 
 
 def _numbered_requirements(body: str) -> List[str]:
@@ -390,7 +394,8 @@ def _two_tier_gate_inputs(
     base_sha = str((pr_data.get("base") or {}).get("sha") or "")
     if not head_sha or not base_sha:
         raise RuntimeError("PR head/base identity is unavailable for required strong audit")
-    return TwoTierGateInputs(TwoTierPrGate(repo_name), contract, policy, head_sha, base_sha)
+    head = pr_data.get("head") or {}
+    return TwoTierGateInputs(TwoTierPrGate(repo_name), contract, policy, head_sha, base_sha, str((head.get("repo") or {}).get("full_name") or ""), str(head.get("ref") or ""))
 
 
 def _ensure_review_base_commit(worktree: str, base_sha: str) -> None:
@@ -420,6 +425,7 @@ def _execute_pending_strong_audit(
     expected_version: Optional[int] = None,
     current_target: Optional[Callable[[], Tuple[TwoTierGateInputs, str]]] = None,
     expected_lifecycle_token: str = "",
+    publication_authority: Optional[Callable[[str, str], bool]] = None,
 ) -> Tuple[bool, str]:
     """Claim, execute, and durably accept one production strong-audit round."""
     expected_identity = (
@@ -520,11 +526,31 @@ def _execute_pending_strong_audit(
                 base_sha=inputs.base_sha,
                 contract=inputs.contract,
                 policy=inputs.policy,
-                repository_evidence="Pinned read-only snapshot. Tracked paths:\n" + tracked.stdout,
+                repository_evidence="Pinned initial source snapshot. Tracked paths:\n" + tracked.stdout,
                 correction_scope_context=review_context(repo_name, pr_number),
                 diff_evidence=diff.stdout,
+                repository=repo_name,
+                pr_number=pr_number,
             )
-            result = execute_review(review_input, availability.backend_manager, worktree)
+            source_snapshot = capture_review_workspace(worktree, inputs.head_sha)
+            try:
+                with bind_editable_review(source_snapshot), bind_pr_review_designation():
+                    result = execute_review(review_input, availability.backend_manager, worktree)
+                    assert_review_workspace_unchanged()
+            except ReviewChangesProduced:
+                ReviewerSessionRegistry().invalidate_transport_for_pr(repo_name, pr_number)
+                correction = publish_review_changes(
+                    source_snapshot,
+                    repository=repo_name,
+                    pr_number=pr_number,
+                    head_repository=inputs.head_repository,
+                    head_ref=inputs.head_ref,
+                    review_identity=f"strong:{claim.claim_id}",
+                    authority_check=lambda sha, ref: publication_authority is not None and observe_current_target() and publication_authority(sha, ref),
+                )
+                reason = f"Strong reviewer produced source changes: {correction.reason}; fresh independent review and CI are required"
+                inputs.gate.state.abandon_claim(pr_number, claim.claim_id, reason)
+                return False, reason
         if not result.is_complete or result.verdict not in {VERDICT_PASS, VERDICT_FINDINGS}:
             reason = result.diagnostic or f"strong reviewer returned {result.verdict}"
             inputs.gate.state.abandon_claim(pr_number, claim.claim_id, reason)
@@ -628,7 +654,7 @@ def _capture_ordinary_closure_input(repo_name: str, pr_number: int, inputs: TwoT
             base_sha=inputs.base_sha,
             contract=inputs.contract,
             policy=inputs.policy,
-            repository_evidence="Pinned read-only snapshot. Tracked paths:\n" + tracked.stdout,
+            repository_evidence="Pinned initial source snapshot. Tracked paths:\n" + tracked.stdout,
             diff_evidence=cumulative_diff,
             repository=repo_name,
             pr_number=pr_number,
@@ -674,6 +700,13 @@ def _strict_pull_request_target(github_client: Any, repo_name: str, pr_number: i
     if metadata.get("state") != "open":
         raise RuntimeError(f"PR #{pr_number} is no longer open")
     return metadata
+
+
+def _review_publication_authorized(github_client: Any, repo_name: str, pr_number: int, expected_head: str, expected_ref: str) -> bool:
+    """Read the open PR's exact destination before publishing a reviewer edit."""
+    live = _strict_pull_request_target(github_client, repo_name, pr_number)
+    head = live["head"]
+    return bool(expected_ref) and (head.get("sha"), head.get("ref"), (head.get("repo") or {}).get("full_name")) == (expected_head, expected_ref, repo_name)
 
 
 def _pr_open_incarnation_token(github_client: Any, repo_name: str, pr_number: int, metadata: Dict[str, Any]) -> str:
@@ -5745,6 +5778,46 @@ def _record_review_wait(
         processing_status.outcome = PRProcessingOutcome.DEFERRED
 
 
+def _record_reviewer_correction(
+    repo_name: str,
+    pr_number: int,
+    head_sha: str,
+    actions: List[str],
+    processing_status: Optional[ProcessedPRResult],
+    correction: LocalReviewRepairOutcome,
+    *,
+    resumed: bool = False,
+) -> None:
+    """Expose a source candidate as pending independent validation, never PASS."""
+    reason = f"{correction.reason}; fresh independent review and CI are required"
+    retry_at = time.time() + 60.0
+    actions.append(f"Reviewer source changes for PR #{pr_number}: {reason}")
+    if isinstance(actions, PRActionList):
+        actions.retry_not_before = retry_at
+    disposition = ReviewDisposition.CORRECTIVE_HANDOFF if correction.published else ReviewDisposition.RECONCILIATION_WAIT
+    if isinstance(actions, PRReviewCoordinationResult):
+        actions.record_disposition(disposition)
+    _record_pr_stage(
+        pr_number,
+        "pr.adversarial-validation",
+        f"pr#{pr_number} adversarial validation",
+        Outcome.DEFERRED,
+        {
+            "effect": "reviewer-publication-resumed" if resumed else "reviewer-source-changes",
+            "examined_head": head_sha,
+            "local_phase": correction.phase,
+            "published": correction.published,
+            "reason": reason,
+            "review_disposition": disposition.value,
+            "retry_not_before": retry_at,
+        },
+    )
+    if processing_status is not None:
+        processing_status.error = None
+        processing_status.outcome = PRProcessingOutcome.DEFERRED
+        processing_status.retry_not_before = retry_at
+
+
 def _compose_actionable_feedback(
     github_client: Any,
     repo_name: str,
@@ -6532,6 +6605,23 @@ def _coordinate_pr_review(
     labels = pr_data.get("labels", [])
     if any((isinstance(label, dict) and label.get("name") == "disable-auto-merge") or (isinstance(label, str) and label == "disable-auto-merge") for label in labels):
         actions.append(f"Skipping merge for PR #{pr_number} due to 'disable-auto-merge' label")
+        return actions
+
+    # A completed reviewer correction owns its retained commit until its push
+    # is reconciled. Resume that publication before any saved-PASS shortcut or
+    # fresh model invocation, without borrowing a peer correction's record.
+    try:
+        retained_correction = resume_pending_review_publication(
+            repository=repo_name,
+            pr_number=pr_number,
+            root=lambda: _pr_validation_repository_cwd(repo_name),
+            authority_check=lambda sha, ref: _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
+        )
+    except Exception as exc:
+        _record_review_wait(repo_name, pr_number, scope.head_sha, actions, processing_status, f"reviewer publication recovery unavailable: {exc}")
+        return actions
+    if retained_correction is not None:
+        _record_reviewer_correction(repo_name, pr_number, scope.head_sha, actions, processing_status, retained_correction, resumed=True)
         return actions
 
     # Check for unresolved review threads. A thread explicitly claimed as
@@ -7411,19 +7501,45 @@ def _coordinate_pr_review(
                                     actions.append(f"Closure context for PR #{pr_number} could not be captured: {closure_exc}; outstanding strong findings remain blocking")
                                 proposal_policy_identity = deferred_validation_policy_identity(config, thread_gate_enabled, repo_name=repo_name)
                                 proposal_context_identity = _deferred_validation_context_identity(repo_name, pr_data, ordinary_opening_token, closure_inputs)
-                                val_result = run_adversarial_validation(
-                                    repo_name,
-                                    pr_data,
-                                    config,
-                                    github_client=github_client,
-                                    claimed_review_threads_section=claimed_review_threads_section,
-                                    claimed_review_threads=claimed_review_threads,
-                                    execution_cwd=validation_worktree,
-                                    defer_session_persistence=True,
-                                    ci_status=github_checks,
-                                    refresh_ci_status=lambda: _refresh_adversarial_ci_status(repo_name, pr_data, config, github_client),
-                                    closure_input=closure_input,
-                                )
+                                source_snapshot = capture_review_workspace(validation_worktree, head_sha)
+                                try:
+                                    with bind_editable_review(source_snapshot), bind_pr_review_designation():
+                                        val_result = run_adversarial_validation(
+                                            repo_name,
+                                            pr_data,
+                                            config,
+                                            github_client=github_client,
+                                            claimed_review_threads_section=claimed_review_threads_section,
+                                            claimed_review_threads=claimed_review_threads,
+                                            execution_cwd=validation_worktree,
+                                            defer_session_persistence=True,
+                                            ci_status=github_checks,
+                                            refresh_ci_status=lambda: _refresh_adversarial_ci_status(repo_name, pr_data, config, github_client),
+                                            closure_input=closure_input,
+                                        )
+                                        assert_review_workspace_unchanged()
+                                except ReviewChangesProduced:
+                                    # No verdict, checkpoint, closure, or accepted finding
+                                    # from the editing invocation can authorize its output.
+                                    ReviewerSessionRegistry().invalidate_transport_for_pr(repo_name, pr_number)
+                                    runtime.active_attempt_status = "INCONCLUSIVE"
+                                    if active_review_id:
+                                        finish_executed_review(
+                                            active_review_id,
+                                            review_target,
+                                            AdversarialValidationResult(result="INCONCLUSIVE", summary="Reviewer produced source changes requiring independent validation", diagnostic_category="reviewer_source_changes"),
+                                        )
+                                    correction = publish_review_changes(
+                                        source_snapshot,
+                                        repository=repo_name,
+                                        pr_number=pr_number,
+                                        head_repository=str(((pr_data.get("head") or {}).get("repo") or {}).get("full_name") or ""),
+                                        head_ref=str((pr_data.get("head") or {}).get("ref") or ""),
+                                        review_identity=f"ordinary:{attempt.attempt_id}",
+                                        authority_check=lambda sha, ref: attempt_repository.latest_sequence(pr_number, head_sha) == attempt.sequence and _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
+                                    )
+                                    _record_reviewer_correction(repo_name, pr_number, head_sha, actions, processing_status, correction)
+                                    return actions
                                 fresh_ordinary_result = True
                 except Exception as e:
                     if resuming_deferred and deferred_result is not None:
@@ -8169,6 +8285,7 @@ def _coordinate_pr_review(
                         expected_version=pending_snapshot.transition_version,
                         current_target=current_strong_target,
                         expected_lifecycle_token=initial_lifecycle_token,
+                        publication_authority=lambda sha, ref: _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
                     )
                     reviewer_backend = two_tier_inputs.policy.strong_route
                     stage_id = "pr.strong-audit"

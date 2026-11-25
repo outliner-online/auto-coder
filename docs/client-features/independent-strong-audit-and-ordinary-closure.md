@@ -1,6 +1,6 @@
 # Independent strong audit and ordinary closure execution
 
-`pr_review_execution.py` provides the read-only reviewer boundary consumed by
+`pr_review_execution.py` provides the role-bound reviewer execution consumed by
 the durable two-tier PR review cycle. `STRONG_AUDIT` and `ORDINARY_CLOSURE` are
 explicit roles even if configuration maps them to the same provider and model.
 The strong role uses only `backend_strong_pr_adversarial_validation`; the
@@ -9,15 +9,24 @@ precedence. An absent, unusable, or exhausted strong route never falls through
 to an ordinary route.
 
 Every invocation is self-contained and bound to the requested head, reviewed
-base, Requirements snapshot, strong-policy identity, round, and attempt. The
-ordinary and strong prompts explicitly prohibit running test wrappers, builds,
-formatters, setup scripts, or installers that can mutate the checkout. Ordinary
-reviewers request necessary dynamic checks through their existing response
-protocol; they inspect supplied exact-head CI evidence without claiming that
-execution success alone proves semantic coverage. This guidance does not relax
-the runtime mutation audit or turn a denied execution into successful review.
-The existing prompt/render regressions cover both reviewer prompts.
-The execution checkout's HEAD is checked before and after the no-edit call. Strong
+base, Requirements snapshot, strong-policy identity, round, and attempt.
+Controller-designated ordinary PR reviewers and Strong Audit may edit source,
+add focused regressions, and run the necessary tests, builds, setup or dependency
+commands in their private workspace. They do not run an automatic unscoped
+implementation baseline or the complete repository test suite. Explicitly
+read-only callers and Issue/specification reviewers retain their no-edit
+instructions and enforcement.
+
+The execution checkout's HEAD and source-file state are checked at review
+boundaries. A changed source tree invalidates the input-head verdict even when
+HEAD itself did not move. The controller publishes retained corrections through
+the existing durable local correction publisher, then requires independent
+review and CI for the new candidate. The editing conversation cannot supply
+that independent approval. See [Editable PR reviewers](editable-pr-reviewers.md).
+Ordinary reviewers may still request focused dynamic checks through their
+existing response protocol; execution success alone never proves semantic
+Requirement coverage. The prompt/render regressions cover both permission modes.
+Strong
 audits start without prior verdicts, finding dispositions, or provider session
 memory. Ordinary closure instead receives the immutable portable finding bundle,
 its revision, current source and tests, and the complete audited-head-to-current-
@@ -77,7 +86,7 @@ to override the caller's role. Trace stages, routing, and durable result schemas
 are unchanged: they continue to use the caller-owned role.
 
 Production PR processing consumes `STRONG_PENDING` after an applicable ordinary
-PASS. It atomically claims the durable phase, creates a detached read-only
+PASS. It atomically claims the durable phase, creates a detached exact-head
 worktree at the audited head, resolves only the configured strong route, supplies
 the complete base-to-head diff and Requirements contract, and durably accepts
 the validated portable result. Unavailable, exhausted, inconclusive, failed,

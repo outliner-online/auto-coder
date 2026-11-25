@@ -16,6 +16,15 @@ invocation, including custom `backend_type = "codex"` aliases, auto-coder
 removes dangerous/YOLO flags and initially selects `--sandbox read-only`,
 `--ask-for-approval never`, and the configured safe approval reviewer override.
 
+Controller-designated ordinary PR reviews and Strong Audit now use the editable
+client options, while Issue/specification and explicit no-edit verification
+retain this no-edit policy. An explicitly capture-enabled review uses Codex's
+dedicated final-message output in either mode, so diagnostic JSONL output does
+not replace the terminal structured response. The temporary final-message file
+is removed before workspace handoff. Editable reviewer output still requires the
+source-change and independent-review handling documented in
+[Editable PR reviewers](editable-pr-reviewers.md).
+
 For a current controller-created private workspace and matching no-edit execution
 boundary, the supervised command launcher replaces that selection with
 `--sandbox danger-full-access`. Auto-Coder's mandatory Landlock/ptrace policy

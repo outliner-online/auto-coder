@@ -1,5 +1,29 @@
 # Dashboard observability verification
 
+Editable PR reviewers report source changes through the existing
+`pr.adversarial-validation` stage with `Outcome.DEFERRED`,
+`effect=reviewer-source-changes`, the original `examined_head`, `local_phase`,
+`published`, `reason`, `review_disposition`, and a bounded `retry_not_before`.
+A confirmed candidate push is `CORRECTIVE_HANDOFF`; an unconfirmed publication
+is `RECONCILIATION_WAIT`. Neither is a review PASS or merge completion. The retry
+deadline retains the worker's wake even when a failed push produced no GitHub
+head-change event. Recovery emits `effect=reviewer-publication-resumed` without
+another reviewer invocation. The existing detail evidence renderer displays
+these facts without a new event schema or dashboard-owned decision. Strong
+reviewer edits retain the existing deferred `pr.strong-audit` reason and retry
+path, without accepting that invocation's Strong result.
+
+Run `bash scripts/test.sh tests/test_editable_pr_review_flow.py` for real
+detached-workspace and bare-origin publication, interrupted reviewer/check
+refusal, pending CI followed by fresh-session review, and lost-push-response
+recovery. In particular,
+`test_review_fix_is_published_without_self_approval_then_independently_reviewed`
+and `test_accepted_push_with_lost_acknowledgement_resumes_without_another_reviewer`
+read the actual TraceCollector snapshot and assert the deferred effect facts,
+publication state, and absence of approval/merge from the editing invocation.
+`tests/test_editable_review.py` covers the durable publisher's exact-commit,
+destination, concurrent-update and interruption boundaries.
+
 PR `Worker` diagnostics distinguish admission `skipped`, processing `deferred`,
 and an error-free `evaluated` observation. A successful function return alone
 does not mean completed business effects; the evaluated row explicitly carries

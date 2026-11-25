@@ -15,7 +15,7 @@ import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -45,6 +45,7 @@ from auto_coder.adversarial_validator import AdversarialValidationContext, Issue
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.canonical_pr_blocker_ledger import BlockerDisposition, CanonicalPRBlockerLedger
 from auto_coder.cli_helpers import AdversarialValidationAvailability
+from auto_coder.editable_review import ReviewWorkspaceSnapshot
 from auto_coder.github_app_reviewer import GitHubAppReviewer, ReviewerAppConfig
 from auto_coder.pr_processor import TwoTierGateInputs, _execute_pending_strong_audit, _GitHubReviewEffectTransport, _retain_accepted_finding_roots
 from auto_coder.pr_review_cycle import FIXED, INVALID, OPEN, ContractSnapshot, FindingDisposition, PrReviewCycleRepository, RoundProvenance, StrongPolicyIdentity
@@ -61,8 +62,44 @@ POLICY = StrongPolicyIdentity("backend_strong_pr_adversarial_validation", "model
 
 
 def _commit(_worktree: Path, label: str) -> str:
-    """A distinct synthetic head; the acceptance path under test never shells out to git itself."""
+    """A distinct head in this lifecycle fixture's simulated Git transport."""
     return hashlib.sha1(label.encode()).hexdigest()
+
+
+@contextlib.contextmanager
+def _simulated_review_source(worktree: Path, head: str) -> Iterator[None]:
+    """Model unchanged source only for this fixture's empty, non-Git checkout.
+
+    These lifecycle tests control Git evidence with synthetic SHAs and never edit
+    source. Keep the production binding/guard active while supplying that existing
+    simulated source boundary. Real checkout identities and source mutations are
+    exercised by test_editable_review and test_editable_pr_review_flow.
+    """
+    from auto_coder import editable_review, pr_processor
+
+    owner_thread = threading.get_ident()
+    capture = pr_processor.capture_review_workspace
+    changed = editable_review.review_workspace_changed
+    owned_snapshots: set[int] = set()
+
+    def capture_simulated(cwd: str, expected_head: str) -> ReviewWorkspaceSnapshot:
+        root = Path(cwd).resolve()
+        if threading.get_ident() != owner_thread or root != worktree.resolve() or (root / ".git").exists():
+            return capture(cwd, expected_head)
+        assert expected_head == head, "the simulated checkout must match the admitted lifecycle head"
+        assert not any(root.iterdir()), "this lifecycle fixture must start with unchanged simulated source"
+        snapshot = ReviewWorkspaceSnapshot(root=root, head_sha=expected_head, files=(), origin_push_url=f"https://github.com/{REPO}.git")
+        owned_snapshots.add(id(snapshot))
+        return snapshot
+
+    def simulated_changed(snapshot: ReviewWorkspaceSnapshot) -> bool:
+        if threading.get_ident() != owner_thread or id(snapshot) not in owned_snapshots:
+            return changed(snapshot)
+        assert snapshot.root == worktree.resolve() and snapshot.head_sha == head
+        return any(snapshot.root.iterdir())
+
+    with patch("auto_coder.pr_processor.capture_review_workspace", side_effect=capture_simulated), patch("auto_coder.editable_review.review_workspace_changed", side_effect=simulated_changed):
+        yield
 
 
 @dataclass
@@ -154,6 +191,7 @@ def accept_strong(env: Env, pr: int, findings: list[dict[str, Any]], *, head: Op
         return next(responses)
 
     with (
+        _simulated_review_source(env.worktree, head),
         patch("auto_coder.pr_processor.isolated_pr_head_worktree", worktree),
         patch("auto_coder.cli_helpers.resolve_adversarial_validation_availability", return_value=AdversarialValidationAvailability(backend_manager=manager)),
         patch("auto_coder.pr_processor.CommandExecutor.run_command", side_effect=owner_scoped_run_command),

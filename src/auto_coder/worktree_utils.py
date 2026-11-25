@@ -582,12 +582,23 @@ def _restore_path(path: Path, state: Optional[WorkspaceFileState]) -> None:
         path.chmod(state.mode)
 
 
-def _result_file_paths(root: Path, binding: LocalWorkspaceBinding) -> set[str]:
-    """Select tracked, non-ignored source and preserved baseline paths for handoff."""
+def _source_file_paths(root: Path, preserved_paths: tuple[str, ...] = ()) -> set[str]:
+    """Select tracked and non-ignored source without new disposable outputs."""
     paths = set(_listed_paths(root, "--cached"))
     paths.update(path for path in _listed_paths(root, "--others", "--exclude-standard") if not any(part in DISPOSABLE_DIRECTORY_NAMES for part in Path(path).parts))
-    paths.update(state.relative_path for state in binding.initial_files)
+    paths.update(preserved_paths)
     return paths
+
+
+def capture_workspace_source_files(root: Union[Path, str], preserved_paths: tuple[str, ...] = ()) -> tuple[WorkspaceFileState, ...]:
+    """Capture source contents and modes with the same scope as local handoff."""
+    source = Path(root).resolve()
+    return _capture_file_states(source, _source_file_paths(source, preserved_paths))
+
+
+def _result_file_paths(root: Path, binding: LocalWorkspaceBinding) -> set[str]:
+    """Select tracked, non-ignored source and preserved baseline paths for handoff."""
+    return _source_file_paths(root, tuple(state.relative_path for state in binding.initial_files))
 
 
 def _result_has_file_delta(source: Path, binding: LocalWorkspaceBinding) -> bool:

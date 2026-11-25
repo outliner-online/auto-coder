@@ -6,7 +6,9 @@ from unittest.mock import Mock
 import pytest
 
 from auto_coder import pr_processor
+from auto_coder.editable_review import editable_review_active
 from auto_coder.github_app_reviewer import ReviewPublicationResult
+from auto_coder.invocation_admission import pr_review_designated
 from auto_coder.utils import CommandExecutor, bind_command_execution_cwd, reset_command_execution_cwd
 from tests.ci_observation_fakes import authoritative_ci_status
 from tests.test_adversarial_validation_concurrency import _git, _repositories
@@ -57,7 +59,12 @@ def scenario(tmp_path, monkeypatch, _use_real_commands, audit_store):
 
     class Reviewer(MockReviewerClient):
         def _run_llm_cli(self, prompt, is_noedit=False):
-            assert is_noedit is True
+            # Production grants edit permission only inside the source-bound
+            # review context, whose bootstrap policy skips an unscoped baseline.
+            # This scripted reviewer deliberately leaves the source unchanged.
+            assert is_noedit is False
+            assert pr_review_designated() is True
+            assert editable_review_active() is True
             root = CommandExecutor.run_command(["git", "rev-parse", "--show-toplevel"]).stdout.strip()
             assert Path(root) != repo
             assert CommandExecutor.run_command(["git", "rev-parse", "HEAD"]).stdout.strip() == head
@@ -112,6 +119,8 @@ def test_real_pr_validation_uses_selected_repository_and_ci_head(scenario, monke
     assert not seen[0].exists()
     assert before == (_snapshot(repo), _snapshot(ambient))
     assert Path.cwd() == (ambient if start == "unrelated-git" else outside)
+    assert pr_review_designated() is False
+    assert editable_review_active() is False
     publication.assert_called_once()
     merge.assert_called_once()
 
