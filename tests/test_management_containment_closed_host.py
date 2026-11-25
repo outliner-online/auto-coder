@@ -430,11 +430,34 @@ def test_every_approval_requires_all_inhibited_stock_restarter_routes(tmp_path: 
         stock.cleanup()
 
 
+def _cron_vendor_snapshot(path: Path) -> tuple[object, ...]:
+    info = path.lstat()
+    # Reading the bytes may advance atime; preserve identity and write evidence.
+    return (path.read_bytes(), info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+@pytest.mark.parametrize("changed", [None, "st_atime", "st_atime_ns", "bytes", "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"])
+def test_cron_vendor_snapshot_ignores_only_access_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str | None) -> None:
+    vendor = tmp_path / "vendor"
+    vendor.write_bytes(b"vendor one\n")
+    before = _cron_vendor_snapshot(vendor)
+    info = vendor.lstat()
+    observed = SimpleNamespace(**{name: getattr(info, name) for name in dir(info) if name.startswith("st_")})
+    if changed == "bytes":
+        vendor.write_bytes(b"vendor two\n")
+    elif changed is not None:
+        setattr(observed, changed, getattr(observed, changed) + 1)
+    original_lstat = Path.lstat
+    # Freeze other metadata to prove each field and the actual bytes independently.
+    monkeypatch.setattr(Path, "lstat", lambda path: observed if path == vendor else original_lstat(path))
+    assert (_cron_vendor_snapshot(vendor) == before) is (changed in {None, "st_atime", "st_atime_ns"})
+
+
 def test_fixed_cron_job_is_installed_once_without_modifying_vendor_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fixture, "CRON_ENTRY_ROOT", tmp_path)
     vendor = tmp_path / "vendor"
     vendor.write_bytes(b"unchanged vendor schedule\n")
-    before = vendor.lstat(), vendor.read_bytes()
+    before = _cron_vendor_snapshot(vendor)
     job = fixture.CronDispatchFixture.install("ac-test-pr2829-" + "d" * 32)
     assert job.source.read_bytes() == b"* * * * * root /usr/bin/sleep 120\n"
     assert job.source.stat().st_mode & 0o777 == 0o600
@@ -442,7 +465,7 @@ def test_fixed_cron_job_is_installed_once_without_modifying_vendor_entries(tmp_p
     with pytest.raises(FileExistsError):
         fixture.CronDispatchFixture.install("ac-test-pr2829-" + "d" * 32)
     job.cleanup()
-    assert (vendor.lstat(), vendor.read_bytes()) == before
+    assert _cron_vendor_snapshot(vendor) == before
     assert list(tmp_path.iterdir()) == [vendor]
 
 
