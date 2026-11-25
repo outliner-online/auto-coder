@@ -109,13 +109,14 @@ def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch,
         assert await asyncio.to_thread(entered.wait, 2)
         engine.request_graceful_shutdown("SIGTERM")
         assert await engine.invalidate_entity("owner/repo", "issue", 22, "newer-child-delivery")
-        worker.cancel()
+        graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
         await asyncio.sleep(0.05)
-        assert not worker.done()
+        assert not graceful_drain.done()
         assert list(engine._critical_operations.values()) == ["worker 0 submitted-parent validation for issue #22"]
         assert engine.invalidations.claim("owner/repo") is None
         release.set()
-        await worker
+        await asyncio.wait_for(graceful_drain, 2)
+        assert engine.lifecycle is EngineLifecycle.STOPPED
 
     asyncio.run(scenario())
     assert validations == 1
@@ -152,8 +153,12 @@ def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch
         worker = asyncio.create_task(engine._worker_loop("owner/repo", 0, "issue"))
         assert await asyncio.to_thread(entered.wait, 2)
         assert engine.request_graceful_shutdown("SIGTERM")
+        graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
+        await asyncio.sleep(0.05)
+        assert not graceful_drain.done()
         release.set()
-        await asyncio.wait_for(worker, 2)
+        await asyncio.wait_for(graceful_drain, 2)
+        assert engine.lifecycle is EngineLifecycle.STOPPED
 
     asyncio.run(scenario())
     routing.assert_called_once_with("owner/repo", 23, candidate.data)
@@ -211,8 +216,13 @@ def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(mon
 
         assert engine.request_graceful_shutdown("SIGTERM")
         assert await engine.invalidate_entity("owner/repo", "issue", 25, "newer-queued-routing")
+        graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
+        # The supervisor must finish while the unrelated executor occupant is
+        # still held: the prohibited queued routing stage is not a drain wait.
+        await asyncio.wait_for(graceful_drain, 0.5)
+        assert engine.lifecycle is EngineLifecycle.STOPPED
+        routing.assert_called_once_with("owner/repo", 25, candidate.data)
         release_executor.set()
-        await asyncio.wait_for(worker, 2)
         executor.shutdown(wait=True)
 
     try:
