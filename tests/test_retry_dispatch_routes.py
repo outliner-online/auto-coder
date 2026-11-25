@@ -95,7 +95,6 @@ def test_remote_retry_alias_claims_once_and_replay_repairs_same_receipt(route, t
 @pytest.mark.parametrize(
     ("backend_type", "adapter"),
     [
-        ("jules", "_process_issue_jules_mode"),
         ("claude-routine", "_process_issue_claude_routine_mode"),
         ("codex-cloud", "_process_issue_codex_cloud_mode"),
     ],

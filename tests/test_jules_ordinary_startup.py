@@ -1,6 +1,4 @@
-"""Regression coverage for Issue #2264: Jules must be able to participate in the
-unified ordinary backend pool as a task-only remote candidate, without ordinary
-selection depending on the initialization of an unused synchronous manager.
+"""Regression coverage for retiring Jules from ordinary Issue dispatch.
 
 These tests exercise the real configuration loader (via ``AUTO_CODER_CONFIG_PATH``
 and a ``HOME`` pointed at a temporary directory) and the real
@@ -50,7 +48,7 @@ def test_ordinary_synchronous_backends_excludes_task_only_types():
             },
         }
     )
-    assert config.get_ordinary_priority_groups() == [["jules"], ["local-b"], ["remote-a"]]
+    assert config.get_ordinary_priority_groups() == [["local-b"], ["remote-a"]]
     assert _synchronous_backends(config) == ["local-b"]
 
 
@@ -116,183 +114,8 @@ def _invoke_only(repo_name: str, issue_number: int, extra_args=()):
     )
 
 
-def test_process_issues_only_bootstraps_jules_only_pool_without_crashing(tmp_path, monkeypatch):
-    """This reproduces the reported regression: a real ``[backend] order =
-    ["jules"]`` configuration must not raise "Backend type 'jules' ... is not
-    supported" during startup, and must reach the engine so ordinary dispatch
-    can run."""
-    _write_config(
-        tmp_path,
-        '[backend]\norder = ["jules"]\n\n[backends.jules]\nbackend_type = "jules"\nenabled = true\napi_key = "test-jules-key"\n',
-        monkeypatch,
-    )
-
-    engine = MagicMock()
-    engine.process_single.return_value = {
-        "repository": "owner/repo",
-        "issues_processed": [],
-        "prs_processed": [],
-        "errors": [],
-    }
-
-    llm_instance_spy = MagicMock()
-    noedit_instance_spy = MagicMock()
-
-    with (
-        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
-        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=MagicMock()),
-        patch("auto_coder.cli_commands_main.AutomationEngine", return_value=engine),
-        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
-        patch("auto_coder.backend_manager.LLMBackendManager.get_llm_instance", llm_instance_spy),
-        patch("auto_coder.backend_manager.LLMBackendManager.get_noedit_instance", noedit_instance_spy),
-    ):
-        result = _invoke_only("owner/repo", 1591)
-
-    assert result.exit_code == 0, result.output
-    assert "is not supported" not in result.output
-
-    # Ordinary dispatch was reached: the CLI made it all the way to the engine.
-    engine.process_single.assert_called_once()
-    assert engine.process_single.call_args.args[:2] == ("owner/repo", "issue")
-
-    # A remote-only ordinary pool has no synchronous candidate, so neither the
-    # general nor the no-edit/message manager singleton is bootstrapped merely
-    # to reach dispatch (REQ-003/REQ-005).
-    llm_instance_spy.assert_not_called()
-    noedit_instance_spy.assert_not_called()
-
-
-def test_process_issues_only_reaches_jules_despite_unavailable_local_fallback_executable(tmp_path, monkeypatch):
-    """REQ-003: an unused *later* local fallback candidate's missing
-    prerequisites (here, the OpenCode CLI executable, forced to a
-    nonexistent path) must not block startup from reaching ordinary dispatch
-    for an earlier, usable remote candidate (Jules).
-
-    The synchronous-manager projection for this pool is `["opencode"]`
-    (Jules is filtered out as task-only), so building the general manager
-    eagerly constructs an ``OpenCodeClient`` as its default client. That
-    constructor probes the ``opencode`` executable and raises when it is
-    missing -- this must be isolated rather than aborting the whole CLI
-    command."""
-    from auto_coder.backend_manager import LLMBackendManager
-
-    _write_config(
-        tmp_path,
-        ('[backend]\norder = ["jules", "opencode"]\n\n' '[backends.jules]\nbackend_type = "jules"\nenabled = true\napi_key = "test-jules-key"\n\n' '[backends.opencode]\nbackend_type = "opencode"\nenabled = true\nmodel = "anthropic/claude-sonnet-4-5"\n'),
-        monkeypatch,
-    )
-    # Never rely on a real `opencode` binary happening to be on PATH: force
-    # OpenCodeClient to probe a definitely-nonexistent executable.
-    monkeypatch.setenv("AUTOCODER_OPENCODE_CLI", str(tmp_path / "definitely-missing-opencode-binary"))
-    LLMBackendManager.reset_singleton()
-    LLMBackendManager.reset_noedit_singleton()
-
-    engine = MagicMock()
-    engine.process_single.return_value = {
-        "repository": "owner/repo",
-        "issues_processed": [],
-        "prs_processed": [],
-        "errors": [],
-    }
-
-    try:
-        with (
-            patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
-            patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=MagicMock()),
-            patch("auto_coder.cli_commands_main.AutomationEngine", return_value=engine),
-            patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
-        ):
-            result = _invoke_only("owner/repo", 1591)
-
-        assert result.exit_code == 0, result.output
-        assert "is not supported" not in result.output
-
-        # Ordinary dispatch was reached despite the OpenCode fallback's
-        # unavailable executable.
-        engine.process_single.assert_called_once()
-        assert engine.process_single.call_args.args[:2] == ("owner/repo", "issue")
-
-        # The general manager could not be built from its only synchronous
-        # candidate (OpenCode), so it is left uninitialized rather than
-        # crashing startup or silently serving a stale/partial manager.
-        assert LLMBackendManager.is_initialized() is False
-    finally:
-        LLMBackendManager.reset_singleton()
-        LLMBackendManager.reset_noedit_singleton()
-
-
-def test_process_issues_only_clears_stale_singleton_from_a_prior_repository(tmp_path, monkeypatch):
-    """REQ-006: an empty synchronous projection must not leave a manager
-    bound to a *different* repository (or an obsolete configuration) in
-    place for later synchronous callers to silently reuse. Pre-initialize
-    both singletons the way a prior, real bootstrap for repository A would,
-    then bootstrap process-issues for a Jules-only repository B in the same
-    process and verify both singletons are cleared rather than served."""
-    from auto_coder.backend_manager import LLMBackendManager, get_llm_backend_manager, get_noedit_backend_manager
-
-    _write_config(
-        tmp_path,
-        '[backend]\norder = ["jules"]\n\n[backends.jules]\nbackend_type = "jules"\nenabled = true\napi_key = "test-jules-key"\n',
-        monkeypatch,
-    )
-
-    stale_client = MagicMock()
-    LLMBackendManager.reset_singleton()
-    LLMBackendManager.reset_noedit_singleton()
-    try:
-        LLMBackendManager.get_llm_instance(
-            default_backend="codex",
-            default_client=stale_client,
-            factories={"codex": lambda: stale_client},
-            order=["codex"],
-        )
-        LLMBackendManager.get_noedit_instance(
-            default_backend="codex",
-            default_client=stale_client,
-            factories={"codex": lambda: stale_client},
-            order=["codex"],
-        )
-        assert LLMBackendManager.is_initialized() is True
-        assert LLMBackendManager.is_noedit_initialized() is True
-
-        engine = MagicMock()
-        engine.process_single.return_value = {
-            "repository": "owner/repo",
-            "issues_processed": [],
-            "prs_processed": [],
-            "errors": [],
-        }
-
-        with (
-            patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
-            patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=MagicMock()),
-            patch("auto_coder.cli_commands_main.AutomationEngine", return_value=engine),
-            patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
-        ):
-            result = _invoke_only("owner/repo", 1591)
-
-        assert result.exit_code == 0, result.output
-        assert "is not supported" not in result.output
-
-        # The prior repository's manager was cleared, not silently kept.
-        assert LLMBackendManager.is_initialized() is False
-        assert LLMBackendManager.is_noedit_initialized() is False
-
-        # A later synchronous caller must not receive the stale repo-A
-        # manager; it gets an explicit "not initialized" failure instead.
-        with pytest.raises(RuntimeError):
-            get_llm_backend_manager()
-        with pytest.raises(RuntimeError):
-            get_noedit_backend_manager()
-    finally:
-        LLMBackendManager.reset_singleton()
-        LLMBackendManager.reset_noedit_singleton()
-
-
 def test_process_issues_only_bootstraps_mixed_pool_using_only_local_synchronous_manager(tmp_path, monkeypatch):
-    """A pool with Jules first and a local backend second must not crash, and
-    the general synchronous manager must be built only from the local
-    candidate (REQ-002/REQ-006): the ordinary policy itself is unchanged."""
+    """A retired Jules entry cannot prevent startup of a supported local candidate."""
     _write_config(
         tmp_path,
         ('[backend]\norder = ["jules", "codex"]\n\n' '[backends.jules]\nbackend_type = "jules"\nenabled = true\napi_key = "test-jules-key"\n\n' '[backends.codex]\nbackend_type = "codex"\nenabled = true\n'),
@@ -326,8 +149,7 @@ def test_process_issues_only_bootstraps_mixed_pool_using_only_local_synchronous_
         result = _invoke_only("owner/repo", 1591)
 
     assert result.exit_code == 0, result.output
-    # The synchronous manager is scoped to the local-only projection, not the
-    # full ordinary pool (which still starts with the remote "jules" entry).
+    # The synchronous manager is scoped to the supported local projection.
     assert captured_backend_manager_kwargs.get("cli_backends") == ["codex"]
     engine.process_single.assert_called_once()
 
@@ -350,103 +172,74 @@ def test_process_issues_only_explicit_empty_pool_still_fails_closed(tmp_path, mo
     assert "ordinary backend candidate pool is empty" in result.output
 
 
+@pytest.mark.parametrize(
+    ("backend_type", "provider_patch", "provider_result"),
+    [
+        (
+            "codex-cloud",
+            "auto_coder.codex_cloud_client.CodexCloudClient.submit_task",
+            None,
+        ),
+        ("claude-routine", "auto_coder.claude_routine_client.ClaudeRoutineClient.fire_routine", ("routine-2891", None)),
+    ],
+)
+def test_cli_startup_reaches_supported_cloud_dispatch_without_jules(
+    tmp_path,
+    monkeypatch,
+    backend_type,
+    provider_patch,
+    provider_result,
+):
+    """REQ-006: real CLI policy and ordinary admission select each supported provider."""
+    from auto_coder.codex_cloud_client import CodexSubmissionOutcome, CodexSubmissionResult
+
+    if backend_type == "codex-cloud":
+        provider_result = CodexSubmissionResult(CodexSubmissionOutcome.ACCEPTED, "task-2891")
+    alias = f"supported-{backend_type}"
+    _write_config(
+        tmp_path,
+        f'[backend]\norder = ["{alias}"]\n\n[backends.{alias}]\nbackend_type = "{backend_type}"\nenabled = true\n',
+        monkeypatch,
+    )
+    issue = {
+        "number": 2891,
+        "title": "Supported cloud route",
+        "body": "## Requirements\nREQ-001: Route this ordinary Issue.",
+        "state": "open",
+        "labels": [{"name": "implementation-ready"}],
+    }
+    github = MagicMock(token="token")
+    github.get_item_type_strict.return_value = "issue"
+    github.get_issue_dispatch_snapshot_strict.return_value = issue
+    github.get_issue.return_value = issue
+    github.get_issue_details.return_value = issue
+    github.get_all_sub_issues.return_value = []
+    github.get_direct_sub_issues_strict.return_value = []
+    github.get_parent_issue_details_strict.return_value = None
+    github.get_parent_issue_details.return_value = None
+    github.get_issue_comments_strict.return_value = []
+    github.get_open_issue_declarations.return_value = []
+    github.try_add_labels.return_value = True
+
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=github),
+        patch("auto_coder.automation_engine.AutomationEngine._check_and_handle_closed_branch", return_value=True),
+        patch("auto_coder.automation_engine.get_current_branch", return_value="main"),
+        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
+        patch(provider_patch, return_value=provider_result) as provider_send,
+        patch("auto_coder.issue_processor.JulesClient.start_session") as jules_send,
+    ):
+        result = _invoke_only("owner/repo", 2891)
+
+    assert result.exit_code == 0, result.output
+    provider_send.assert_called_once()
+    jules_send.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Ordinary dispatcher coverage: _dispatch_issue_candidates over real config
 # ---------------------------------------------------------------------------
-
-
-def test_dispatch_candidates_routes_jules_only_pool_to_real_session_start(tmp_path, monkeypatch):
-    from auto_coder.issue_dispatch import DispatchOutcome
-    from auto_coder.issue_processor import _dispatch_issue_candidates
-    from auto_coder.jules_client import JulesClient
-
-    _write_config(
-        tmp_path,
-        '[backend]\norder = ["jules"]\n\n[backends.jules]\nbackend_type = "jules"\nenabled = true\napi_key = "test-jules-key"\n',
-        monkeypatch,
-    )
-    monkeypatch.setattr("auto_coder.issue_processor.get_current_attempt", lambda *_a: 0)
-
-    captured = {}
-
-    def fake_start_session(self, prompt, repo, base_branch, title=None):
-        captured["repo"] = repo
-        captured["base_branch"] = base_branch
-        captured["backend_name"] = self.backend_name
-        return "session-xyz"
-
-    monkeypatch.setattr(JulesClient, "start_session", fake_start_session)
-
-    github = MagicMock()
-    issue_data = {
-        "number": 4242,
-        "title": "Example issue",
-        "body": "Body text",
-        "labels": [],
-        "state": "open",
-        "user": {"login": "someone"},
-    }
-
-    assert get_llm_config(repo_name="owner/repo").get_ordinary_priority_groups() == [["jules"]]
-
-    execution = _dispatch_issue_candidates(
-        "owner/repo",
-        issue_data,
-        AutomationConfig(repo_name="owner/repo"),
-        github,
-        ["jules"],
-    )
-
-    assert execution.result.outcome is DispatchOutcome.REMOTE_ACCEPTED
-    assert execution.result.backend_name == "jules"
-    assert execution.result.provider == "jules"
-    assert execution.result.provider_reference == "session-xyz"
-    assert captured["repo"] == "owner/repo"
-    assert captured["base_branch"] == "main"
-    assert captured["backend_name"] == "jules"
-    github.add_comment_to_issue.assert_called_once()
-
-
-def test_dispatch_candidates_routes_jules_alias_using_its_own_credentials(tmp_path, monkeypatch):
-    """REQ-001: an alias resolving to ``backend_type = "jules"`` (not the
-    built-in ``jules`` name) is classified by its resolved type and dispatched
-    using its own alias's configuration/credentials."""
-    from auto_coder.issue_dispatch import DispatchOutcome
-    from auto_coder.issue_processor import _dispatch_issue_candidates
-    from auto_coder.jules_client import JulesClient
-
-    _write_config(
-        tmp_path,
-        ('[backend]\norder = ["remote-google"]\n\n' '[backends.remote-google]\nbackend_type = "jules"\nenabled = true\napi_key = "remote-google-key"\n'),
-        monkeypatch,
-    )
-    monkeypatch.setattr("auto_coder.issue_processor.get_current_attempt", lambda *_a: 0)
-
-    captured = {}
-
-    def fake_start_session(self, prompt, repo, base_branch, title=None):
-        captured["backend_name"] = self.backend_name
-        captured["api_key"] = self.api_key
-        return "session-alias"
-
-    monkeypatch.setattr(JulesClient, "start_session", fake_start_session)
-
-    github = MagicMock()
-    issue_data = {"number": 99, "title": "T", "body": "B", "labels": [], "state": "open", "user": {"login": "x"}}
-
-    execution = _dispatch_issue_candidates(
-        "owner/repo",
-        issue_data,
-        AutomationConfig(repo_name="owner/repo"),
-        github,
-        ["remote-google"],
-    )
-
-    assert execution.result.outcome is DispatchOutcome.REMOTE_ACCEPTED
-    assert execution.result.backend_name == "remote-google"
-    assert execution.result.provider == "jules"
-    assert captured["backend_name"] == "remote-google"
-    assert captured["api_key"] == "remote-google-key"
 
 
 def test_dispatch_candidates_local_first_pool_never_touches_jules(tmp_path, monkeypatch):

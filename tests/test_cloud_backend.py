@@ -201,7 +201,7 @@ backend_type = "codex"
 class TestNonDifficultCloudIssueRouting:
     """Test handling and routing of non-difficult issues to backend_cloud."""
 
-    @pytest.mark.parametrize("backend_type", ["jules", "claude-routine"])
+    @pytest.mark.parametrize("backend_type", ["claude-routine"])
     def test_remote_acceptance_survives_binding_failure_and_ordinary_replay(self, backend_type, tmp_path, monkeypatch):
         """An incomplete remote receipt suppresses replacement work after restart."""
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -539,52 +539,6 @@ class TestNonDifficultCloudIssueRouting:
         ]
         slots.active_execution_ids.assert_called_once_with(ImplementationOwner("issue", 2082))
 
-    def test_jules_alias_uses_selected_credentials_and_tracking_identity(self, tmp_path, monkeypatch):
-        """The selected Jules alias owns both transport credentials and binding attribution."""
-        from auto_coder.cloud_manager import CloudManager
-        from auto_coder.jules_client import JulesClient
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        alias = "jules-team"
-        llm_config = LLMBackendConfiguration.load_from_dict(
-            {
-                "backends": {
-                    "jules": {"backend_type": "jules", "api_key": "default-key"},
-                    alias: {"backend_type": "jules", "api_key": "team-key", "options": ["team-option"]},
-                }
-            }
-        )
-        response = MagicMock(status_code=200, text="accepted")
-        response.json.return_value = {"name": "sessions/provider-alias-session"}
-
-        with (
-            patch("auto_coder.llm_backend_config.get_llm_config", return_value=llm_config),
-            patch("auto_coder.jules_client.get_llm_config", return_value=llm_config),
-            patch("auto_coder.issue_processor.get_current_attempt", return_value=0),
-            patch("auto_coder.issue_processor.get_commit_log", return_value=""),
-        ):
-            client = JulesClient(alias)
-            with (
-                patch.object(client.session, "post", return_value=response) as post,
-                patch("auto_coder.issue_processor.JulesClient", return_value=client),
-            ):
-                execution = _dispatch_issue_candidates(
-                    "owner/repo",
-                    {"number": 2080, "title": "Alias", "body": "Implement", "labels": []},
-                    AutomationConfig(),
-                    MagicMock(),
-                    [alias],
-                )
-
-        assert post.call_count == 1
-        assert client.session.headers["X-Goog-Api-Key"] == "team-key"
-        assert client.options == ["team-option"]
-        assert execution.result.outcome is DispatchOutcome.REMOTE_ACCEPTED
-        binding = CloudManager("owner/repo").get_binding(2080)
-        assert binding is not None
-        assert binding.backend_name == alias
-        assert binding.task_id == "provider-alias-session"
-
     @patch("auto_coder.codex_cloud_client.CodexCloudClient")
     def test_production_ranked_boundary_reaches_aliased_remote_transport(self, mock_client_type, tmp_path, monkeypatch):
         """The shared production boundary retains alias, branch, prompt, and task identity."""
@@ -848,79 +802,6 @@ backend_type = "codex-cloud"
             label_context=None,
             acceptance_observer=ANY,
         )
-
-    @patch("auto_coder.issue_processor._process_issue_jules_mode")
-    def test_process_issue_cloud_backend_uses_explicit_jules(self, mock_jules_mode):
-        """The unified selector dispatches Jules only when it is listed."""
-        mock_jules_mode.return_value = ["Jules session started"]
-
-        config = AutomationConfig()
-        issue_data = {"number": 12, "title": "Default task", "labels": []}
-        mock_github = MagicMock()
-
-        llm_config = LLMBackendConfiguration(
-            backend_order=["jules"],
-            backend_selector_explicit=True,
-        )
-
-        with patch("auto_coder.llm_backend_config.get_llm_config", return_value=llm_config):
-            actions = _process_issue_cloud_backend(
-                "owner/repo",
-                issue_data,
-                config,
-                mock_github,
-            )
-
-        assert actions == ["Jules session started"]
-        mock_jules_mode.assert_called_once_with(
-            "owner/repo",
-            issue_data,
-            config,
-            mock_github,
-            label_context=None,
-            implementation_slots=None,
-            backend_name="jules",
-            acceptance_observer=ANY,
-        )
-
-    @patch("auto_coder.issue_processor._process_issue_jules_mode")
-    @patch("auto_coder.issue_processor._process_issue_claude_routine_mode")
-    def test_process_issue_cloud_backend_failover(self, mock_claude_routine, mock_jules_mode):
-        """Test failover in backend_cloud when first backend hits usage limit."""
-        mock_claude_routine.side_effect = AutoCoderUsageLimitError("5-hour limit reached")
-        mock_jules_mode.return_value = ["Jules session started"]
-
-        config = AutomationConfig()
-        issue_data = {"number": 13, "title": "Failover task", "labels": []}
-        mock_github = MagicMock()
-
-        llm_config = LLMBackendConfiguration(
-            backend_order=["claude-opus-routine", "jules"],
-            backend_selector_explicit=True,
-            backends={
-                "claude-opus-routine": BackendConfig(
-                    name="claude-opus-routine",
-                    backend_type="claude-routine",
-                    url="https://api.anthropic.com/fire",
-                ),
-                "jules": BackendConfig(
-                    name="jules",
-                    backend_type="jules",
-                ),
-            },
-        )
-
-        with patch("auto_coder.llm_backend_config.get_llm_config", return_value=llm_config):
-            actions = _process_issue_cloud_backend(
-                "owner/repo",
-                issue_data,
-                config,
-                mock_github,
-            )
-
-        assert actions == ["Jules session started"]
-        mock_claude_routine.assert_called_once()
-        mock_jules_mode.assert_called_once()
 
     @patch("auto_coder.automation_engine.LabelManager")
     @patch("auto_coder.issue_processor._dispatch_issue_candidates")

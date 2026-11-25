@@ -233,46 +233,6 @@ class TestDifficultIssueHandling:
             label_context=None,
         )
 
-    @patch("auto_coder.issue_processor._process_issue_jules_mode")
-    @patch("auto_coder.issue_processor._process_issue_claude_routine_mode")
-    def test_process_issue_high_score_cloud_failover_on_usage_limit(self, mock_routine_mode, mock_jules_mode):
-        """Test that _process_issue_high_score_cloud falls over to next backend when usage limit reached."""
-        from auto_coder.exceptions import AutoCoderUsageLimitError
-
-        mock_routine_mode.side_effect = AutoCoderUsageLimitError("5-hour limit reached")
-        mock_jules_mode.return_value = ["Jules session started"]
-
-        config = AutomationConfig()
-        issue_data = {"number": 55, "labels": ["difficult"]}
-        mock_github = MagicMock()
-
-        llm_config = LLMBackendConfiguration(
-            backend_with_high_score_cloud_order=["claude-opus-routine", "jules"],
-            backends={
-                "claude-opus-routine": BackendConfig(
-                    name="claude-opus-routine",
-                    backend_type="claude-routine",
-                    url="https://api.anthropic.com/fire",
-                ),
-                "jules": BackendConfig(
-                    name="jules",
-                    backend_type="jules",
-                ),
-            },
-        )
-
-        with patch("auto_coder.llm_backend_config.get_llm_config", return_value=llm_config):
-            actions = _process_issue_high_score_cloud(
-                "owner/repo",
-                issue_data,
-                config,
-                mock_github,
-            )
-
-            assert actions == ["Jules session started"]
-            mock_routine_mode.assert_called_once()
-            mock_jules_mode.assert_called_once()
-
     @patch("auto_coder.automation_engine.LabelManager")
     @patch("auto_coder.issue_processor._process_issue_high_score_cloud")
     @patch("auto_coder.issue_processor._process_issue_jules_mode")
@@ -363,57 +323,6 @@ class TestDifficultIssueHandling:
         mock_take_actions.assert_not_called()
         assert result.success is True
         assert result.actions == ["High score cloud action"]
-
-    @patch("auto_coder.automation_engine.LabelManager")
-    @patch("auto_coder.issue_processor._process_issue_high_score_cloud")
-    @patch("auto_coder.issue_processor._process_issue_jules_mode")
-    def test_automation_engine_routes_non_difficult_to_jules(self, mock_jules_mode, mock_high_score_cloud, mock_label_manager):
-        """Test that candidate without difficult label routes to Jules when jules_mode is True."""
-        from auto_coder.cloud_manager import CloudTaskBinding
-
-        mock_jules_mode.return_value = ["Jules action"]
-        mock_ctx = MagicMock()
-        mock_ctx.__bool__.return_value = True
-        mock_label_manager.return_value.__enter__.return_value = mock_ctx
-
-        mock_github = MagicMock()
-        mock_github.get_item_type_strict.return_value = "issue"
-        mock_github.get_issue_dispatch_snapshot_strict.side_effect = lambda _repo, number: {"number": number, "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.", "labels": [{"name": "implementation-ready"}]}
-        mock_github.get_all_sub_issues.return_value = []
-
-        config = AutomationConfig()
-        engine = AutomationEngine(mock_github, config)
-
-        candidate = Candidate(
-            type="issue",
-            priority=100,
-            data={
-                "number": 102,
-                "title": "Simple bug",
-                "labels": [{"name": "bug"}],
-            },
-        )
-
-        jules_config = LLMBackendConfiguration.load_from_dict({"backend": {"order": ["jules"]}})
-        with (
-            patch("auto_coder.llm_backend_config.get_llm_config", return_value=jules_config),
-            patch(
-                "auto_coder.issue_processor.CloudManager.get_binding",
-                return_value=CloudTaskBinding("jules", "sessions/provider-102", "jules"),
-            ),
-        ):
-            result = engine._process_single_candidate_unified(
-                "owner/repo",
-                candidate,
-                config,
-                jules_mode=True,
-            )
-
-        # Should call Jules mode
-        mock_jules_mode.assert_called_once()
-        mock_high_score_cloud.assert_not_called()
-        assert result.success is True
-        assert result.actions == ["Jules action"]
 
     @patch("auto_coder.automation_engine.LabelManager")
     @patch("auto_coder.issue_processor._process_issue_high_score_cloud")
