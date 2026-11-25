@@ -198,6 +198,14 @@ def test_cli_filters_ranked_jules_alias_before_supported_provider_send(tmp_path,
     assert result.exit_code == 0, result.output
     codex_send.assert_called_once()
     jules_send.assert_not_called()
+    from auto_coder.issue_dispatch import DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+
+    handoff = IssueDispatchGuard().inspect(IssueAttemptIdentity("owner", "repo", 2892, "0"))
+    assert handoff is not None
+    assert handoff.outcome is DispatchOutcome.REMOTE_ACCEPTED
+    assert handoff.backend_name == "supported-cloud"
+    assert handoff.provider == "codex-cloud"
+    assert handoff.provider_reference == "task-2892"
 
 
 def test_cli_jules_only_policy_reports_no_dispatch_without_fallback(tmp_path, monkeypatch):
@@ -209,6 +217,7 @@ def test_cli_jules_only_policy_reports_no_dispatch_without_fallback(tmp_path, mo
     )
     with (
         patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance") as github_factory,
         patch("auto_coder.issue_processor.JulesClient.start_session") as jules_send,
         patch("auto_coder.codex_cloud_client.CodexCloudClient.submit_task") as codex_send,
     ):
@@ -218,6 +227,7 @@ def test_cli_jules_only_policy_reports_no_dispatch_without_fallback(tmp_path, mo
     assert "ordinary backend candidate pool is empty" in result.output
     jules_send.assert_not_called()
     codex_send.assert_not_called()
+    github_factory.assert_not_called()
 
 
 @pytest.mark.parametrize("submission_outcome", ["accepted", "indeterminate"])
@@ -268,6 +278,15 @@ def test_cli_historical_jules_handoff_suppresses_supported_replacement(tmp_path,
     assert result.exit_code == 0, result.output
     codex_send.assert_not_called()
     jules_send.assert_not_called()
+    from auto_coder.issue_dispatch import DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+
+    retained = IssueDispatchGuard().inspect(IssueAttemptIdentity("owner", "repo", issue_number, "0"))
+    assert retained is not None
+    expected = DispatchOutcome.REMOTE_ACCEPTED if submission_outcome == "accepted" else DispatchOutcome.INDETERMINATE
+    assert retained.outcome is expected
+    assert retained.provider == "jules"
+    assert retained.backend_name == "historical-jules"
+    assert retained.provider_reference == task_id
 
 
 def test_production_dispatch_skips_raw_jules_alias_before_local_fallback(monkeypatch, tmp_path):
