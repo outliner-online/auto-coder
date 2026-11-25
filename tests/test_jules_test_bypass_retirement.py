@@ -40,27 +40,43 @@ def test_shared_runner_executes_real_script_despite_legacy_environment(monkeypat
     assert result["command"] == f"bash {script} tests/example.py"
 
 
-def test_legacy_environment_cannot_exceed_configured_fix_attempt_limit(monkeypatch):
+def test_legacy_environment_cannot_exceed_configured_fix_attempt_limit(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTOCODER_JULES_ONLY_MODE", "true")
+    invocation_log = tmp_path / "test-script-invocations.log"
+    invocation_log.touch()
+    script = tmp_path / "test.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'count=$(wc -l < "$AUTOCODER_TEST_INVOCATION_LOG")\n'
+        'printf "run\\n" >> "$AUTOCODER_TEST_INVOCATION_LOG"\n'
+        'printf "FAILED tests/example.py::test_failure\\nAssertionError: real observed failure invocation %s with stable output padding\\n" "$((count + 1))"\n'
+        "exit 7\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUTOCODER_TEST_INVOCATION_LOG", str(invocation_log))
     config = AutomationConfig(automatic_test_fix=True)
+    config.TEST_SCRIPT_PATH = str(script)
     config.MAX_FIX_ATTEMPTS = 2
-    failing = {
-        "success": False,
-        "output": "FAILED tests/example.py::test_failure",
-        "errors": "AssertionError: observed real failure",
-        "return_code": 1,
-        "command": "bash scripts/test.sh",
-        "test_file": None,
-        "stability_issue": False,
-    }
     fix_result = WorkspaceFixResult("attempted fix", "changed code", "codex", "default", "codex")
 
-    with patch("auto_coder.fix_to_pass_tests_runner.check_for_updates_and_restart"), patch("auto_coder.fix_to_pass_tests_runner.run_local_tests", side_effect=[failing, failing]) as run_tests, patch("auto_coder.fix_to_pass_tests_runner.apply_workspace_test_fix", return_value=fix_result):
+    with (
+        patch("auto_coder.fix_to_pass_tests_runner.check_for_updates_and_restart"),
+        patch(
+            "auto_coder.fix_to_pass_tests_runner.get_isolate_single_test_on_failure_from_config",
+            return_value=False,
+        ),
+        patch("auto_coder.fix_to_pass_tests_runner.apply_workspace_test_fix", return_value=fix_result) as apply_fix,
+    ):
         summary = fix_to_pass_tests(config, MagicMock())
 
     assert summary["success"] is False
     assert summary["attempts"] == 2
-    assert run_tests.call_count == 2
+    assert invocation_log.read_text(encoding="utf-8").splitlines() == ["run", "run"]
+    observed_result = apply_fix.call_args.args[1]
+    assert observed_result["return_code"] == 7
+    assert "real observed failure invocation 1" in observed_result["output"]
+    assert observed_result["command"] == f"bash {script}"
+    assert any("Change below 10% threshold" in message for message in summary["messages"])
 
 
 def test_missing_script_helper_raises_without_mutating_environment(monkeypatch, tmp_path):
