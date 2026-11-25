@@ -1544,7 +1544,9 @@ def test_pr_no_commit_checkpoint_reaches_mounted_detail(mock_ui, tmp_path, monke
         "user": {"login": "maintainer"},
     }
     github = MagicMock()
+    github.get_authenticated_user_login.return_value = "controller"
     github.get_pr_comments.return_value = []
+    github.get_pr_comments_strict.return_value = []
     github.get_pull_request_metadata_strict.return_value = data
     github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(data["head"]["ref"], data["head"]["sha"], "main")
     native = MagicMock()

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -219,6 +220,17 @@ def test_legacy_adapter_does_not_invent_an_account_or_bypass_declared_history(tm
     _write(tmp_path, "[github-controller-identity-history]\nprior_logins = []\n")
     with pytest.raises(ControllerIdentityHistoryError, match="positive GitHub account"):
         controller_author_set_for_client(client, "owner/repo", home=tmp_path)
+
+
+def test_legacy_mock_ignores_magicmock_invented_modern_identity_reader(tmp_path: Path) -> None:
+    """Arbitrary mock attributes must not disable login-only fixture clients."""
+    client = MagicMock()
+    client.get_authenticated_user_login.return_value = "legacy-controller"
+
+    authors = controller_author_set_for_client(client, "owner/repo", home=tmp_path)
+
+    assert authors.state is HistoryState.LEGACY_CURRENT_ONLY
+    assert authors.current == ControllerIdentity("legacy-controller")
 
 
 def test_proven_current_conflict_is_not_erased_by_later_unavailable_account(tmp_path: Path) -> None:

@@ -396,9 +396,23 @@ def retry_pending_stale_review_thread_rollbacks(
     registry: Optional[StaleReviewThreadRegistry] = None,
 ) -> List[str]:
     """Serialize recovery with ordinary closure and publication rollback."""
+    active_registry = registry or StaleReviewThreadRegistry()
+    local_obligations = active_registry.pending_for_pr(repo_name, pr_number) or active_registry.marker_cleanup_pending_for_pr(repo_name, pr_number) or active_registry.rollback_transitions_for_pr(repo_name, pr_number)
+    if not local_obligations:
+        try:
+            observed_threads = github_client.get_pr_review_threads_strict(repo_name, pr_number)
+        except Exception as exc:
+            raise StaleReviewThreadRegistryError(f"Could not scan GitHub review threads for stale-resolution markers on PR #{pr_number}: {exc}") from exc
+        relevant_candidate = any(
+            (comment.body or "").lstrip().startswith(CLOSURE_RECEIPT_PREFIX) or (comment.body or "").strip() == STALE_BLOCKER_CLEARED_MARKER or (comment.body or "").strip() == STALE_BLOCKER_MARKER or (comment.body or "").strip().startswith(f"{STALE_BLOCKER_MARKER}\n")
+            for thread in observed_threads
+            for comment in (thread.comments or ())
+        )
+        if not relevant_candidate:
+            return []
     try:
         with closure_receipt_lock(repo_name, pr_number), controller_authority_scope(github_client, repo_name) as author_set:
-            return _retry_pending_stale_review_thread_rollbacks(github_client, repo_name, pr_number, registry, author_set=author_set)
+            return _retry_pending_stale_review_thread_rollbacks(github_client, repo_name, pr_number, active_registry, author_set=author_set)
     except (LockAcquisitionTimeout, OSError, ControllerIdentityHistoryError) as exc:
         raise StaleReviewThreadRegistryError(f"Closure receipt recovery is deferred for {repo_name}#{pr_number}: {exc}") from exc
 

@@ -200,7 +200,7 @@ def controller_author_set_for_client(client: object, repo_name: str, *, home: Op
     identity_reader = getattr(client, "get_authenticated_controller_identity", None)
     lookup = getattr(client, "resolve_github_account_identity", None)
     identity = None
-    if callable(identity_reader):
+    if _explicit_method(client, "get_authenticated_controller_identity") and callable(identity_reader):
         try:
             try:
                 inspect.signature(identity_reader).bind(repo_name)

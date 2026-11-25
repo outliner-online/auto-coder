@@ -71,6 +71,8 @@ def _authorized_allowlists():
 
 def _github_client(thread: ReviewThread) -> MagicMock:
     client = MagicMock()
+    client.get_authenticated_user_login.return_value = "controller"
+    client.get_pr_comments_strict.return_value = []
     client.get_pr_review_threads_strict.return_value = [thread]
     client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(head_ref="work-branch", head_sha=HEAD_SHA, base_ref="main")
     client.get_pull_request_metadata_strict.return_value = {"head": {"sha": HEAD_SHA}, "base": {"sha": "b" * 40, "ref": "main", "repo": {"id": 3}}}
