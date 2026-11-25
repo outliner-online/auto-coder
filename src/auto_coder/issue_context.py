@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 from .logger_config import get_logger
 from .markdown_regions import authored_lifecycle_markdown
@@ -295,21 +295,85 @@ def resolve_issue_oracles(
     return IssueOracleResolution(candidates=candidates, issues=tuple(verified_issues))
 
 
+class _ParentIssueContext(TypedDict):
+    number: int
+    title: str
+    body: str
+
+
+def _strict_parent_issue_context(github_client: Any, repo_name: str, issue: VerifiedIssueOracle) -> Optional[_ParentIssueContext]:
+    """Read complete parent context without flattening failures or mutating hierarchy."""
+    from .util.gh_cache import parse_parent_issue_number
+
+    getter = getattr(type(github_client), "get_parent_issue_details_strict", None)
+    if not callable(getter):
+        raise RuntimeError("Strict parent Issue lookup is unavailable")
+    parent = github_client.get_parent_issue_details_strict(repo_name, issue.number)
+    if parent is None:
+        parent_number = parse_parent_issue_number(issue.body, current_issue_number=issue.number)
+        if parent_number is None:
+            return None
+    else:
+        if not isinstance(parent, dict):
+            raise ValueError(f"Parent relationship for Issue #{issue.number} is malformed")
+        parent_number = parent.get("number")
+    if type(parent_number) is not int or parent_number <= 0 or parent_number == issue.number:
+        raise ValueError(f"Parent identity for Issue #{issue.number} is malformed")
+
+    snapshot_getter = getattr(type(github_client), "get_issue_dispatch_snapshot_strict", None)
+    issue_getter = getattr(type(github_client), "get_issue_strict", None)
+    if callable(snapshot_getter):
+        details = github_client.get_issue_dispatch_snapshot_strict(repo_name, parent_number)
+    elif callable(issue_getter):
+        details = github_client.get_issue_strict(repo_name, parent_number)
+    else:
+        raise RuntimeError("Strict parent Issue description lookup is unavailable")
+    missing = object()
+    if isinstance(details, dict):
+        number = details.get("number")
+        title = details.get("title", "Unknown")
+        body = details.get("body", missing)
+        is_pr = "pull_request" in details
+    else:
+        number = getattr(details, "number", None)
+        title = getattr(details, "title", "Unknown")
+        body = getattr(details, "body", missing)
+        raw = getattr(details, "_rawData", None)
+        is_pr = isinstance(raw, dict) and "pull_request" in raw
+    if type(number) is not int or number != parent_number or is_pr:
+        raise ValueError(f"Parent Issue #{parent_number} could not be verified")
+    if body is missing or (body is not None and not isinstance(body, str)) or (title is not None and not isinstance(title, str)):
+        raise ValueError(f"Parent Issue #{parent_number} description is incomplete")
+    return {"number": parent_number, "title": title or "Unknown", "body": body or ""}
+
+
 def get_linked_issues_context(
     github_client: Any,
     repo_name: str,
     pr_body: str = "",
     pr_data: Optional[Dict[str, Any]] = None,
     resolution: Optional[IssueOracleResolution] = None,
+    *,
+    strict: bool = False,
 ) -> str:
-    """Extract linked issues from PR body/metadata and fetch their details (including parent issues)."""
+    """Extract linked Issue descriptions and their background parent context.
+
+    ``strict`` exposes lookup and completeness failures instead of returning
+    partial context. Parent metadata fallback remains read-only, and native
+    parent absence must be observed successfully before using that fallback.
+    Existing callers keep the best-effort behavior unless they opt in.
+    """
     if not github_client:
+        if strict:
+            raise RuntimeError("GitHub client unavailable while reading linked Issue context")
         return ""
 
     linked_issues_context = ""
     try:
-        resolution = resolution or resolve_issue_oracles(github_client, repo_name, pr_data=pr_data, pr_body=pr_body)
+        resolution = resolution or resolve_issue_oracles(github_client, repo_name, pr_data=pr_data, pr_body=pr_body, bypass_cache=strict)
         if resolution.error:
+            if strict:
+                raise RuntimeError(resolution.error)
             logger.warning(f"Failed to resolve linked issue oracle: {resolution.error}")
             return ""
         context_parts = []
@@ -321,10 +385,10 @@ def get_linked_issues_context(
                 context_parts.append(f"Issue Description:\n{verified_issue.body}")
 
                 try:
-                    parent_details = github_client.get_parent_issue_details(repo_name, issue_number)
+                    parent_details = _strict_parent_issue_context(github_client, repo_name, verified_issue) if strict else github_client.get_parent_issue_details(repo_name, issue_number)
                     if parent_details:
                         parent_number = parent_details.get("number")
-                        parent_body = github_client.get_parent_issue_body(repo_name, issue_number)
+                        parent_body = parent_details["body"] if strict else github_client.get_parent_issue_body(repo_name, issue_number)
                         if parent_body:
                             context_parts.append(
                                 f"Parent Issue #{parent_number} (CONTEXT ONLY - Parent of #{issue_number}): {parent_details.get('title', 'Unknown')}\n"
@@ -334,14 +398,20 @@ def get_linked_issues_context(
                                 f"Parent Issue Description:\n{parent_body}"
                             )
                 except Exception as e:
+                    if strict:
+                        raise
                     logger.warning(f"Failed to fetch parent issue for #{issue_number}: {e}")
             except Exception as e:
+                if strict:
+                    raise
                 logger.warning(f"Failed to fetch details for linked issue #{issue_number}: {e}")
 
         if context_parts:
             linked_issues_context = "Linked Issues Context:\n" + "\n\n".join(context_parts)
 
     except Exception as e:
+        if strict:
+            raise
         logger.warning(f"Failed to fetch linked issues context: {e}")
 
     return linked_issues_context

@@ -49,9 +49,6 @@ def _real_commands(_use_real_commands):
     """These tests drive real git boundaries; never stub them."""
 
 
-BASE_SHA = "b" * 40
-
-
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -89,9 +86,8 @@ class Scenario:
         self.store = store
         self.repo, self.head_sha = _build_pr_repo(tmp_path)
         self.issue_body = issue_body
-        self.client = _build_github_client(self.head_sha, issue_body=issue_body)
-        self.pr_data = _build_pr_data(self.head_sha)
-        self.pr_data["base"] = {"ref": "main", "sha": BASE_SHA}
+        self.client = _build_github_client(self.head_sha, issue_body=issue_body, repo=self.repo)
+        self.pr_data = _build_pr_data(self.head_sha, repo=self.repo)
         self.config = _build_config()
         self.reviewer = reviewer or RecordingReviewer("reviewer", responses=responses, session_id=session_id)
         self.manager = _build_backend_manager(monkeypatch, {"reviewer": self.reviewer}, "reviewer")
@@ -145,7 +141,7 @@ def test_twelve_unqualified_verified_entries_are_diagnosable_and_not_accepted(tm
     assert identity["attempt_sequence"] == record.native_report["attempt_sequence"] >= 1
     assert identity["review_id"] == record.review_id
     assert identity["repository"] == REPO_NAME and identity["pr_number"] == PR_NUMBER
-    assert identity["head_sha"] == scenario.head_sha and identity["base_sha"] == BASE_SHA
+    assert identity["head_sha"] == scenario.head_sha and identity["base_sha"] == scenario.pr_data["base"]["sha"]
     assert identity["process_run_id"] == get_trace_collector().process_run_id
     assert payload["build"]["process_run_id"] == identity["process_run_id"]
     assert payload["build"]["source_revision"]["available"] is False and payload["build"]["source_revision"]["reason"]
@@ -236,8 +232,8 @@ class GatedReviewer(RecordingReviewer):
 def test_overlapping_attempts_keep_their_own_consumed_inputs(tmp_path, monkeypatch, audit_store):
     first_body, second_body = _issue_body(2, "First"), _issue_body(2, "Second")
     repo, head_sha = _build_pr_repo(tmp_path)
-    client = _build_github_client(head_sha, issue_body=first_body)
-    pr_data = _build_pr_data(head_sha)
+    client = _build_github_client(head_sha, issue_body=first_body, repo=repo)
+    pr_data = _build_pr_data(head_sha, repo=repo)
     config = _build_config()
     first_reviewer = GatedReviewer("first", _verified_payload([f"#99/REQ-{i:03d}" for i in (1, 2)]))
     second_reviewer = GatedReviewer("second", _verified_payload(["REQ-001"]))
@@ -366,8 +362,8 @@ def test_dynamic_followup_gets_its_own_response_and_check(tmp_path, monkeypatch,
     reviewer = RecordingReviewer("reviewer", responses=[json.dumps(initial), _verified_payload(["REQ-001"])], session_id="session-S")
     scenario = Scenario(tmp_path / "unused", monkeypatch, audit_store, issue_body=_issue_body(1), responses=[], reviewer=reviewer)
     scenario.repo, scenario.head_sha = repo, head_sha
-    scenario.client = _build_github_client(head_sha, issue_body=_issue_body(1))
-    scenario.pr_data = _build_pr_data(head_sha)
+    scenario.client = _build_github_client(head_sha, issue_body=_issue_body(1), repo=repo)
+    scenario.pr_data = _build_pr_data(head_sha, repo=repo)
     scenario.config.TEST_SCRIPT_PATH = str(repo / "scripts" / "test.sh")
     monkeypatch.setattr("auto_coder.pr_processor.isolated_pr_head_worktree", lambda *a, **k: _static_worktree(repo))
 
@@ -426,8 +422,8 @@ def test_backend_fallback_attributes_the_response_to_the_producing_backend(tmp_p
     from auto_coder.exceptions import AutoCoderUsageLimitError
 
     repo, head_sha = _build_pr_repo(tmp_path)
-    client = _build_github_client(head_sha, issue_body=_issue_body(1))
-    pr_data = _build_pr_data(head_sha)
+    client = _build_github_client(head_sha, issue_body=_issue_body(1), repo=repo)
+    pr_data = _build_pr_data(head_sha, repo=repo)
     reviewer_a = RecordingReviewer("reviewer-a", raise_once=AutoCoderUsageLimitError("quota exceeded"))
     reviewer_b = RecordingReviewer("reviewer-b", responses=[PASS_PAYLOAD])
     manager = _build_backend_manager(monkeypatch, {"reviewer-a": reviewer_a, "reviewer-b": reviewer_b}, "reviewer-a")
@@ -453,8 +449,8 @@ def test_backend_fallback_attributes_the_response_to_the_producing_backend(tmp_p
 
 def test_input_capture_is_partial_until_the_response_completes(tmp_path, monkeypatch, audit_store):
     repo, head_sha = _build_pr_repo(tmp_path)
-    client = _build_github_client(head_sha, issue_body=_issue_body(1))
-    pr_data = _build_pr_data(head_sha)
+    client = _build_github_client(head_sha, issue_body=_issue_body(1), repo=repo)
+    pr_data = _build_pr_data(head_sha, repo=repo)
     reviewer = GatedReviewer("held", PASS_PAYLOAD)
     manager = _build_backend_manager(monkeypatch, {"held": reviewer}, "held")
     _apply_standard_merge_gates(monkeypatch, mergeable=True, merge_result=False)
@@ -693,8 +689,8 @@ def _dynamic_followup_scenario(tmp_path, monkeypatch, store, reviewer: Recording
     head_sha = _add_dynamic_check_script(repo, head_sha)
     scenario = Scenario(tmp_path / "unused", monkeypatch, store, issue_body=_issue_body(1), responses=[], reviewer=reviewer)
     scenario.repo, scenario.head_sha = repo, head_sha
-    scenario.client = _build_github_client(head_sha, issue_body=_issue_body(1))
-    scenario.pr_data = _build_pr_data(head_sha)
+    scenario.client = _build_github_client(head_sha, issue_body=_issue_body(1), repo=repo)
+    scenario.pr_data = _build_pr_data(head_sha, repo=repo)
     scenario.config.TEST_SCRIPT_PATH = str(repo / "scripts" / "test.sh")
     monkeypatch.setattr("auto_coder.pr_processor.isolated_pr_head_worktree", lambda *a, **k: _static_worktree(repo))
     return scenario

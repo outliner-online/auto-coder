@@ -23,14 +23,17 @@ The production regression is
 
 ## Current-head review after acknowledged cloud repairs
 
-An authentic adversarial finding that has no applicable verdict on the current
-head can proceed to independent validation even when ordinary external review
-threads remain unresolved, provided the cloud repair producer observes that
-all selected ordinary discussions are complete, end with the PR implementer's
-explicit addressed marker, and have no newly actionable feedback or observed
-indeterminate delivery for that task. A delivered correction, unclassified
-reply, truncated discussion, pending provenance clarification, exhausted repair
-allowance, or unavailable ownership does not supply this admission.
+A current head with no applicable verdict can proceed to its first independent
+validation when only acknowledged ordinary external review threads remain.
+An authentic older-head adversarial finding can also continue to revalidation
+while those ordinary threads remain unresolved. Both paths require the cloud
+repair producer to observe that all selected ordinary discussions are complete,
+end with the PR implementer's explicit addressed marker, and have no newly
+actionable feedback or observed indeterminate delivery for that task. A delivered
+correction, unclassified reply, truncated discussion, pending provenance
+clarification, exhausted repair allowance, or unavailable ownership does not
+supply this admission. Ordinary-only admission retains the configured review-count
+limit; an addressed marker does not create an exception to that limit.
 
 This observation is carried by
 `CloudReviewRepairResult.acknowledged_no_actionable_feedback`. It grants only
@@ -44,8 +47,9 @@ addressed marker does not force another same-head review.
 
 The transition emits `pr.review-thread-gate` with outcome `DEFERRED`,
 `effect=acknowledged-review-reassessment`, `examined_head`,
-`blocking_thread_ids`, and `revalidation_thread_ids`. These facts distinguish
-review admission from delivery, accepted closure and merge completion.
+`blocking_thread_ids`, and `revalidation_thread_ids`. The last list is empty
+when only ordinary external roots remain. These facts distinguish review admission
+from delivery, accepted closure and merge completion.
 
 ## First current-head review after completed Codex feedback
 
@@ -60,9 +64,10 @@ observing all of the following together:
   and the complete discussion contains no newly actionable or uncertain source.
 - The authoritative current PR and existing originating Codex task still have
   the exact expected ownership and target.
-- The provider reports the task as `COMPLETED`, and native chronological
-  history shows a completed assistant turn later than every selected feedback
-  request's retained pre-send baseline.
+- Native chronological history shows a completed assistant turn later than
+  every selected feedback request's retained pre-send baseline. The provider
+  reports the task as `COMPLETED`, or a later failed request is independently
+  confirmed idle under the exception below.
 
 An addressed marker and an older authenticated App finding are not required for
 this path. An unmarked same-author reply remains diagnostic discussion; its prose
@@ -79,12 +84,29 @@ saved-verdict recovery and same-head deduplication still apply. This does not
 resend feedback, clear receipts, manufacture acceptance clocks or renew the
 no-commit checkpoint budget after a head change.
 
+A later CI request can fail after the selected review corrections completed
+and their commit was pushed. A CLI `FAILED` summary does not invalidate those
+earlier completions. The CLI can exit nonzero for that failed state, leaving
+no normalized summary; an absent summary also requires the same independent
+native proof. For this case, complete native history must corroborate
+the exact current failed/error request and response, matching their identities,
+statuses, timestamps and parent/child relationships, with no active or queued
+work. The current native observation is checked again after the completion
+reads. Cancellation, incomplete or changing evidence, and any selected baseline
+without a positively observed completed successor retain the wait. Missing
+historical baselines do not use this failed-task exception. Initial PR recovery
+and successful current-task settlement retain their existing success criteria.
+The returned `completed` readiness describes the selected older feedback; it
+never declares the later failed request successful.
+
 Production emits `pr.review-thread-gate` with outcome `DEFERRED`,
 `effect=completed-cloud-review-reassessment`, `examined_head` and
 `blocking_thread_ids`. The event records review admission, not a fresh repair
 handoff, accepted closure or successful merge. Regression coverage is in
 `tests/test_completed_cloud_review_reassessment.py` and
-`tests/test_codex_completed_review_feedback.py`.
+`tests/test_codex_completed_review_feedback.py`,
+`tests/test_codex_failed_task_review_feedback.py`, and
+`tests/test_codex_failed_current_task.py`.
 
 ## First current-head review with retained historical feedback
 

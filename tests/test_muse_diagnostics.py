@@ -21,6 +21,8 @@ from src.auto_coder.logger_config import setup_logger
 from src.auto_coder.muse_diagnostics import MARKER, MuseInvocationObserver, TimedFrame, display
 from tests.test_muse_msp import _host, _manager, _repository
 
+pytestmark = pytest.mark.usefixtures("_use_real_sleep")
+
 _GATED_PEER = r"""#!/usr/bin/env python3
 import json, os, sys, time
 from pathlib import Path
@@ -135,8 +137,8 @@ class _Call:
 
 
 @contextmanager
-def _gated_call(manager, gate: Path):
-    call = _Call(manager)
+def _gated_call(manager, gate: Path, prompt: str = "first"):
+    call = _Call(manager, prompt)
     try:
         yield call
     finally:
@@ -266,20 +268,18 @@ def test_failed_stderr_observation_releases_call_before_next_invocation(tmp_path
 def test_partial_stdout_counts_bytes_but_not_a_decoded_response_and_same_call_finishes(tmp_path, monkeypatch, _use_real_commands, sinks):
     _, log_file = sinks
     manager, gate, seen = _gated(tmp_path, monkeypatch, "partial")
-    call = _Call(manager)
-    snapshot = _wait_for(
-        lambda: seen.exists()
-        and next(
-            (heartbeat for heartbeat in reversed(_heartbeats(log_file)) if heartbeat["activity"]["stdout_buffered_bytes"] == 20),
-            None,
+    with _gated_call(manager, gate) as call:
+        snapshot = _wait_for(
+            lambda: seen.exists()
+            and next(
+                (heartbeat for heartbeat in reversed(_heartbeats(log_file)) if heartbeat["activity"]["stdout_buffered_bytes"] == 20),
+                None,
+            )
         )
-    )
-    frames_before = snapshot["activity"]["frames"]["count"]
+        frames_before = snapshot["activity"]["frames"]["count"]
 
-    assert snapshot["activity"]["stdout_buffered_bytes"] == 20
-    assert snapshot["wait"]["request"]["response_received"] is False
-    gate.write_text("go")
-    call.join()
+        assert snapshot["activity"]["stdout_buffered_bytes"] == 20
+        assert snapshot["wait"]["request"]["response_received"] is False
     assert call.result == "gated-answer"
     end = [record for record in _records(log_file.read_text()) if record["kind"] == "end"][-1]
     assert end["activity"]["frames"]["count"] > frames_before
@@ -289,15 +289,13 @@ def test_partial_stdout_counts_bytes_but_not_a_decoded_response_and_same_call_fi
 def test_blocked_write_is_partial_and_not_an_accepted_turn(tmp_path, monkeypatch, _use_real_commands, sinks):
     _, log_file = sinks
     manager, gate, _ = _gated(tmp_path, monkeypatch, "stopread")
-    call = _Call(manager, "x" * (2 * 1024 * 1024))
-    snapshot = _wait_for(lambda: next((h for h in _heartbeats(log_file) if h["wait"]["write"]["write"] == "partial"), None))
+    with _gated_call(manager, gate, "x" * (2 * 1024 * 1024)) as call:
+        snapshot = _wait_for(lambda: next((h for h in _heartbeats(log_file) if h["wait"]["write"]["write"] == "partial"), None))
 
-    assert snapshot["phase"] == "turn_submission" and snapshot["wait"]["reason"] == "pipe_write"
-    assert 0 < snapshot["wait"]["write"]["bytes_written"] < snapshot["wait"]["write"]["total_bytes"]
-    assert snapshot["wait"]["request"]["response_received"] is False
-    assert snapshot["identity"]["turn"] == "unobserved"
-    gate.write_text("go")
-    call.join()
+        assert snapshot["phase"] == "turn_submission" and snapshot["wait"]["reason"] == "pipe_write"
+        assert 0 < snapshot["wait"]["write"]["bytes_written"] < snapshot["wait"]["write"]["total_bytes"]
+        assert snapshot["wait"]["request"]["response_received"] is False
+        assert snapshot["identity"]["turn"] == "unobserved"
     assert call.result == "gated-answer"
 
 
@@ -318,30 +316,26 @@ def test_blocked_write_keeps_original_timeout(tmp_path, monkeypatch, _use_real_c
 def test_busy_pipes_still_report_on_schedule_without_per_event_logging(tmp_path, monkeypatch, _use_real_commands, sinks):
     _, log_file = sinks
     manager, gate, _ = _gated(tmp_path, monkeypatch, "busy", interval=0.3)
-    call = _Call(manager)
-    _wait_for(lambda: any(heartbeat["activity"]["frames"]["count"] > 10 for heartbeat in _heartbeats(log_file)))
-    beats = _heartbeats(log_file)
-    assert beats[-1]["activity"]["frames"]["count"] > 10
-    assert beats[-1]["activity"]["last_method"] == "other"
-    assert beats[-1]["milestones"]["turn_terminal"]["state"] == "unobserved"
-    gate.write_text("go")
-    call.join()
+    with _gated_call(manager, gate) as call:
+        _wait_for(lambda: any(heartbeat["activity"]["frames"]["count"] > 10 for heartbeat in _heartbeats(log_file)))
+        beats = _heartbeats(log_file)
+        assert beats[-1]["activity"]["frames"]["count"] > 10
+        assert beats[-1]["activity"]["last_method"] == "other"
+        assert beats[-1]["milestones"]["turn_terminal"]["state"] == "unobserved"
     assert len(_records(log_file.read_text())) < 40
 
 
 def test_post_terminal_host_exit_wait_is_reported_with_retained_milestones(tmp_path, monkeypatch, _use_real_commands, sinks):
     _, log_file = sinks
     manager, gate, _ = _gated(tmp_path, monkeypatch, "hold-exit", timeout=20)
-    call = _Call(manager)
-    snapshot = _wait_for(lambda: next((h for h in _heartbeats(log_file) if h["phase"] == "post_terminal_host_exit_wait"), None))
+    with _gated_call(manager, gate) as call:
+        snapshot = _wait_for(lambda: next((h for h in _heartbeats(log_file) if h["phase"] == "post_terminal_host_exit_wait"), None))
 
-    assert snapshot["wait"]["reason"] == "host_exit_wait"
-    assert snapshot["host"]["state"] == "running" and snapshot["host"]["stdin_closed"] is True
-    assert snapshot["host"]["writers"] == "unobserved"
-    assert snapshot["milestones"]["assistant_text"]["state"] == "observed"
-    assert snapshot["milestones"]["turn_terminal"]["terminal"] == "completed"
-    gate.write_text("go")
-    call.join()
+        assert snapshot["wait"]["reason"] == "host_exit_wait"
+        assert snapshot["host"]["state"] == "running" and snapshot["host"]["stdin_closed"] is True
+        assert snapshot["host"]["writers"] == "unobserved"
+        assert snapshot["milestones"]["assistant_text"]["state"] == "observed"
+        assert snapshot["milestones"]["turn_terminal"]["terminal"] == "completed"
     assert call.result == "gated-answer"
     assert [record["kind"] for record in _records(log_file.read_text())].count("error") == 0
 
@@ -481,11 +475,9 @@ def test_nested_receipt_write_does_not_disable_response_heartbeats():
 def test_approval_receipt_before_ack_keeps_response_wait_reporting(tmp_path, monkeypatch, _use_real_commands, sinks):
     _, log_file = sinks
     manager, gate, seen = _gated(tmp_path, monkeypatch, "approval-gap", interval=0.2, timeout=120, options=["--disable-approval"])
-    call = _Call(manager)
-    beats = _wait_for(lambda: seen.exists() and (response_beats if len(response_beats := [beat for beat in _heartbeats(log_file) if beat["phase"] == "turn_submission" and beat["wait"]["reason"] == "response_wait"]) >= 2 else None))
-    assert len(beats) >= 2
-    gate.write_text("go")
-    call.join()
+    with _gated_call(manager, gate) as call:
+        beats = _wait_for(lambda: seen.exists() and (response_beats if len(response_beats := [beat for beat in _heartbeats(log_file) if beat["phase"] == "turn_submission" and beat["wait"]["reason"] == "response_wait"]) >= 2 else None))
+        assert len(beats) >= 2
     assert call.result == "gated-answer"
 
 

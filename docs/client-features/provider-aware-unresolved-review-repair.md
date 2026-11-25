@@ -117,10 +117,15 @@ For ordinary Codex feedback, the controller can instead observe completion for
 independent review admission. Every selected actionable identity must have a
 confirmed delivery receipt, with complete current discussion and no uncertain
 source. It rechecks the exact current PR and originating task ownership. The
-provider must report `COMPLETED`, and its native chronological history must
-show a completed assistant turn later than each selected request's retained
-pre-send baseline. A terminal task unrelated to those sends, unavailable history, active
-work, new feedback or unknown delivery cannot supply this observation.
+native chronological history must show a completed assistant turn later than
+each selected request's retained pre-send baseline. The task normally reports
+`COMPLETED`. If a later request reports `FAILED`, or the CLI exits nonzero
+without a normalized summary, the selected earlier completions remain usable only after a complete coherent native graph proves
+the current failed/error request idle, with matching current request/response
+identity, status and time and no active work. A second current-task observation
+must agree. Failed current work cannot replace a missing selected completion;
+cancellation, unavailable history, new feedback or unknown delivery retain the
+wait. This admission does not label the failed request successful.
 
 The first current-head independent validator may then proceed without an
 addressed marker or an older App finding. The controller does not turn the

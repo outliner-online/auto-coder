@@ -247,14 +247,17 @@ approval or completion. Replaying a previously blocked decision uses the existin
 handoff rather than adding another model review or provider request.
 
 When acknowledged cloud corrections leave ordinary review threads unresolved,
-an authentic older-head finding can still enter its first current-head review.
-The existing review-thread gate records a deferred
+the current head can enter its first independent review even without an authentic
+older-head finding. An existing authentic older-head finding can also continue
+to revalidation. The existing review-thread gate records a deferred
 `acknowledged-review-reassessment` effect with the examined head, ordinary
-blocking thread IDs and authenticated revalidation thread IDs. This admission
-is separate from the preceding deferred repair observation and the following
-validator result. It is not an explicit force request, an external-thread
-closure, or merge completion. Changed post-Codex discussion, newly actionable
-feedback and observed uncertain delivery retain their existing waits.
+blocking thread IDs and authenticated revalidation thread IDs; that last list
+is empty for ordinary-only admission. This admission is separate from the
+preceding deferred repair observation and the following validator result.
+It is not an explicit force request, an external-thread closure, or merge
+completion. Changed post-Codex discussion, newly actionable feedback, observed
+uncertain delivery, the review-count limit and same-head verdict reuse retain
+their existing behavior.
 
 A completed Codex correction with confirmed delivery receipts and a native
 completed assistant turn later than each retained pre-send baseline can admit
@@ -271,6 +274,15 @@ work, the reviewer limit and saved-verdict deduplication retain their existing
 admission behavior. Runnable regressions are listed in
 `docs/dashboard-observability.md`.
 
+The same completed-feedback event applies when a later CI request failed but
+all selected older feedback has positive native completion evidence and the
+exact current failed/error request is independently confirmed idle twice.
+It describes completion of the selected feedback, not success of the later
+failed request. Missing selected completion, cancellation, active work or
+changed current evidence still defer without a review invocation. The
+production regression exercises the real readiness observer and the mounted
+detail renderer; no new event origin or schema is introduced.
+
 ### Retained feedback with a settled current Codex task
 
 When historical pre-send evidence is absent, the separate first-current-head
@@ -281,3 +293,27 @@ a new origin or schema. This records permission to independently inspect the
 current head; it does not describe the absent historical request as completed.
 Delivery, later independent findings, correction and merge retain their own
 separate stages. See [the admission contract](settled-codex-task-review-reassessment.md).
+
+### Reviewer results waiting for GitHub confirmation
+
+A completed reviewer interaction can remain unaccepted while current HEAD or
+other required input evidence is unavailable. The existing Decision Log then
+shows `pr.adversarial-validation` / `DEFERRED` with
+`effect=validation-result-retained`, the acceptance or publication-reconciliation
+phase, the original
+`attempt_id` and `attempt_sequence`, `examined_head`, the concrete `reason`
+(such as `rate_limit_cooldown` or `publisher_publication_pending` with its
+diagnostic detail), and `retry_not_before`.
+
+After current inputs are confirmed unchanged, `effect=validation-result-resumed`
+records resumption of that same attempt without another LLM call. It does not
+add an executed interaction or imply approval, publication or merge. Those
+boundaries retain their own result events. A confirmed target/input change or
+newer applicable attempt records `SUPERSEDED` with
+`effect=validation-result-superseded`; the old native report remains history.
+An unavailable observation continues to wait and is not evidence of a changed
+head. The audit appends a pending acceptance effect with the actual reason and
+retry deadline while retaining the native verdict. If GitHub accepted the review
+before local acknowledgment was interrupted, exact native-publication
+reconciliation appends a confirmed effect without another POST; audit records
+remain non-authorizing. See [deferred PR validation results](deferred-pr-validation-results.md).

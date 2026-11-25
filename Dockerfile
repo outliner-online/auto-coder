@@ -25,7 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     test "$(/usr/local/bin/opencode --version)" = "$OPENCODE_VERSION" && \
     npm install --prefix /tmp/codex --ignore-scripts --no-audit --no-fund --no-save "@openai/codex-linux-${OPENCODE_ARCH}@npm:@openai/codex@${CODEX_VERSION}-linux-${OPENCODE_ARCH}" && \
     install -m 0755 "/tmp/codex/node_modules/@openai/codex-linux-${OPENCODE_ARCH}/vendor/${CODEX_ARCH}-unknown-linux-musl/bin/codex" /usr/local/bin/codex && \
+    install -m 0755 "/tmp/codex/node_modules/@openai/codex-linux-${OPENCODE_ARCH}/vendor/${CODEX_ARCH}-unknown-linux-musl/bin/codex-code-mode-host" /usr/local/bin/codex-code-mode-host && \
     test "$(/usr/local/bin/codex --version)" = "codex-cli $CODEX_VERSION" && \
+    /usr/local/bin/codex-code-mode-host --help > /dev/null && \
     rm -rf /tmp/opencode /tmp/codex && \
     rm -rf /var/lib/apt/lists/*
 
@@ -45,5 +47,6 @@ ENV PATH="/opt/auto-coder/.venv/bin:/home/node/.opencode/bin:${PATH}"
 RUN python -B -m auto_coder.build_provenance embed
 COPY --from=build /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=build /usr/local/bin/codex /usr/local/bin/codex
+COPY --from=build /usr/local/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host
 WORKDIR /workspace
 ENTRYPOINT ["auto-coder"]
