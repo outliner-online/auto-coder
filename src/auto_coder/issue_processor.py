@@ -1797,7 +1797,13 @@ def _create_pr_for_issue(
 
         # Create PR using GhApi
         try:
-            api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write", "issues": "write"})
+            if isinstance(github_client, GitHubClient):
+                api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write", "issues": "write"})
+            else:
+                # Lightweight third-party/test adapters retain the historical
+                # explicit-token interface. Production controller clients are
+                # always GitHubClient instances and take the renewable route.
+                api = get_ghapi_client(github_client.token)
             owner, repo = repo_name.split("/")
 
             # Check if PR already exists

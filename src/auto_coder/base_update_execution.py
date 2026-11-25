@@ -73,7 +73,10 @@ class BaseUpdateConflictExecutionService:
 
             try:
                 client = github_client or p.GitHubClient.get_instance()
-                api = client.api_for(request.repository, required_permissions={"pull_requests": "read"})
+                if isinstance(client, p.GitHubClient):
+                    api = client.api_for(request.repository, required_permissions={"pull_requests": "read"})
+                else:
+                    api = p.get_ghapi_client(client.token)
                 owner, repo = request.repository.split("/")
                 current_pr = api.pulls.get(owner, repo, request.pr_number)
             except Exception as exc:

@@ -1046,10 +1046,12 @@ class GitHubClient:
         """Select one repository-bound credential for the next wire request."""
         from ..github_controller_auth import ControllerCredential
 
-        if self._auth_provider is not None:
-            if self._auth_repository is None or repo_name.casefold() != self._auth_repository.casefold():
+        auth_provider = getattr(self, "_auth_provider", None)
+        auth_repository = getattr(self, "_auth_repository", None)
+        if auth_provider is not None:
+            if auth_repository is None or repo_name.casefold() != auth_repository.casefold():
                 raise RuntimeError("Controller client repository binding mismatch")
-            return self._auth_provider.credential_for(repo_name, required_permissions)
+            return auth_provider.credential_for(repo_name, required_permissions)
         return ControllerCredential(self.token, "personal", repository=repo_name, permissions=tuple(sorted(required_permissions.items())), snapshot_id="legacy")
 
     def api_for(self, repo_name: str, *, required_permissions: Mapping[str, str] | None = None, subsystem: str = "ghapi", extra_headers: Mapping[str, str] | None = None) -> GhApi:
@@ -1081,7 +1083,7 @@ class GitHubClient:
         """
         client = get_caching_client()
         url = "https://api.github.com/graphql"
-        if repo_name is None and self._auth_provider is not None:
+        if repo_name is None and getattr(self, "_auth_provider", None) is not None:
             owner = variables.get("owner") if variables else None
             name = variables.get("name") if variables else None
             if isinstance(owner, str) and isinstance(name, str):
