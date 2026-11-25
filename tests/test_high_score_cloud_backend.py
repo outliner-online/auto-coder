@@ -200,6 +200,7 @@ class TestDifficultIssueHandling:
             mock_github,
             backend_name="claude-opus-routine",
             label_context=None,
+            acceptance_observer=ANY,
         )
 
     @patch("auto_coder.issue_processor._process_issue_codex_cloud_mode")

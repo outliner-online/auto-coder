@@ -1213,56 +1213,18 @@ def _process_issue_high_score_cloud(
         if not candidates:
             raise CloudSubmissionNotStartedError("No configured high-score Cloud backend is eligible to submit work")
 
-    rejected_submissions = 0
-    for backend_name in candidates:
-        b_cfg = llm_config.get_backend_config(backend_name)
-        backend_type = (b_cfg and b_cfg.backend_type) or backend_name
-        issue_number = issue_data["number"]
-        _record_dispatch_stage(
-            issue_number,
-            "issue.dispatch.selection",
-            f"issue#{issue_number} dispatch candidate selected",
-            Outcome.UNKNOWN,
-            {"candidate_pool": "high-score-cloud", "backend_type": backend_type, "backend_name": backend_name},
-            kind=EventKind.STAGE_STARTED,
+    if candidates:
+        dispatch = _dispatch_issue_candidates(
+            repo_name,
+            issue_data,
+            config,
+            github_client,
+            candidates,
+            label_context=label_context,
+            implementation_slots=implementation_slots,
+            retry_authority=retry_authority,
         )
-
-        try:
-            if backend_type == "claude-routine":
-                return _process_issue_claude_routine_mode(
-                    repo_name,
-                    issue_data,
-                    config,
-                    github_client,
-                    backend_name=backend_name,
-                    label_context=label_context,
-                    **({"manual_retry": True} if manual_retry else {}),  # type: ignore[arg-type]
-                    **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
-                )
-            elif backend_type == "codex-cloud":
-                return _process_issue_codex_cloud_mode(
-                    repo_name,
-                    issue_data,
-                    config,
-                    github_client,
-                    backend_name=backend_name,
-                    label_context=label_context,
-                    **({"implementation_slots": implementation_slots} if implementation_slots is not None else {}),  # type: ignore[arg-type]
-                    **({"manual_retry": True} if manual_retry else {}),  # type: ignore[arg-type]
-                    **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
-                )
-        except (AutoCoderUsageLimitError, CloudSubmissionNotStartedError) as e:
-            rejected_submissions += 1
-            logger.warning(f"Cloud backend '{backend_name}' rejected submission: {e}. Trying next backend.")
-            continue
-        except Exception as e:
-            if manual_retry or retry_authority is not None:
-                raise
-            logger.warning(f"Cloud backend '{backend_name}' failed: {e}. Trying next backend.")
-            continue
-
-    if candidates and rejected_submissions == len(candidates):
-        raise CloudSubmissionNotStartedError("All configured high-score Cloud backends rejected submission before remote work started")
+        return dispatch.actions or [dispatch.result.diagnostic]
 
     from .cli_helpers import create_high_score_backend_manager, create_high_score_cloud_backend_manager
 
