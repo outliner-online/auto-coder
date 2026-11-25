@@ -144,7 +144,21 @@ def _materialize_recorded_attempt(tmp_path: Path) -> tuple[Path, Path, dict[str,
         plan_path = tmp_path / "plan.json"
         plan_handle = evidence.extractfile(members[plan_name])
         assert plan_handle is not None
-        plan_path.write_bytes(plan_handle.read())
+        plan = json.loads(plan_handle.read())
+        # The recorded attempt predates the split event/run-head identity fields.
+        # Adapt only the copied, digest-external origin to the current verifier;
+        # the immutable archived bytes and semantic plan remain unchanged.
+        plan["origin"].update(
+            {
+                "event_sha": provenance["source_sha"],
+                "event_name": run["event"],
+                "run_head_sha": run["head_sha"],
+            }
+        )
+        plan_path.write_text(
+            json.dumps(plan, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         for name, member in members.items():
             if not name.endswith("/receipt.json"):
                 continue
@@ -177,6 +191,10 @@ def test_production_complete_source_inventory_preserves_current_collection_exact
             "--source-sha",
             sha,
             "--event-sha",
+            sha,
+            "--event-name",
+            "pull_request",
+            "--run-head-sha",
             sha,
             "--run-id",
             "1",
