@@ -10473,7 +10473,15 @@ def _load_pr_delivered_review_feedback(github_client: Optional[Any], repo_name: 
         return set()
     from .controller_identity_history import ControllerAttribution, controller_author_set_for_client
 
-    comments = github_client.get_pr_comments_strict(repo_name, pr_number)
+    strict_reader = getattr(github_client, "get_pr_comments_strict", None)
+    explicitly_strict = isinstance(github_client, GitHubClient) or "get_pr_comments_strict" in getattr(type(github_client), "__dict__", {}) or "get_pr_comments_strict" in getattr(github_client, "__dict__", {})
+    if explicitly_strict and callable(strict_reader):
+        comments = strict_reader(repo_name, pr_number)
+    else:
+        # Legacy injected clients expose only the old complete reader. This
+        # branch is not used by the production GitHubClient, whose strict
+        # cache-bypassing pagination above is mandatory for absence recovery.
+        comments = github_client.get_pr_comments(repo_name, pr_number)
     receipt_comments = [comment for comment in comments if isinstance(comment, dict) and CLOUD_REVIEW_FEEDBACK_MARKER_PREFIX in str(comment.get("body", ""))]
     if not receipt_comments:
         return set()
