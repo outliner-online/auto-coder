@@ -8557,6 +8557,7 @@ class AutomationEngine:
                             self.github,
                             label_context=should_process,
                             implementation_slots=implementation_slots,
+                            dispatch_observer=lambda dispatch: setattr(result, "dispatch_result", dispatch.result),
                             **({"manual_retry": True} if manual_retry else {}),  # type: ignore[arg-type]
                             **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
                         )

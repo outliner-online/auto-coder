@@ -1177,6 +1177,7 @@ def _process_issue_high_score_cloud(
     implementation_slots: Optional[ImplementationSlotRepository] = None,
     manual_retry: bool = False,
     retry_authority: Optional[ImplementationRetryRequest] = None,
+    dispatch_observer: Optional[Callable[[IssueDispatchExecution], None]] = None,
 ) -> List[str]:
     """Process an issue using the backend_with_high_score_cloud configuration with failover support.
 
@@ -1224,6 +1225,8 @@ def _process_issue_high_score_cloud(
             implementation_slots=implementation_slots,
             retry_authority=retry_authority,
         )
+        if dispatch_observer is not None:
+            dispatch_observer(dispatch)
         return dispatch.actions or [dispatch.result.diagnostic]
 
     from .cli_helpers import create_high_score_backend_manager, create_high_score_cloud_backend_manager
