@@ -26,7 +26,7 @@ During the multi-stage build, the target architecture is resolved explicitly:
 - `amd64` (`x86_64`) installs `opencode-linux-x64@1.18.31` from the official npm registry.
 - `arm64` (`aarch64`) installs `opencode-linux-arm64@1.18.31` from the same registry.
 - The build uses the native glibc binary without running npm lifecycle scripts and verifies `opencode --version` before copying it into the runtime image.
-- The same build installs the pinned Codex `0.159.2` native musl binary from the official `@openai/codex@0.159.2-linux-x64` or `@openai/codex@0.159.2-linux-arm64` npm platform distribution, installed under the corresponding `@openai/codex-linux-*` npm alias. It checks `codex --version` before copying the executable into the final image; the GitHub Release asset download is not required.
+- The same build installs the pinned Codex `0.159.2` native musl binary from the official `@openai/codex@0.159.2-linux-x64` or `@openai/codex@0.159.2-linux-arm64` npm platform distribution, installed under the corresponding `@openai/codex-linux-*` npm alias. It installs both `codex` and the matching `codex-code-mode-host` from that same platform bundle with mode `0755`, checks `codex --version` and `codex-code-mode-host --help`, and copies both executables together into `/usr/local/bin` in the final image. The companion must remain beside `codex` so repository-inspection tools can start; installing the main executable alone is incomplete. The GitHub Release asset download is not required.
 - Any unsupported platform fails closed immediately.
 
 The resulting binary is installed at `/usr/local/bin/opencode` with executable
@@ -40,6 +40,12 @@ docker run --rm --entrypoint opencode auto-coder:latest --version
 ```
 
 Verifying `opencode --version` confirms the declared pinned release (`1.18.31`).
+
+`tests/test_codex_container_packaging.py` executes the Dockerfile's Codex install
+and smoke commands against disposable platform bundles for both architectures,
+then follows the final-stage COPY instructions and starts both installed
+executables. It checks preserved bytes and executable modes and rejects a bundle
+missing the code-mode host without building an image or fetching a provider.
 
 ## Effective container HOME and storage layout
 
