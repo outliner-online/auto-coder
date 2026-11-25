@@ -50,8 +50,8 @@ def scenario(tmp_path, monkeypatch, _use_real_commands, audit_store):
     _apply_standard_merge_gates(monkeypatch, merge_result=True)
     merge = Mock(return_value=True)
     monkeypatch.setattr(pr_processor, "_merge_pr", merge)
-    client = _build_github_client(head)
-    data = _build_pr_data(head)
+    client = _build_github_client(head, repo=repo)
+    data = _build_pr_data(head, repo=repo)
     config = _build_config()
     seen = []
 

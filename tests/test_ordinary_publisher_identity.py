@@ -8,6 +8,7 @@ import pytest
 
 from auto_coder import pr_processor
 from auto_coder.automation_config import PRProcessingOutcome
+from auto_coder.deferred_pr_validation import DeferredPRValidationStore
 from auto_coder.effective_decision_application import PUBLICATION_PENDING, DecisionRetentionError, EffectiveDecisionStore, build_retained_record, derive_application, retain_ordinary_correction
 from auto_coder.github_app_reviewer import ReviewerAppIdentity, ReviewPublicationResult
 from tests.test_accepted_finding_bridge import REPO, Env, env  # noqa: F401
@@ -55,19 +56,30 @@ def test_production_ordinary_resumption_holds_without_canonical_intent(flow_env:
     store.storage_path.write_text(json.dumps(data))
     before = store.load(flow.pr)
     assert before is not None and before.publication == PUBLICATION_PENDING
+    pending_store = DeferredPRValidationStore(REPO)
+    original_pending = pending_store.load(flow.pr)
+    assert original_pending is not None
+    assert (original_pending.attempt_id, original_pending.attempt_sequence) == (before.attempt_id, before.attempt_sequence)
     assert flow_env.ledger.get_pending_publication_intents("https://api.github.com", REPO, flow.pr) == ()
     _reconstruct_flow_stores(flow)
     flow.model_responses = []
     for force in (False, True):
         actions = flow.run(closure=script, force=force)
-        assert any("publisher identity" in action for action in actions), list(actions)
+        assert any("publisher" in action for action in actions), list(actions)
+        assert all("head_observation_unavailable" not in action for action in actions)
         assert flow.reviews == [], list(actions)
-        assert flow.status.outcome is PRProcessingOutcome.FAILED
+        assert flow.status.outcome is (PRProcessingOutcome.FAILED if force else PRProcessingOutcome.DEFERRED)
         assert flow.handoffs == 0 and flow.merge.call_count == 0
         assert flow.model_calls == 1
+        if not force:
+            held = pending_store.load(flow.pr)
+            assert held is not None and held.semantic_identity() == original_pending.semantic_identity()
+            assert "publisher_publication_pending" in held.reason
     after = store.load(flow.pr)
     assert after.ordinary_correction == before.ordinary_correction
     assert after.publication == PUBLICATION_PENDING
+    assert (after.attempt_id, after.attempt_sequence) == (before.attempt_id, before.attempt_sequence)
+    assert (after.publication_identity_version, after.publication_publisher_app_id) == (version, saved_app)
 
 
 @pytest.mark.parametrize("app_id", [4765828, 5792531])
@@ -255,6 +267,10 @@ def test_production_discussion_change_keeps_uncertain_publisher_hold(flow_env: E
     record["publication_publisher_app_id"] = saved_app
     store.storage_path.write_text(json.dumps(data))
     before = store.load(flow.pr)
+    pending_store = DeferredPRValidationStore(REPO)
+    original_pending = pending_store.load(flow.pr)
+    assert original_pending is not None
+    assert (original_pending.attempt_id, original_pending.attempt_sequence) == (before.attempt_id, before.attempt_sequence)
     assert flow_env.ledger.get_pending_publication_intents("https://api.github.com", REPO, flow.pr) == ()
     monkeypatch.setattr(pr_processor, "substantive_discussion_digest", lambda *_args: "changed-discussion")
     _reconstruct_flow_stores(flow)
@@ -262,9 +278,16 @@ def test_production_discussion_change_keeps_uncertain_publisher_hold(flow_env: E
     for force in (False, True):
         actions = flow.run(closure=script, force=force)
         assert any("publisher" in action and "pending" in action for action in actions), list(actions)
+        assert all("head_observation_unavailable" not in action for action in actions)
         assert flow.reviews == []
         assert flow.handoffs == 0 and flow.merge.call_count == 0
         assert flow.model_calls == 1
+        if not force:
+            held = pending_store.load(flow.pr)
+            assert held is not None and held.semantic_identity() == original_pending.semantic_identity()
+            if version == 0:
+                assert flow.status.outcome is PRProcessingOutcome.DEFERRED
+                assert "publisher_publication_pending" in held.reason
         after = store.load(flow.pr)
         assert after.ordinary_correction == before.ordinary_correction
         assert after.publication == PUBLICATION_PENDING

@@ -51,6 +51,7 @@ from .adversarial_validator import (
     observed_roots_from_claimed_threads,
     project_accepted_findings,
     run_adversarial_validation,
+    validation_input_identity,
     validation_snapshot_is_current,
 )
 from .attempt_manager import build_pr_attempt_trigger, get_current_attempt, increment_attempt
@@ -70,6 +71,7 @@ from .claude_followup_waits import ClaudeFollowupHoldActive, get_claude_followup
 from .codex_cloud_task import canonical_codex_cloud_task_url, extract_codex_cloud_task_id, is_valid_codex_cloud_task_id
 from .codex_pr_attribution import AttributionDisposition, CodexPrAttributionRepository, resolve_codex_pr_origin, task_ids_from_text
 from .conflict_resolver import ConflictPublicationDisposition, _get_merge_conflict_info, resolve_merge_conflicts_with_llm, resolve_pr_merge_conflicts
+from .deferred_pr_validation import DeferredPRValidation, DeferredPRValidationStateError, DeferredPRValidationStore, deferred_validation_policy_identity
 from .dispatch_claim_store import DispatchIdentity, DispatchOutcome, get_dispatch_claim_store
 from .effective_decision_application import (
     HANDOFF_DISPATCHED,
@@ -113,6 +115,7 @@ from .git_commit import commit_and_push_changes, git_push, save_commit_failure_h
 from .git_info import get_commit_log
 from .github_app_reviewer import ExactReviewComment, GitHubAppReviewer, ReviewerAppIdentity, load_reviewer_app_config, publish_adversarial_review, recover_pending_adversarial_publications, resolve_reviewer_app_identity
 from .github_pending_work import WorkIdentity, get_pending_work_store
+from .github_request_governor import GitHubRequestDeferred
 from .implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from .invocation_admission import bind_ci_repair_designation, bind_invocation_target
 from .issue_context import extract_linked_issues_from_pr_body, get_linked_issues_context, resolve_issue_oracles, validate_issue_references
@@ -123,6 +126,7 @@ from .local_ci_repair_execution import CorrectionPorts, LocalCIRepairPorts, Loca
 from .local_job_handoff import LocalJobKind, LocalJobRecord, LocalJobState, LocalJobStore
 from .logger_config import get_gh_logger, get_logger
 from .ordinary_closure_evidence import ApplicationStatus, ClosureEvidenceRecord, EvidenceState, ObservedTarget, restore_ordinary_result
+from .ordinary_correction_references import build_correction_reference_context
 from .pr_blocker_closure import _BLOCKER_ID_RE, _GAP_ID_RE
 from .pr_processing_evidence import FinalGateEvidence
 from .pr_progress_policy import CIEvidenceState, ProgressPhase, ProgressRoute, PRProgressInputs, PRProgressScope, select_pr_progress
@@ -6323,6 +6327,175 @@ class PRReviewCoordinationResult(PRActionList):
         self.disposition = disposition if isinstance(disposition, ReviewDisposition) else ReviewDisposition(disposition)
 
 
+def _deferred_validation_context_identity(
+    repo_name: str,
+    pr_data: dict,
+    opening_token: str,
+    inputs: Optional[TwoTierGateInputs],
+) -> str:
+    """Bind the proposal to the original PR opening and optional Strong context."""
+    CanonicalPRBlockerLedger().initialize_namespace("https://api.github.com", repo_name, int(pr_data["number"]))
+    payload: dict = {
+        "title": pr_data.get("title") or "",
+        "body": pr_data.get("body") or "",
+        "opening": opening_token,
+    }
+    if inputs is not None:
+        snapshot = inputs.gate.state.snapshot(int(pr_data["number"]))
+        strong = snapshot.accepted_strong_round
+        payload["strong"] = {
+            "contract": inputs.contract.identity,
+            "policy": inputs.policy.identity,
+            "open_epoch": snapshot.open_epoch,
+            "round": strong.round_id if strong is not None else "",
+            "finding_set_revision": snapshot.finding_set_revision,
+            "findings": [asdict(item) for item in snapshot.open_findings],
+        }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _defer_validation_result(
+    store: DeferredPRValidationStore,
+    pending: DeferredPRValidation,
+    actions: PRReviewCoordinationResult,
+    processing_status: Optional[ProcessedPRResult],
+    runtime: PRReviewRuntime,
+    error: Optional[Exception] = None,
+    *,
+    phase: str = "gap-state-acceptance",
+    unavailable_reason: str = "head_observation_unavailable",
+) -> None:
+    """Keep the completed result pending and expose the real retry obligation."""
+    if error is None:
+        reason, retry_at = pending.reason or "head_observation_unavailable", pending.retry_not_before
+        if reason.startswith("publisher_publication_pending"):
+            phase = "publication-reconciliation"
+    else:
+        reason = error.reason if isinstance(error, GitHubRequestDeferred) else unavailable_reason
+        if not isinstance(error, GitHubRequestDeferred) and unavailable_reason != "head_observation_unavailable":
+            reason = f"{reason}: {redact_string(str(error))[:2000]}"
+        retry_at = error.retry_at if isinstance(error, GitHubRequestDeferred) else time.time() + 60.0
+        pending = store.defer(pending.attempt_id, reason, retry_at)
+        retry_at = pending.retry_not_before
+        record_effect(
+            PrAdversarialReviewTarget(repository=pending.repository, pr_number=pending.pr_number, head_sha=pending.head_sha),
+            pending.review_id,
+            "pending",
+            {"phase": phase, "attempt_id": pending.attempt_id, "attempt_sequence": pending.attempt_sequence, "examined_head": pending.head_sha, "reason": reason, "retry_not_before": retry_at},
+        )
+    actions.retry_not_before = retry_at
+    actions.record_disposition(ReviewDisposition.RECONCILIATION_WAIT)
+    runtime.active_attempt_status = "AWAITING_ACCEPTANCE"
+    actions.append(f"Retained adversarial-validation result for PR #{pending.pr_number} from attempt {pending.attempt_sequence}; current inputs await confirmation ({reason}); retry_not_before={retry_at}")
+    if processing_status is not None:
+        processing_status.error = None
+        processing_status.outcome = PRProcessingOutcome.DEFERRED
+        processing_status.retry_not_before = retry_at
+    _record_pr_stage(
+        pending.pr_number,
+        "pr.adversarial-validation",
+        f"pr#{pending.pr_number} adversarial validation",
+        Outcome.DEFERRED,
+        {"effect": "validation-result-retained", "phase": phase, "attempt_id": pending.attempt_id, "attempt_sequence": pending.attempt_sequence, "examined_head": pending.head_sha, "reason": reason, "retry_not_before": retry_at},
+    )
+
+
+def _discard_deferred_validation(store: DeferredPRValidationStore, pending: DeferredPRValidation, reason: str, *, observed_head: str = "") -> None:
+    """Retire only the stale proposal while preserving its diagnostic history."""
+    store.remove(pending.attempt_id)
+    facts = {"effect": "validation-result-superseded", "phase": "gap-state-acceptance", "attempt_id": pending.attempt_id, "attempt_sequence": pending.attempt_sequence, "examined_head": pending.head_sha, "reason": reason}
+    if observed_head:
+        facts["observed_head"] = observed_head
+    _record_pr_stage(pending.pr_number, "pr.adversarial-validation", f"pr#{pending.pr_number} adversarial validation", Outcome.SUPERSEDED, facts)
+    record_effect(PrAdversarialReviewTarget(repository=pending.repository, pr_number=pending.pr_number, head_sha=pending.head_sha), pending.review_id, "superseded", facts)
+
+
+def _deferred_validation_inputs_current(pending: DeferredPRValidation, pr_data: dict, config: AutomationConfig, github_client: Any) -> bool:
+    """Distinguish changed review inputs from unavailable authoritative evidence."""
+    head = github_client.get_pull_request_head_sha_strict(pending.repository, pending.pr_number)
+    if head != pending.head_sha:
+        return False
+    live = _strict_pull_request_target(github_client, pending.repository, pending.pr_number)
+    if (str(live["head"]["sha"]), str(live["base"]["sha"])) != (pending.head_sha, pending.base_sha):
+        return False
+    current = build_adversarial_validation_context(pending.repository, live, config, github_client, bypass_cache=True, strict_issue_context=True)
+    if current.evidence_retrieval_error or current.requirement_manifest_error or not current.pr_diff or not current.issue_context:
+        raise RuntimeError("Current validation evidence could not be completely observed")
+    return current.validation_snapshot == pending.validation_snapshot and validation_input_identity(current) == pending.input_snapshot
+
+
+def _deferred_validation_canonical_context_current(
+    pending: DeferredPRValidation,
+    pr_data: dict,
+    claimed_review_threads: Sequence[ClaimedReviewThread],
+) -> bool:
+    """Compare the canonical obligations actually supplied to the original reviewer."""
+    original = pending.restore_result().correction_reference_context
+    if original is None:
+        return False
+    bridge, target = _accepted_state_inputs(pending.repository, pr_data, pending.head_sha)
+    projection = project_accepted_findings(bridge, target, claimed_review_threads)
+    if not projection.complete:
+        raise RuntimeError("Current canonical correction context is unavailable")
+    snapshot = bridge.ledger.get_snapshot(target.api_origin, pending.repository, pending.pr_number, require_retained_state=True)
+    current = build_correction_reference_context(snapshot, pending.head_sha, pending.base_sha, original.validation_snapshot, original.requirement_manifest_identity)
+    return current.fingerprint == original.fingerprint
+
+
+def _reconcile_deferred_validation_publication(
+    github_client: Any,
+    pending: DeferredPRValidation,
+    attempts: AdversarialValidationAttemptRepository,
+) -> bool:
+    """Recognize an exact completed publication before attempting to send it again."""
+    effective_store = EffectiveDecisionStore(pending.repository)
+    retained = effective_store.load(pending.pr_number)
+    matching_decision = retained is not None and (retained.repository, retained.pr_number, retained.head_sha, retained.base_sha, retained.attempt_id, retained.attempt_sequence) == (
+        pending.repository,
+        pending.pr_number,
+        pending.head_sha,
+        pending.base_sha,
+        pending.attempt_id,
+        pending.attempt_sequence,
+    )
+    if matching_decision:
+        assert retained is not None
+        if retained.publication_identity_version != 1:
+            raise DecisionRetentionError("The original review publisher binding is unavailable")
+        if retained.publication_publisher_app_id == 0:
+            return False  # The publisher has not reached the send boundary.
+    identity = resolve_reviewer_app_identity(pending.repository)
+    if matching_decision and retained is not None and retained.publication_publisher_app_id != identity.app_id:
+        raise DecisionRetentionError("The original review publisher is unavailable")
+    original = pending.restore_result()
+    expected_status = retained.status if matching_decision and retained is not None else original.result.strip().upper()
+    if expected_status == "PASS" and original.specification_gaps:
+        expected_status = "PASS_WITH_SPECIFICATION_GAPS"
+    expected_state = "APPROVED" if expected_status == "PASS" else "CHANGES_REQUESTED" if expected_status in {"NEEDS_FIX", "NEEDS_TESTS"} else "COMMENTED"
+    head_marker = adversarial_validation_comment_marker(pending.head_sha)
+    attempt_marker = f"<!-- auto-coder-adversarial-validation-attempt:v1:{pending.attempt_sequence}:{pending.attempt_id} -->"
+    for review in github_client.get_pr_reviews_strict(pending.repository, pending.pr_number):
+        login = _comment_value(_comment_value(review, "user") or {}, "login", "")
+        body = _comment_value(review, "body", "")
+        if not identity.matches_login(login) or not isinstance(body, str) or not body.startswith(head_marker) or attempt_marker not in body.splitlines():
+            continue
+        if _comment_value(review, "commit_id", "") != pending.head_sha or _comment_value(review, "state", "") != expected_state or _parse_adversarial_validation_status(body) != expected_status:
+            raise DecisionRetentionError("The original review publication has conflicting target or verdict evidence")
+        recovery = recover_pending_adversarial_publications(pending.repository, pending.pr_number)
+        if not recovery.success:
+            raise DecisionRetentionError(recovery.reason or "The original review roots remain unconfirmed")
+        with attempts.serialized_transition():
+            if matching_decision:
+                current = effective_store.load(pending.pr_number)
+                if current != retained:
+                    raise DecisionRetentionError("The retained review decision changed during publication reconciliation")
+                effective_store.update(pending.pr_number, publication=PUBLICATION_CONFIRMED)
+            attempts.mark_published(pending.attempt_id)
+        record_effect(PrAdversarialReviewTarget(repository=pending.repository, pr_number=pending.pr_number, head_sha=pending.head_sha), pending.review_id, "confirmed", {"phase": "publication-reconciliation", "attempt_id": pending.attempt_id, "attempt_sequence": pending.attempt_sequence})
+        return True
+    return False
+
+
 def _coordinate_pr_review(
     github_client: Any,
     repo_name: str,
@@ -6368,6 +6541,46 @@ def _coordinate_pr_review(
     # disposition can decide whether to resolve it.
     thread_gate_enabled = _is_pr_review_thread_gate_enabled(config, repo_name)
     adv_enabled = _is_pr_adversarial_validation_enabled(config, repo_name)
+    deferred_store = DeferredPRValidationStore(repo_name)
+    deferred_result: Optional[DeferredPRValidation] = None
+    if adv_enabled:
+        try:
+            deferred_result = deferred_store.load(pr_number)
+            if deferred_result is not None:
+                pending_attempts = AdversarialValidationAttemptRepository(repo_name)
+                registered = pending_attempts.get(deferred_result.attempt_id)
+                changed = (
+                    force_adversarial_validation
+                    or adjudication_forces_revalidation
+                    or (scope.head_sha, scope.base_sha) != (deferred_result.head_sha, deferred_result.base_sha)
+                    or deferred_result.policy_identity != deferred_validation_policy_identity(config, thread_gate_enabled, repo_name=repo_name)
+                    or registered is None
+                    or (registered.pr_number, registered.head_sha, registered.sequence) != (pr_number, deferred_result.head_sha, deferred_result.attempt_sequence)
+                    or pending_attempts.latest_sequence(pr_number, deferred_result.head_sha) != deferred_result.attempt_sequence
+                )
+                already_published = pending_attempts.latest_published_sequence(pr_number, deferred_result.head_sha) >= deferred_result.attempt_sequence
+                if already_published:
+                    deferred_store.remove(deferred_result.attempt_id)
+                    deferred_result = None
+                elif changed:
+                    _discard_deferred_validation(deferred_store, deferred_result, "review target, policy, or owning attempt changed")
+                    deferred_result = None
+                elif deferred_result.retry_not_before > time.time():
+                    _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime)
+                    return actions
+                else:
+                    try:
+                        if _reconcile_deferred_validation_publication(github_client, deferred_result, pending_attempts):
+                            actions.append(f"Reconciled the already-published adversarial review for PR #{pr_number} from attempt {deferred_result.attempt_sequence}; no review was resubmitted")
+                            deferred_store.remove(deferred_result.attempt_id)
+                            deferred_result = None
+                    except Exception as exc:
+                        assert deferred_result is not None
+                        _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime, exc, phase="publication-reconciliation", unavailable_reason="publisher_publication_pending")
+                        return actions
+        except DeferredPRValidationStateError as exc:
+            _record_review_wait(repo_name, pr_number, scope.head_sha, actions, processing_status, str(exc))
+            return actions
     revalidating_older_head_threads = False
     forced_same_head_revalidation = False
     saved_review_revalidation = False
@@ -6440,10 +6653,10 @@ def _coordinate_pr_review(
                         # closed, so no repair is replayed or requested for it.
                         gate_retained_resume = _gate_resumption is not None and _gate_resumption.ordinary_pass_retained and current_status != "PASS"
                         gate_assessment = _assess_saved_review_state(repo_name, pr_data, head_sha_for_gate, current_status, _authentic_root_threads(repo_name, claimed_thread_state), force_adversarial_validation, github_client, config)
-                        if gate_assessment.action == SAVED_REVIEW_WAIT:
+                        if gate_assessment.action == SAVED_REVIEW_WAIT and deferred_result is None:
                             _record_review_wait(repo_name, pr_number, head_sha_for_gate, actions, processing_status, gate_assessment.reason)
                             return actions
-                        saved_review_revalidation = gate_assessment.action == SAVED_REVIEW_REVALIDATE or gate_retained_resume or bool(_gate_resumption and _gate_resumption.discussion_changed)
+                        saved_review_revalidation = deferred_result is not None or gate_assessment.action == SAVED_REVIEW_REVALIDATE or gate_retained_resume or bool(_gate_resumption and _gate_resumption.discussion_changed)
                         if saved_review_revalidation:
                             revalidation_reason = _gate_resumption.reason if _gate_resumption and _gate_resumption.discussion_changed else gate_assessment.reason or "its closure was accepted from the retained ordinary result"
                             actions.append(f"Saved {current_status} review for PR #{pr_number} is not clearance: {revalidation_reason}")
@@ -6705,7 +6918,7 @@ def _coordinate_pr_review(
             # An applicable saved ERROR must reach the normal same-head
             # trigger/reuse decision below. A review-count limit cannot turn
             # that non-result into merge clearance (#2770/REQ-001).
-            if adv_review_count >= max_adv_reviews and saved_status != "ERROR" and not provenance_fingerprint and not force_adversarial_validation and not revalidating_older_head_threads and not saved_review_revalidation and not exhaustion_retry_due:
+            if adv_review_count >= max_adv_reviews and deferred_result is None and saved_status != "ERROR" and not provenance_fingerprint and not force_adversarial_validation and not revalidating_older_head_threads and not saved_review_revalidation and not exhaustion_retry_due:
                 exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number)
                 if exhaustion_info and exhaustion_info.is_exhausted:
                     actions.append(f"Automatic merge disabled for PR #{pr_number}: repair allowance exhausted for open blocker(s): {', '.join(exhaustion_info.exhausted_blocker_ids)}")
@@ -6919,10 +7132,10 @@ def _coordinate_pr_review(
             # accepted correction is open, retained reconciliation resumes on
             # new evidence, and unchanged evidence waits without repeating work.
             reuse_assessment = _assess_saved_review_state(repo_name, pr_data, head_sha, published_status, claimed_review_threads, force_adversarial_validation, github_client, config)
-            if reuse_assessment.action == SAVED_REVIEW_WAIT:
+            if reuse_assessment.action == SAVED_REVIEW_WAIT and deferred_result is None:
                 _record_review_wait(repo_name, pr_number, head_sha, actions, processing_status, reuse_assessment.reason)
                 return actions
-            saved_review_revalidation = saved_review_revalidation or reuse_assessment.action == SAVED_REVIEW_REVALIDATE
+            saved_review_revalidation = saved_review_revalidation or deferred_result is not None or reuse_assessment.action == SAVED_REVIEW_REVALIDATE
             if published_status == "PASS" and not saved_review_revalidation:
                 # A same-head native review is not enough to prove ordinary
                 # convergence after a close/reopen.  The durable ordinary PASS
@@ -7062,10 +7275,28 @@ def _coordinate_pr_review(
                         actions.append(f"Skipped duplicate local adversarial-validation trigger for PR #{pr_number}")
                         return actions
                 attempt_repository = AdversarialValidationAttemptRepository(repo_name)
+                deferred_context = None
+                deferred_context_identity = ""
+                thread_snapshot = hashlib.sha256(claimed_review_threads_section.encode()).hexdigest()
+                if deferred_result is not None and retained_reuse is None:
+                    pending_candidate = deferred_result
+                    try:
+                        if not _deferred_validation_inputs_current(deferred_result, pr_data, config, github_client):
+                            _discard_deferred_validation(deferred_store, deferred_result, "reviewed inputs changed")
+                            deferred_result = None
+                        else:
+                            deferred_context = _two_tier_gate_inputs(github_client, repo_name, pr_data)
+                            deferred_context_identity = _deferred_validation_context_identity(repo_name, pr_data, ordinary_opening_token, deferred_context)
+                            if deferred_result.thread_snapshot != thread_snapshot or deferred_result.context_identity != deferred_context_identity or not _deferred_validation_canonical_context_current(deferred_result, pr_data, claimed_review_threads):
+                                _discard_deferred_validation(deferred_store, deferred_result, "review discussion or canonical context changed")
+                                deferred_result = None
+                    except Exception as exc:
+                        _defer_validation_result(deferred_store, pending_candidate, actions, processing_status, runtime, exc)
+                        return actions
                 if retained_reuse is not None and attempt_repository.latest_sequence(pr_number, head_sha) != retained_reuse.attempt_sequence:
                     retained_reuse = None  # a newer attempt exists: its own verdict governs, never the older retained result
                 # Reusing the retained result consumes its existing attempt; no new attempt is registered.
-                if retained_reuse is None and reuse_assessment.recovery_key:
+                if retained_reuse is None and deferred_result is None and reuse_assessment.recovery_key:
                     try:
                         recovery_admitted = EffectiveDecisionStore(repo_name).spend_reconciliation(pr_number, reuse_assessment.recovery_key, head_sha, str((pr_data.get("base") or {}).get("sha") or ""))
                     except DecisionRetentionError as exc:
@@ -7094,7 +7325,10 @@ def _coordinate_pr_review(
                                 "reason": reuse_assessment.reason,
                             },
                         )
-                attempt = AdversarialValidationAttempt(retained_reuse.attempt_id, retained_reuse.attempt_sequence) if retained_reuse is not None else attempt_repository.start(pr_number, head_sha)
+                if deferred_result is not None and retained_reuse is None:
+                    attempt = AdversarialValidationAttempt(deferred_result.attempt_id, deferred_result.attempt_sequence)
+                else:
+                    attempt = AdversarialValidationAttempt(retained_reuse.attempt_id, retained_reuse.attempt_sequence) if retained_reuse is not None else attempt_repository.start(pr_number, head_sha)
                 runtime.active_attempt_id = attempt.attempt_id
                 runtime.decision_attempt_repository = attempt_repository
                 runtime.decision_attempt_sequence = attempt.sequence
@@ -7110,8 +7344,32 @@ def _coordinate_pr_review(
                 closure_inputs: Optional[TwoTierGateInputs] = None
                 closure_gate: Optional[TwoTierPrGate] = None
                 ordinary_authority: Optional[OrdinaryCorrectionEvidence] = None
+                proposal_context_identity = ""
+                proposal_policy_identity = ""
+                resuming_deferred = deferred_result is not None and retained_reuse is None
                 try:
-                    if retained_reuse is not None:
+                    if resuming_deferred:
+                        assert deferred_result is not None
+                        val_result = deferred_result.restore_result()
+                        active_review_id = deferred_result.review_id or None
+                        closure_inputs = deferred_context
+                        if closure_inputs is not None:
+                            closure_gate = closure_inputs.gate
+                            ordinary_authority = _capture_ordinary_correction_authority(repo_name, pr_number, closure_inputs, attempt)
+                            with isolated_pr_head_worktree(repo_name, pr_number, head_sha) as validation_worktree:
+                                closure_input = _capture_ordinary_closure_input(repo_name, pr_number, closure_inputs, attempt, validation_worktree).review_input
+                        bridge, projection_target = _accepted_state_inputs(repo_name, pr_data, head_sha)
+                        projection = project_accepted_findings(bridge, projection_target, claimed_review_threads)
+                        if not projection.complete:
+                            raise RuntimeError("Current accepted finding projection is unavailable")
+                        val_result.accepted_finding_projection = project_accepted_findings(bridge, projection_target, claimed_review_threads, accepted_finding_dispositions(val_result, claimed_review_threads, projection, head_sha)) if projection.records else projection
+                        if not val_result.accepted_finding_projection.complete:
+                            raise RuntimeError("Current accepted finding dispositions could not be confirmed")
+                        fresh_ordinary_result = True
+                        proposal_context_identity = deferred_result.context_identity
+                        actions.append(f"Resuming retained adversarial-validation attempt {attempt.sequence} for PR #{pr_number} without another reviewer")
+                        _record_pr_stage(pr_number, "pr.adversarial-validation", f"pr#{pr_number} adversarial validation", Outcome.DEFERRED, {"effect": "validation-result-resumed", "attempt_id": attempt.attempt_id, "attempt_sequence": attempt.sequence, "examined_head": head_sha})
+                    elif retained_reuse is not None:
                         # The accepted closure's own ordinary result is consumed without a reviewer.
                         val_result = restore_ordinary_result(retained_reuse)
                         active_review_id = record_reused(
@@ -7151,6 +7409,8 @@ def _coordinate_pr_review(
                                 except Exception as closure_exc:
                                     logger.warning(f"Closure context for PR #{pr_number} could not be captured: {closure_exc}")
                                     actions.append(f"Closure context for PR #{pr_number} could not be captured: {closure_exc}; outstanding strong findings remain blocking")
+                                proposal_policy_identity = deferred_validation_policy_identity(config, thread_gate_enabled, repo_name=repo_name)
+                                proposal_context_identity = _deferred_validation_context_identity(repo_name, pr_data, ordinary_opening_token, closure_inputs)
                                 val_result = run_adversarial_validation(
                                     repo_name,
                                     pr_data,
@@ -7166,6 +7426,9 @@ def _coordinate_pr_review(
                                 )
                                 fresh_ordinary_result = True
                 except Exception as e:
+                    if resuming_deferred and deferred_result is not None:
+                        _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime, e)
+                        return actions
                     exception_preview = redact_string(str(e))[:2000]
                     logger.error(f"Adversarial validation execution failed for PR #{pr_number} " f"({type(e).__name__}): {exception_preview}")
                     if processing_status is not None:
@@ -7180,9 +7443,32 @@ def _coordinate_pr_review(
 
                 val_result.attempt_id = attempt.attempt_id
                 val_result.attempt_sequence = attempt.sequence
-                if active_review_id and retained_reuse is None:
+                if active_review_id and retained_reuse is None and not resuming_deferred:
                     finish_executed_review(active_review_id, review_target, val_result)
                 runtime.active_attempt_status = val_result.result.strip().upper() or "ERROR"
+                checkpoint = val_result.reviewer_session_checkpoint
+                if not resuming_deferred and retained_reuse is None and checkpoint is not None and checkpoint.evidence_validation_snapshot and val_result.review_input_context_identity:
+                    try:
+                        deferred_result = deferred_store.retain(
+                            DeferredPRValidation.from_result(
+                                repository=repo_name,
+                                pr_number=pr_number,
+                                head_sha=head_sha,
+                                base_sha=str((pr_data.get("base") or {}).get("sha") or ""),
+                                attempt_id=attempt.attempt_id,
+                                attempt_sequence=attempt.sequence,
+                                review_id=active_review_id or "",
+                                policy_identity=proposal_policy_identity,
+                                thread_snapshot=thread_snapshot,
+                                validation_snapshot=checkpoint.evidence_validation_snapshot,
+                                context_identity=proposal_context_identity,
+                                input_snapshot=val_result.review_input_context_identity,
+                                result=val_result,
+                            )
+                        )
+                    except DeferredPRValidationStateError as exc:
+                        _record_review_wait(repo_name, pr_number, head_sha, actions, processing_status, str(exc))
+                        return actions
 
                 val_result.clarification_reply_fingerprint = provenance_fingerprint
                 if val_result.result.strip().upper() == "ERROR":
@@ -7228,6 +7514,9 @@ def _coordinate_pr_review(
                         ordinary_authority,
                     )
                 except Exception as e:
+                    if deferred_result is not None:
+                        _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime, e)
+                        return actions
                     logger.error(f"Effective review decision for PR #{pr_number} could not be derived: {e}")
                     val_result = replace(
                         val_result,
@@ -7259,6 +7548,9 @@ def _coordinate_pr_review(
                         try:
                             observed_head = github_client.get_pull_request_head_sha_strict(repo_name, pr_number)
                         except Exception as e:
+                            if deferred_result is not None:
+                                _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime, e)
+                                return actions
                             actions.append(f"Rejected adversarial-validation result for PR #{pr_number}: authoritative head could not be confirmed ({e})")
                             _record_pr_stage(pr_number, "pr.adversarial-validation", f"pr#{pr_number} adversarial validation", Outcome.FAILED, {"attempt_id": attempt.attempt_id, "examined_head": head_sha, "phase": "gap-state-acceptance", "reason": "head observation unavailable"})
                             # REQ-006: the authoritative head check itself
@@ -7269,37 +7561,50 @@ def _coordinate_pr_review(
                             record_effect(review_target, active_review_id, "failed", {"phase": "gap-state-acceptance", "reason": "head observation unavailable"})
                             return actions
                         if observed_head != head_sha:
+                            if deferred_result is not None:
+                                _discard_deferred_validation(deferred_store, deferred_result, "current head changed before acceptance", observed_head=observed_head)
                             actions.append(f"Ignored adversarial-validation attempt {attempt.attempt_id}: current head changed before durable acceptance")
-                            _record_pr_stage(pr_number, "pr.adversarial-validation", f"pr#{pr_number} adversarial validation", Outcome.SUPERSEDED, {"attempt_id": attempt.attempt_id, "examined_head": head_sha, "observed_head": observed_head, "phase": "gap-state-acceptance"})
-                            record_effect(review_target, active_review_id, "superseded", {"phase": "gap-state-acceptance", "observed_head": observed_head})
+                            if deferred_result is None:
+                                _record_pr_stage(pr_number, "pr.adversarial-validation", f"pr#{pr_number} adversarial validation", Outcome.SUPERSEDED, {"attempt_id": attempt.attempt_id, "examined_head": head_sha, "observed_head": observed_head, "phase": "gap-state-acceptance"})
+                                record_effect(review_target, active_review_id, "superseded", {"phase": "gap-state-acceptance", "observed_head": observed_head})
                             return actions
                         checkpoint = val_result.reviewer_session_checkpoint
-                        if checkpoint.evidence_validation_snapshot and not validation_snapshot_is_current(
-                            repo_name,
-                            pr_data,
-                            config,
-                            github_client,
-                            checkpoint.evidence_validation_snapshot,
-                        ):
-                            actions.append(f"Ignored adversarial-validation attempt {attempt.attempt_id}: validation snapshot changed before durable acceptance")
-                            _record_pr_stage(
-                                pr_number,
-                                "pr.adversarial-validation",
-                                f"pr#{pr_number} adversarial validation",
-                                Outcome.SUPERSEDED,
-                                {
-                                    "attempt_id": attempt.attempt_id,
-                                    "examined_head": head_sha,
-                                    "phase": "gap-state-acceptance",
-                                    "reason": "validation snapshot changed or could not be confirmed",
-                                },
+                        try:
+                            snapshot_current = (
+                                _deferred_validation_inputs_current(deferred_result, pr_data, config, github_client)
+                                if deferred_result is not None
+                                else not checkpoint.evidence_validation_snapshot or validation_snapshot_is_current(repo_name, pr_data, config, github_client, checkpoint.evidence_validation_snapshot)
                             )
-                            record_effect(review_target, active_review_id, "superseded", {"phase": "gap-state-acceptance", "reason": "validation snapshot changed or could not be confirmed"})
+                        except Exception as exc:
+                            assert deferred_result is not None
+                            _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime, exc)
+                            return actions
+                        if not snapshot_current:
+                            if deferred_result is not None:
+                                _discard_deferred_validation(deferred_store, deferred_result, "validation inputs changed before acceptance")
+                            actions.append(f"Ignored adversarial-validation attempt {attempt.attempt_id}: validation snapshot changed before durable acceptance")
+                            if deferred_result is None:
+                                _record_pr_stage(
+                                    pr_number,
+                                    "pr.adversarial-validation",
+                                    f"pr#{pr_number} adversarial validation",
+                                    Outcome.SUPERSEDED,
+                                    {
+                                        "attempt_id": attempt.attempt_id,
+                                        "examined_head": head_sha,
+                                        "phase": "gap-state-acceptance",
+                                        "reason": "validation snapshot changed or could not be confirmed",
+                                    },
+                                )
+                                record_effect(review_target, active_review_id, "superseded", {"phase": "gap-state-acceptance", "reason": "validation snapshot changed or could not be confirmed"})
                             return actions
                         try:
                             registry = val_result.reviewer_session_registry or ReviewerSessionRegistry()
                             registry.save(val_result.reviewer_session_checkpoint)
                         except Exception as e:
+                            if deferred_result is not None:
+                                _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime, e)
+                                return actions
                             logger.error(f"Failed to commit reviewer-gap state for PR #{pr_number}: {e}")
                             val_result.reviewer_session_checkpoint = None
                             val_result.result = "ERROR"
@@ -7533,6 +7838,8 @@ def _coordinate_pr_review(
                         record_effect(review_target, active_review_id, "confirmed", {"phase": "publication", "event": publication.event})
 
                     attempt_repository.mark_published(attempt.attempt_id)
+                    if deferred_result is not None:
+                        deferred_store.remove(deferred_result.attempt_id)
                     if effective_application is not None:
                         try:
                             EffectiveDecisionStore(repo_name).update(pr_number, publication=PUBLICATION_CONFIRMED)

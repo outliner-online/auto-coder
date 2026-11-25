@@ -1938,6 +1938,7 @@ def test_acceptance_after_the_authority_check_is_ordered_after_the_authorized_tr
 
 @pytest.mark.parametrize("checkpoint_writable", [False, True], ids=["save-failure", "normal"])
 def test_checkpoint_write_preserves_result_and_returned_disposition(flow_env: Env, monkeypatch: pytest.MonkeyPatch, checkpoint_writable: bool) -> None:
+    from auto_coder.deferred_pr_validation import DeferredPRValidationStore
     from auto_coder.execution_trace import Outcome, get_trace_collector
     from auto_coder.reviewer_session_registry import ReviewerSessionRegistry
 
@@ -1956,12 +1957,12 @@ def test_checkpoint_write_preserves_result_and_returned_disposition(flow_env: En
         actions = flow.run()
 
     events = [event for event in collector.get_snapshot().events if event.execution_id == execution.scope.execution_id]
-    validation = [event for event in events if event.stage_id == "pr.adversarial-validation" and (event.facts or {}).get("result")][-1]
     attempts = AdversarialValidationAttemptRepository(REPO)._read()["attempts"]
     assert len(attempts) == 1
     assert flow.model_calls == 1
     assert flow.handoffs == 0
     if checkpoint_writable:
+        validation = [event for event in events if event.stage_id == "pr.adversarial-validation" and (event.facts or {}).get("result")][-1]
         assert attempts[0]["status"] == "PASS"
         assert validation.outcome == Outcome.COMPLETED.value
         assert validation.facts["result"] == "PASS"
@@ -1971,14 +1972,19 @@ def test_checkpoint_write_preserves_result_and_returned_disposition(flow_env: En
         flow.merge.assert_called_once()
         assert flow.status.outcome is PRProcessingOutcome.SUCCESS
     else:
-        assert attempts[0]["status"] == "ERROR"
-        assert validation.outcome == Outcome.FAILED.value
-        assert validation.facts["result"] == "ERROR"
-        assert validation.facts["diagnostic_category"] == "reviewer_gap_persistence_failure"
-        assert validation.facts["review_disposition"] == actions.disposition.value == "OPERATIONAL_FAILURE"
-        assert [review["event"] for review in flow.reviews] == ["COMMENT"], actions
+        validation = [event for event in events if event.stage_id == "pr.adversarial-validation" and (event.facts or {}).get("effect") == "validation-result-retained"][-1]
+        pending = DeferredPRValidationStore(REPO).load(pr)
+        assert pending is not None
+        assert pending.restore_result().result == "PASS"
+        assert pending.attempt_id == attempts[0]["id"]
+        assert pending.retry_not_before == actions.retry_not_before > 0
+        assert attempts[0]["status"] == "AWAITING_ACCEPTANCE"
+        assert validation.outcome == Outcome.DEFERRED.value
+        assert validation.facts["attempt_id"] == pending.attempt_id
+        assert actions.disposition.value == "RECONCILIATION_WAIT"
+        assert flow.reviews == [], actions
         flow.merge.assert_not_called()
-        assert flow.status.outcome is not PRProcessingOutcome.SUCCESS
+        assert flow.status.outcome is PRProcessingOutcome.DEFERRED
 
 
 def test_closure_proposal_superseded_by_a_head_change_during_external_review_is_not_accepted(flow_env: Env, monkeypatch: pytest.MonkeyPatch) -> None:

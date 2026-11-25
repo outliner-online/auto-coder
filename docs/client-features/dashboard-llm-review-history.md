@@ -281,3 +281,27 @@ a new origin or schema. This records permission to independently inspect the
 current head; it does not describe the absent historical request as completed.
 Delivery, later independent findings, correction and merge retain their own
 separate stages. See [the admission contract](settled-codex-task-review-reassessment.md).
+
+### Reviewer results waiting for GitHub confirmation
+
+A completed reviewer interaction can remain unaccepted while current HEAD or
+other required input evidence is unavailable. The existing Decision Log then
+shows `pr.adversarial-validation` / `DEFERRED` with
+`effect=validation-result-retained`, the acceptance or publication-reconciliation
+phase, the original
+`attempt_id` and `attempt_sequence`, `examined_head`, the concrete `reason`
+(such as `rate_limit_cooldown` or `publisher_publication_pending` with its
+diagnostic detail), and `retry_not_before`.
+
+After current inputs are confirmed unchanged, `effect=validation-result-resumed`
+records resumption of that same attempt without another LLM call. It does not
+add an executed interaction or imply approval, publication or merge. Those
+boundaries retain their own result events. A confirmed target/input change or
+newer applicable attempt records `SUPERSEDED` with
+`effect=validation-result-superseded`; the old native report remains history.
+An unavailable observation continues to wait and is not evidence of a changed
+head. The audit appends a pending acceptance effect with the actual reason and
+retry deadline while retaining the native verdict. If GitHub accepted the review
+before local acknowledgment was interrupted, exact native-publication
+reconciliation appends a confirmed effect without another POST; audit records
+remain non-authorizing. See [deferred PR validation results](deferred-pr-validation-results.md).

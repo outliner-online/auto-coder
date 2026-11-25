@@ -1926,6 +1926,9 @@ class TestBuildAdversarialValidationContext:
             def get_parent_issue_details(self, repo_name, issue_number):
                 return None
 
+            def get_parent_issue_details_strict(self, repo_name, issue_number):
+                return None
+
         client = FakeClient()
         pr_data = {"number": 42, "title": "Implement feature", "body": "Fixes #10"}
 
@@ -1937,6 +1940,70 @@ class TestBuildAdversarialValidationContext:
         assert "Cached authoritative requirement text" in cached_context.issue_context
         assert "Fresh authoritative requirement text" in fresh_context.issue_context
         assert fresh_context.validation_snapshot != cached_context.validation_snapshot
+
+    def test_parent_context_outage_only_blocks_explicit_complete_input_comparison(self):
+        """Background prose availability must not change child/diff snapshot rules."""
+        from auto_coder.adversarial_validator import validation_snapshot_is_current
+        from auto_coder.github_request_governor import GitHubRequestDeferred
+        from auto_coder.util.github_request_outcome import GitHubRequestContext
+
+        request = GitHubRequestContext("parent-context", "read-one", "pr-validation", "https://api.github.com", "GET", "read", "/repos/{owner}/{repo}/issues/{number}/parent")
+        outage = GitHubRequestDeferred(request, "rate_limit_cooldown", 4000000000.0)
+
+        class ParentUnavailableClient:
+            parent_unavailable = False
+            strict_parent_calls = 0
+            issue_body = "## Requirements\nREQ-001: Preserve the value."
+
+            def get_pr_diff(self, repo_name, pr_number):
+                return "diff --git a/src/main.py b/src/main.py\n+++ b/src/main.py\n+value = True\n"
+
+            get_pr_diff_strict = get_pr_diff
+
+            def get_pr_changed_file_count(self, repo_name, pr_number):
+                return 1
+
+            get_pr_changed_file_count_strict = get_pr_changed_file_count
+
+            def get_pr_changed_files(self, repo_name, pr_number):
+                return [{"filename": "src/main.py", "status": "added", "additions": 1, "deletions": 0, "changes": 1, "patch": "@@ -0,0 +1 @@\n+value = True"}]
+
+            get_pr_changed_files_strict = get_pr_changed_files
+
+            def get_issue_strict(self, repo_name, issue_number):
+                return {"number": issue_number, "title": "Child contract", "body": self.issue_body}
+
+            get_issue_dispatch_snapshot_strict = get_issue_strict
+
+            def get_parent_issue_details(self, repo_name, issue_number):
+                if self.parent_unavailable:
+                    raise outage
+                return {"number": 9, "title": "Background"}
+
+            def get_parent_issue_body(self, repo_name, issue_number):
+                return "Parent background outside the child acceptance scope."
+
+            def get_parent_issue_details_strict(self, repo_name, issue_number):
+                self.strict_parent_calls += 1
+                return self.get_parent_issue_details(repo_name, issue_number)
+
+        client = ParentUnavailableClient()
+        pr_data = {"number": 42, "title": "Implement feature", "body": "Fixes #10", "head": {"sha": "a" * 40}, "base": {"sha": "b" * 40}}
+        config = AutomationConfig()
+        reviewed = build_adversarial_validation_context("owner/repo", pr_data, config, github_client=client)
+        assert "Parent background" in reviewed.issue_context
+
+        client.parent_unavailable = True
+        assert validation_snapshot_is_current("owner/repo", pr_data, config, client, reviewed.validation_snapshot)
+        assert client.strict_parent_calls == 0
+
+        with pytest.raises(GitHubRequestDeferred) as captured:
+            build_adversarial_validation_context("owner/repo", pr_data, config, github_client=client, bypass_cache=True, strict_issue_context=True)
+        assert captured.value is outage
+        assert client.strict_parent_calls == 1
+
+        client.issue_body += "\nREQ-002: Reject a missing value."
+        assert not validation_snapshot_is_current("owner/repo", pr_data, config, client, reviewed.validation_snapshot)
 
     def test_complete_patch_with_source_lines_resembling_diff_headers_is_not_misclassified(self):
         """A real added/deleted source line that happens to start with `++`/`--`
