@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
 from auto_coder.llm_backend_config import LLMBackendConfiguration
 from auto_coder.quota_selector import BackendQuotaEvaluation, rank_high_score_backends_by_quota
+from tests.test_jules_ordinary_startup import _invoke_only, _ordinary_issue_github, _write_config
 
 
 def _mixed_config(selector: dict) -> LLMBackendConfiguration:
@@ -167,6 +169,105 @@ def test_jules_only_ordinary_selector_has_no_dispatch_candidate():
     )
 
     assert config.get_ordinary_priority_groups() == []
+
+
+def test_cli_filters_ranked_jules_alias_before_supported_provider_send(tmp_path, monkeypatch):
+    """REQ-006: CLI projection cannot reintroduce a Jules-resolving alias."""
+    from auto_coder.codex_cloud_client import CodexSubmissionOutcome, CodexSubmissionResult
+
+    _write_config(
+        tmp_path,
+        '[backend]\npriority_groups = [["retired-alias", "supported-cloud"]]\n\n' '[backends.retired-alias]\nbackend_type = "jules"\nenabled = true\napi_key = "unused"\n\n' '[backends.supported-cloud]\nbackend_type = "codex-cloud"\nenabled = true\n',
+        monkeypatch,
+    )
+    github = _ordinary_issue_github(2892)
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=github),
+        patch("auto_coder.automation_engine.AutomationEngine._check_and_handle_closed_branch", return_value=True),
+        patch("auto_coder.automation_engine.get_current_branch", return_value="main"),
+        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
+        patch(
+            "auto_coder.codex_cloud_client.CodexCloudClient.submit_task",
+            return_value=CodexSubmissionResult(CodexSubmissionOutcome.ACCEPTED, "task-2892"),
+        ) as codex_send,
+        patch("auto_coder.issue_processor.JulesClient.start_session") as jules_send,
+    ):
+        result = _invoke_only("owner/repo", 2892)
+
+    assert result.exit_code == 0, result.output
+    codex_send.assert_called_once()
+    jules_send.assert_not_called()
+
+
+def test_cli_jules_only_policy_reports_no_dispatch_without_fallback(tmp_path, monkeypatch):
+    """REQ-006: a Jules-only production configuration fails closed at startup."""
+    _write_config(
+        tmp_path,
+        '[backend]\norder = ["retired-alias"]\n\n[backends.retired-alias]\nbackend_type = "jules"\nenabled = true\napi_key = "unused"\n',
+        monkeypatch,
+    )
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.issue_processor.JulesClient.start_session") as jules_send,
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.submit_task") as codex_send,
+    ):
+        result = _invoke_only("owner/repo", 2893)
+
+    assert result.exit_code != 0
+    assert "ordinary backend candidate pool is empty" in result.output
+    jules_send.assert_not_called()
+    codex_send.assert_not_called()
+
+
+@pytest.mark.parametrize("submission_outcome", ["accepted", "indeterminate"])
+def test_cli_historical_jules_handoff_suppresses_supported_replacement(tmp_path, monkeypatch, submission_outcome):
+    """REQ-006: production persistence retains accepted or uncertain ownership."""
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+
+    issue_number = 2894
+    _write_config(
+        tmp_path,
+        '[backend]\norder = ["supported-cloud"]\n\n[backends.supported-cloud]\nbackend_type = "codex-cloud"\nenabled = true\n',
+        monkeypatch,
+    )
+    task_id = "historical-jules-task" if submission_outcome == "accepted" else ""
+    historical = CloudRun(
+        "owner/repo",
+        issue_number,
+        0,
+        "jules",
+        task_id=task_id,
+        backend_name="historical-jules",
+        submission_outcome=submission_outcome,
+    )
+    stored, created = CloudRunRepository("owner/repo").acquire_submission_claim(historical)
+    assert created is True
+    assert stored == historical
+    if task_id:
+        assert CloudManager("owner/repo").add_session(
+            issue_number,
+            task_id,
+            provider="jules",
+            backend_name="historical-jules",
+        )
+
+    github = _ordinary_issue_github(issue_number)
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=github),
+        patch("auto_coder.automation_engine.AutomationEngine._check_and_handle_closed_branch", return_value=True),
+        patch("auto_coder.automation_engine.get_current_branch", return_value="main"),
+        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.submit_task") as codex_send,
+        patch("auto_coder.issue_processor.JulesClient.start_session") as jules_send,
+    ):
+        result = _invoke_only("owner/repo", issue_number)
+
+    assert result.exit_code == 0, result.output
+    codex_send.assert_not_called()
+    jules_send.assert_not_called()
 
 
 def test_production_dispatch_skips_raw_jules_alias_before_local_fallback(monkeypatch, tmp_path):
