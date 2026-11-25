@@ -33,7 +33,7 @@ def scenario(tmp_path, monkeypatch, _use_real_commands, audit_store):
     repo, head = _build_pr_repo(tmp_path)
     remote = tmp_path / "remote.git"
     _git(tmp_path, "clone", "--bare", str(repo), str(remote))
-    _git(repo, "remote", "add", "origin", "https://github.com/owner/repo.git")
+    _git(repo, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
     _git(repo, "config", f"url.{remote}.insteadOf", "https://github.com/owner/repo.git")
     # Remote PR ref and shared checkout advance after the admitted CI snapshot.
     (repo / "sample.py").write_text("def greet():\n    return 'newer unreviewed head'\n")

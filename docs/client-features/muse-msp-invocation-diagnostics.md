@@ -35,3 +35,9 @@ The single `end` record is attempted after all handled cleanup and validation an
 ## Limits
 
 Auto-Coder observes only its pipes to the local Muse host, not the host's HTTP/SSE connection to Meta (`boundary.provider_transport = unobserved`). Silence, byte counts, an alive PID, a heartbeat or model text cannot establish a Meta outage, that the model is still reasoning, or a CLI defect. A call that ends abruptly (killed controller, unavailable logging) leaves only earlier records; the absence of an `end` record is inconclusive, never success. Operators can share these records without prompts, credentials or raw session logs.
+
+## Regression coverage
+
+The production-path regressions in `tests/test_muse_diagnostics.py` use the existing `_use_real_sleep` fixture because their subprocesses, heartbeat schedules and observation deadlines run on real wall-clock time. The suite must not inherit the shared no-op sleep mock: its observation loop needs to yield while the Muse call and local protocol peer advance.
+
+Each asynchronously gated invocation releases its peer and joins its worker in `finally`, including when an observation or assertion fails, before the next test installs its logging sinks. The controlled-observation-failure regression checks that cleanup completes and that the following invocation receives only its own timeline. These test harness guarantees preserve the original observation deadlines, production timeouts and diagnostic assertions; they do not change runtime execution or dashboard events.

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 from unittest.mock import Mock
@@ -121,7 +121,7 @@ def flow(tmp_path, monkeypatch, _use_real_commands, audit_store, request):
     _git(["clone", "--bare", str(repository), str(remote)], tmp_path)
     _git(["update-ref", "refs/heads/feature-branch", head], remote)
     _git(["update-ref", f"refs/pull/{PR_NUMBER}/head", head], remote)
-    _git(["remote", "add", "origin", "https://github.com/owner/repo.git"], repository)
+    _git(["remote", "set-url", "origin", "https://github.com/owner/repo.git"], repository)
     _git(["config", f"url.{remote}.insteadOf", "https://github.com/owner/repo.git"], repository)
     monkeypatch.setenv("AUTO_CODER_WORKSPACE_ROOT", str(repository))
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -303,6 +303,200 @@ def test_strong_audit_fixes_are_published_without_accepting_its_own_pass(flow):
     snapshot = inputs.gate.state.snapshot(PR_NUMBER)
     assert snapshot.accepted_strong_round is None
     assert snapshot.active_claim is None
+    assert snapshot.completion is None
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert _caller_snapshot(flow.repository) == before
+
+
+def _seed_stale_strong_finding(flow, monkeypatch):
+    """A published finding at the old head, followed by a repair and policy change."""
+    from auto_coder.accepted_finding_bridge import ObservedRoot, RootObservation
+    from auto_coder.llm_backend_config import LLMBackendConfiguration
+    from auto_coder.pr_review_cycle import Finding, RoundProvenance
+    from auto_coder.pr_review_effects import AcceptedReviewPayload
+
+    config = LLMBackendConfiguration(backend_strong_pr_adversarial_validation_order=["reviewer"])
+    monkeypatch.setattr("auto_coder.llm_backend_config.get_llm_config", lambda *args, **kwargs: config)
+    inputs = pr_processor._two_tier_gate_inputs(flow.client, REPO_NAME, flow.metadata())
+    assert inputs is not None
+    old_policy = replace(inputs.policy, model_options="previous strong policy")
+    inputs.gate.ordinary_pass(PR_NUMBER, flow.base, flow.base, inputs.contract)
+    claim = inputs.gate.state.claim_strong_audit(PR_NUMBER, RoundProvenance(flow.base, flow.base), inputs.contract, old_policy)
+    finding = Finding(
+        finding_id="retained-greeting",
+        origin_round_id=claim.claim_id,
+        requirement_ids=("#99/REQ-001",),
+        requirement_texts=("greet() returns the string hello.",),
+        counterexample="greet() returns placeholder at the audited head.",
+        expected_behavior="greet() returns hello.",
+        actual_behavior="greet() returns placeholder.",
+        evidence="sample.py:2",
+        affected_boundary="sample.py:greet",
+        focused_regression_scenario="Call greet() and assert its returned greeting.",
+    )
+    strong = inputs.gate.state.record_strong_result(PR_NUMBER, claim.claim_id, "FINDINGS", "reviewer/previous-model", [finding])
+    inputs.gate.state.acknowledge_publication(PR_NUMBER, strong.round_id)
+    strong = inputs.gate.state.snapshot(PR_NUMBER).accepted_strong_round
+    assert strong is not None
+    payload = AcceptedReviewPayload.strong(REPO_NAME, PR_NUMBER, strong, (finding,))
+    transport = pr_processor._GitHubReviewEffectTransport(Mock(), payload, lambda: True)
+    bridge, target = pr_processor._accepted_state_inputs(REPO_NAME, flow.metadata(), flow.initial_head)
+    projection = bridge.project(target, RootObservation((ObservedRoot(9001, transport.comments[0].body, True, "PRRT_retained"),), complete=True))
+    assert projection.complete
+    assert projection.records[0].root_comment_ids == (9001,)
+    return inputs, strong, config
+
+
+def _edit_on_renewed_strong(flow, mutation):
+    def after_ordinary(_root):
+        assert len(flow.seen) == 1
+        flow.reviewer.mutation = mutation
+
+    flow.reviewer.mutation = after_ordinary
+
+
+def test_renewed_strong_fix_is_published_without_closing_retained_findings(flow, monkeypatch):
+    inputs, strong, _config = _seed_stale_strong_finding(flow, monkeypatch)
+    before = _caller_snapshot(flow.repository)
+    _edit_on_renewed_strong(flow, _edit_source)
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+
+    actions = flow.run()
+
+    changed_head = flow.head()
+    assert changed_head != flow.initial_head, actions
+    assert _git(["rev-parse", f"{changed_head}^"], flow.remote) == flow.initial_head
+    assert "# Reviewed greeting implementation." in _git(["show", f"{changed_head}:sample.py"], flow.remote)
+    assert flow.reviewer.calls == ["fresh", "fresh"]
+    snapshot = inputs.gate.state.snapshot(PR_NUMBER)
+    assert snapshot.accepted_strong_round == strong
+    assert [finding.finding_id for finding in snapshot.open_findings] == ["retained-greeting"]
+    assert snapshot.active_claim is None
+    assert snapshot.accepted_closure is None
+    assert snapshot.completion is None
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert _caller_snapshot(flow.repository) == before
+    assert all(not root.exists() for _, _, root in flow.seen)
+    events = [event for event in get_trace_collector().get_snapshot().events if event.sequence > trace_start and event.stage_id == "pr.strong-audit"]
+    assert len(events) == 1
+    assert events[0].outcome == "deferred"
+    assert events[0].facts["renewed_strong_required"] is True
+    assert "source changes" in events[0].facts["reason"]
+    assert "independent" in events[0].facts["reason"]
+    corrections = _correction_events(trace_start)
+    assert len(corrections) == 1
+    assert corrections[0].facts["local_phase"] == "awaiting_validation"
+    assert corrections[0].facts["published"] is True
+    assert corrections[0].facts["review_disposition"] == "CORRECTIVE_HANDOFF"
+    assert actions.retry_not_before == corrections[0].facts["retry_not_before"]
+    assert flow.last_status.outcome is PRProcessingOutcome.DEFERRED
+    assert flow.last_status.retry_not_before == actions.retry_not_before
+    assert time.time() < actions.retry_not_before <= time.time() + 60.0
+
+
+@pytest.mark.parametrize("changed_target", ["head", "base", "contract", "policy"])
+def test_renewed_strong_fix_refuses_publication_when_target_changes(flow, monkeypatch, changed_target):
+    inputs, strong, config = _seed_stale_strong_finding(flow, monkeypatch)
+    before = _caller_snapshot(flow.repository)
+
+    def edit_and_change_target(root):
+        _edit_source(root)
+        if changed_target == "head":
+            _git(["update-ref", "refs/heads/feature-branch", flow.base], flow.remote)
+        elif changed_target == "base":
+            flow.base = flow.initial_head
+        elif changed_target == "contract":
+            issue = flow.client.get_issue.return_value
+            flow.client.get_issue.return_value = {**issue, "body": issue["body"].replace("string hello", "string hello world")}
+        else:
+            config.backend_strong_pr_adversarial_validation_order = ["reviewer", "new-policy-reviewer"]
+
+    _edit_on_renewed_strong(flow, edit_and_change_target)
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+
+    actions = flow.run()
+
+    assert flow.head() == (flow.base if changed_target == "head" else flow.initial_head), actions
+    assert flow.reviewer.calls == ["fresh", "fresh"]
+    snapshot = inputs.gate.state.snapshot(PR_NUMBER)
+    assert snapshot.accepted_strong_round == strong
+    assert [finding.finding_id for finding in snapshot.open_findings] == ["retained-greeting"]
+    assert snapshot.active_claim is None
+    assert snapshot.accepted_closure is None
+    assert snapshot.completion is None
+    assert "provider-entry authority changed during preparation" in snapshot.attempt_error_reason
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert _caller_snapshot(flow.repository) == before
+    assert all(not root.exists() for _, _, root in flow.seen)
+    events = [event for event in get_trace_collector().get_snapshot().events if event.sequence > trace_start and event.stage_id == "pr.strong-audit"]
+    assert len(events) == 1
+    assert events[0].outcome == "deferred"
+    assert events[0].facts["renewed_strong_required"] is True
+    assert "provider-entry authority changed during preparation" in events[0].facts["reason"]
+
+
+def test_renewed_strong_pending_publication_retries_without_another_reviewer(flow, monkeypatch):
+    from auto_coder import local_review_repair
+    from auto_coder.utils import CommandResult
+
+    inputs, strong, _config = _seed_stale_strong_finding(flow, monkeypatch)
+    before = _caller_snapshot(flow.repository)
+    _edit_on_renewed_strong(flow, _edit_source)
+    original_push = local_review_repair.git_push
+    offline_push = Mock(return_value=CommandResult(False, "", "remote temporarily unavailable", 1))
+    monkeypatch.setattr(local_review_repair, "git_push", offline_push)
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+
+    first_actions = flow.run()
+
+    assert flow.head() == flow.initial_head, first_actions
+    assert flow.reviewer.calls == ["fresh", "fresh"]
+    offline_push.assert_called_once()
+    store = local_review_repair.LocalReviewRepairStore(local_review_repair.local_review_repair_db_path(REPO_NAME))
+    request = local_review_repair.LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, "feature-branch", flow.initial_head, (), "")
+    retained = store.get_publication_pending(request)
+    assert retained is not None
+    assert retained.result_sha != flow.initial_head
+    assert _git(["rev-parse", f"{retained.result_sha}^"], flow.repository) == flow.initial_head
+    assert "# Reviewed greeting implementation." in _git(["show", f"{retained.result_sha}:sample.py"], flow.repository)
+    assert first_actions.retry_not_before is not None
+    assert time.time() < first_actions.retry_not_before <= time.time() + 60.0
+    assert flow.last_status.outcome is PRProcessingOutcome.DEFERRED
+    assert flow.last_status.retry_not_before == first_actions.retry_not_before
+    events = _correction_events(trace_start)
+    assert len(events) == 1
+    assert events[0].outcome == "deferred"
+    assert events[0].facts["effect"] == "reviewer-source-changes"
+    assert events[0].facts["local_phase"] == "publication_pending"
+    assert events[0].facts["published"] is False
+    assert events[0].facts["review_disposition"] == "RECONCILIATION_WAIT"
+    assert events[0].facts["retry_not_before"] == first_actions.retry_not_before
+
+    monkeypatch.setattr(local_review_repair, "git_push", original_push)
+    second_actions = flow.run()
+
+    assert flow.head() == retained.result_sha, second_actions
+    assert flow.reviewer.calls == ["fresh", "fresh"]
+    resumed = store.get(request, retained.attempt_id)
+    assert resumed is not None and resumed.phase == "awaiting_validation"
+    assert resumed.result_sha == retained.result_sha
+    events = _correction_events(trace_start)
+    assert len(events) == 2
+    assert events[1].outcome == "deferred"
+    assert events[1].facts["effect"] == "reviewer-publication-resumed"
+    assert events[1].facts["local_phase"] == "awaiting_validation"
+    assert events[1].facts["published"] is True
+    assert events[1].facts["review_disposition"] == "CORRECTIVE_HANDOFF"
+    assert second_actions.retry_not_before == events[1].facts["retry_not_before"]
+    assert flow.last_status.retry_not_before == second_actions.retry_not_before
+    snapshot = inputs.gate.state.snapshot(PR_NUMBER)
+    assert snapshot.accepted_strong_round == strong
+    assert [finding.finding_id for finding in snapshot.open_findings] == ["retained-greeting"]
+    assert snapshot.active_claim is None
+    assert snapshot.accepted_closure is None
     assert snapshot.completion is None
     flow.publication.assert_not_called()
     flow.merge.assert_not_called()

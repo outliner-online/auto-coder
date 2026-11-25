@@ -4048,16 +4048,26 @@ class TestClaimedReviewThreadValidationFlow:
             pytest.param("old-head", "delivered", False, False, False, id="active-corrective-handoff"),
             pytest.param("old-head", "indeterminate", False, False, False, id="uncertain-followup-receipt"),
             pytest.param("same-head", "acknowledged", False, False, False, id="saved-current-head-needs-tests"),
-            pytest.param("human-only", "acknowledged", False, False, False, id="no-authentic-revalidation-input"),
+            pytest.param("human-only", "acknowledged", False, False, False, id="ordinary-only-at-review-cap"),
+            pytest.param("ordinary-only", "acknowledged", False, False, True, id="first-ordinary-head-review"),
+            pytest.param("ordinary-only", "acknowledged", True, False, True, id="ordinary-stable-post-codex-recheck"),
+            pytest.param("ordinary-only", "acknowledged", True, True, False, id="ordinary-changed-post-codex-discussion"),
+            pytest.param("ordinary-only", "unacknowledged", False, False, False, id="ordinary-delivery-without-acknowledgement"),
+            pytest.param("ordinary-only", "delivered", False, False, False, id="ordinary-active-corrective-handoff"),
+            pytest.param("ordinary-only", "indeterminate", False, False, False, id="ordinary-uncertain-followup-receipt"),
+            pytest.param("ordinary-no-commit", "acknowledged", False, False, True, id="ordinary-no-commit-first-review"),
+            pytest.param("ordinary-same-head", "acknowledged", False, False, False, id="ordinary-saved-current-head-needs-tests"),
         ],
     )
     def test_acknowledged_mixed_reviews_admit_only_current_head_reassessment(self, review_state, repair_state, codex_completed, discussion_changed, expects_validation):
-        """Completed repairs cannot starve an eligible new-head App review or authorize human closure."""
+        """Acknowledged ordinary repairs admit a first review without authorizing human closure."""
         from auto_coder.adversarial_validator import ReviewThreadDisposition, adversarial_validation_comment_marker
         from auto_coder.execution_trace import Outcome, get_trace_collector
 
-        head_sha = "b" * 40
-        reviewed_sha = head_sha if review_state == "same-head" else "a" * 40
+        head_sha = "a" * 40 if review_state == "ordinary-no-commit" else "b" * 40
+        same_head_verdict = review_state in {"same-head", "ordinary-same-head"}
+        ordinary_only = review_state in {"human-only", "ordinary-only", "ordinary-no-commit", "ordinary-same-head"}
+        reviewed_sha = head_sha if same_head_verdict else "a" * 40
         reviewer_login = "auto-coder-reviewer[bot]"
         addressed = "Implemented and tested.\\n\\n<!-- auto-coder-review-addressed:v1 -->"
         app_thread = ReviewThread(
@@ -4073,7 +4083,9 @@ class TestClaimedReviewThreadValidationFlow:
                 ReviewThreadComment(database_id=19, body=addressed, author_login="implementer", author_id=2, in_reply_to_id=18),
             ],
         )
-        threads = [human_thread] if review_state == "human-only" else [app_thread, human_thread]
+        if review_state == "ordinary-no-commit":
+            human_thread.comments[-1].body = "Verified the existing behavior; no code change was needed.\n\n<!-- auto-coder-review-addressed:v1 -->"
+        threads = [human_thread] if ordinary_only else [app_thread, human_thread]
         client = GitHubClient("test-token")
         client.get_authenticated_user_login = MagicMock(return_value="implementer")
         client.get_pr_review_threads_strict = MagicMock(return_value=threads)
@@ -4083,6 +4095,8 @@ class TestClaimedReviewThreadValidationFlow:
                 {"body": f"{adversarial_validation_comment_marker('earlier-head')}\n## ❌ Auto-Coder adversarial validation: NEEDS_FIX", "user": {"login": reviewer_login}},
             ]
         )
+        if review_state in {"ordinary-only", "ordinary-no-commit"}:
+            client.get_pr_reviews_strict.return_value = []
         client.get_pr_comments = MagicMock(return_value=[])
         client.get_pr_comments_strict = MagicMock(return_value=[])
         client.get_pull_request = MagicMock(return_value={"head": {"sha": head_sha}})
@@ -4098,7 +4112,8 @@ class TestClaimedReviewThreadValidationFlow:
                 is_resolved=False,
                 comments=[*human_thread.comments, ReviewThreadComment(database_id=20, body="The latest regression still omits a branch.", author_login="implementer", author_id=2, in_reply_to_id=18)],
             )
-            post_codex_state = ClaimedReviewThreadGateState(unresolved=(app_thread, changed_thread), blocking_unresolved=(app_thread, changed_thread), has_blocking_unresolved=True)
+            changed_threads = (changed_thread,) if ordinary_only else (app_thread, changed_thread)
+            post_codex_state = ClaimedReviewThreadGateState(unresolved=changed_threads, blocking_unresolved=changed_threads, has_blocking_unresolved=True)
         final_state = ClaimedReviewThreadGateState(unresolved=(human_thread,), blocking_unresolved=(human_thread,), has_blocking_unresolved=True)
         observed_states = [initial_state, post_codex_state, final_state] if codex_completed else [initial_state, final_state]
         repair_result = CloudReviewRepairResult(
@@ -4110,8 +4125,8 @@ class TestClaimedReviewThreadValidationFlow:
         )
         validation = AdversarialValidationResult(
             result="PASS",
-            summary="The new-head regression independently fixes the App finding",
-            thread_dispositions=[ReviewThreadDisposition(thread_id=app_thread.id, status="ADDRESSED", rationale="The failure path now has independent coverage", evidence="tests/test_reject.py exercises both native exit statuses")],
+            summary="Independent validation passes without granting closure to ordinary review roots",
+            thread_dispositions=[] if ordinary_only else [ReviewThreadDisposition(thread_id=app_thread.id, status="ADDRESSED", rationale="The failure path now has independent coverage", evidence="tests/test_reject.py exercises both native exit statuses")],
         )
         config = AutomationConfig()
         config.AUTO_MERGE = True
@@ -4129,7 +4144,7 @@ class TestClaimedReviewThreadValidationFlow:
             patch("auto_coder.pr_processor._get_adversarial_validation_eligibility", return_value=AdversarialValidationEligibility(issue_numbers=(99,))),
             patch("auto_coder.pr_processor.run_adversarial_validation", return_value=validation) as run_validation,
             patch("auto_coder.pr_processor.publish_adversarial_review", return_value=ReviewPublicationResult(True, "COMMENT", "")),
-            patch("auto_coder.pr_processor.resolve_addressed_review_threads", return_value=[app_thread.id]) as resolve_threads,
+            patch("auto_coder.pr_processor.resolve_addressed_review_threads", return_value=[] if ordinary_only else [app_thread.id]) as resolve_threads,
             patch("auto_coder.pr_processor._delegate_cloud_review_thread_repair", return_value=repair_result) as repair,
             patch("auto_coder.pr_processor._replay_saved_nonpass_review", return_value=(repair_result, False)) as replay,
             patch("auto_coder.pr_processor.isolated_pr_head_worktree"),
@@ -4138,7 +4153,7 @@ class TestClaimedReviewThreadValidationFlow:
         ):
             actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
 
-        if review_state == "same-head":
+        if same_head_verdict:
             replay.assert_called_once()
             repair.assert_not_called()
         else:
@@ -4150,20 +4165,37 @@ class TestClaimedReviewThreadValidationFlow:
         if expects_validation:
             run_validation.assert_called_once()
             validation_threads = run_validation.call_args.kwargs["claimed_review_threads_section"]
-            assert f"### Older-head adversarial finding requiring revalidation: {app_thread.id}" in validation_threads
             assert human_thread.id not in validation_threads
             assert "explicit --force" not in validation_threads
-            resolve_threads.assert_called_once()
+            if ordinary_only:
+                assert validation_threads == "(No claimed-addressed review threads for this run.)"
+                resolve_threads.assert_not_called()
+            else:
+                assert f"### Older-head adversarial finding requiring revalidation: {app_thread.id}" in validation_threads
+                resolve_threads.assert_called_once()
+                assert all(thread.thread_id != human_thread.id for thread in resolve_threads.call_args.args[4])
             assert any("unresolved review threads remain at the merge boundary" in action for action in actions)
             assert len(reassessments) == 1
             assert reassessments[0].outcome == Outcome.DEFERRED
             assert reassessments[0].facts["examined_head"] == head_sha
             assert reassessments[0].facts["blocking_thread_ids"] == [human_thread.id]
-            assert reassessments[0].facts["revalidation_thread_ids"] == [app_thread.id]
+            assert reassessments[0].facts["revalidation_thread_ids"] == ([] if ordinary_only else [app_thread.id])
+            if ordinary_only:
+                from tests.test_dashboard_observability import _mounted_detail
+
+                with patch("auto_coder.dashboard.ui") as mounted_ui:
+                    diagram = _mounted_detail(mounted_ui, "pr", 609)
+                assert "review-thread gate" in diagram
+                assert "adversarial validation" in diagram
         else:
             run_validation.assert_not_called()
             resolve_threads.assert_not_called()
-            if not discussion_changed:
+            if review_state == "human-only":
+                assert len(reassessments) == 1
+                assert reassessments[0].facts["revalidation_thread_ids"] == []
+                assert any("reached maximum adversarial review limit" in action for action in actions)
+                assert any(event.stage_id == "pr.adversarial-validation" and event.outcome == Outcome.SKIPPED and event.facts.get("reason") == "reached maximum adversarial review limit" for event in events)
+            elif not discussion_changed:
                 assert reassessments == []
         merge_pr.assert_not_called()
         assert human_thread.is_resolved is False

@@ -56,10 +56,14 @@ inspection with `git status` does not attempt an optional `.git/index.lock`
 write. Required Git mutations remain denied by the same filesystem policy.
 The production image pins Codex 0.159.2. Real-CLI conformance runs with the
 existing `opencode_live` suite in its privileged controller/non-root worker
-container profile (`tests/test_codex_noedit_runtime.py`); it drives Strong Audit
-through the production factory, executor, client, supervisor, and durable state,
-including denied writes followed by accepted exit-0 payloads and malformed
-non-authoritative payloads.
+container profile (`tests/test_codex_noedit_runtime.py`). Explicit no-edit
+verification uses the production factory, `execute_review`, client, and
+supervisor without a PR edit designation; source, Git metadata, caller, and peer
+write attempts remain denied. The same suite separately drives editable Strong
+Audit through its production producer and durable state. Nonwriting valid
+verdicts retain their normal acceptance rules, malformed results remain
+non-authoritative, and a retained source edit withholds the editing verdict.
+The controlled provider is configured in both mode-specific CLI option lists.
 
 A caught write denial is advisory even if Codex later emits PASS and exits 0.
 The supervisor preserves successful completion and the boundary retains the

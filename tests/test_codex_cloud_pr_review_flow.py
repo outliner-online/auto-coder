@@ -729,6 +729,9 @@ def test_review_delivery_reason_reaches_public_projection_without_changing_effec
         ]
     config = AutomationConfig()
     config.AUTO_MERGE = True
+    # This fixture owns delivery receipts and their public projection.
+    # The enabled first-review admission is covered by the PR lifecycle matrix.
+    config.ENABLE_ADVERSARIAL_VALIDATION = False
     state = ClaimedReviewThreadGateState(unresolved=(thread,), blocking_unresolved=(thread,), has_blocking_unresolved=True)
     monkeypatch.setattr(TraceCollector, "_instance", None)
     collector = get_trace_collector()
@@ -741,6 +744,7 @@ def test_review_delivery_reason_reaches_public_projection_without_changing_effec
         patch("auto_coder.pr_processor._get_claimed_review_thread_state", return_value=state),
         patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", return_value=True) as send,
         patch("auto_coder.pr_processor._reconcile_codex_review_feedback", wraps=_reconcile_codex_review_feedback) as reconcile,
+        patch("auto_coder.pr_processor.run_adversarial_validation") as run_validation,
         patch("auto_coder.pr_processor._merge_pr") as merge,
         collector.start_execution("owner/repo", "pr", 5262, origin="worker"),
     ):
@@ -764,6 +768,7 @@ def test_review_delivery_reason_reaches_public_projection_without_changing_effec
         assert not state_path.exists()
         assert reconcile.call_args.args[3] == []
     assert status.outcome is (PRProcessingOutcome.FAILED if expected_outcome == "failed" else PRProcessingOutcome.DEFERRED)
+    run_validation.assert_not_called()
     merge.assert_not_called()
     client.resolve_review_thread.assert_not_called()
     client.reply_to_review_thread.assert_not_called()

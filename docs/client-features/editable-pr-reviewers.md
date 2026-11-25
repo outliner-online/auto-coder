@@ -8,6 +8,11 @@ remains independent of ordinary routing, and automatic implementation-session
 resumption stays disabled. Issue/specification reviewers and explicitly no-edit
 verification remain read-only.
 
+Designated PR and Strong reviews select each backend's normal `options` list;
+read-only invocations select `options_for_noedit`. Configure custom provider
+arguments in every mode-specific list that uses that provider. The lists are
+selected independently and are not automatically merged.
+
 The permission fragments in `prompts.yaml` distinguish editable and read-only
 review calls. Editable reviewers may perform relevant dependency setup, builds,
 formatting, and focused tests, but must leave only intended source, test, and

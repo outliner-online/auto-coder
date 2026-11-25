@@ -426,6 +426,7 @@ def _execute_pending_strong_audit(
     current_target: Optional[Callable[[], Tuple[TwoTierGateInputs, str]]] = None,
     expected_lifecycle_token: str = "",
     publication_authority: Optional[Callable[[str, str], bool]] = None,
+    on_source_correction: Optional[Callable[[LocalReviewRepairOutcome], None]] = None,
 ) -> Tuple[bool, str]:
     """Claim, execute, and durably accept one production strong-audit round."""
     expected_identity = (
@@ -550,6 +551,8 @@ def _execute_pending_strong_audit(
                 )
                 reason = f"Strong reviewer produced source changes: {correction.reason}; fresh independent review and CI are required"
                 inputs.gate.state.abandon_claim(pr_number, claim.claim_id, reason)
+                if on_source_correction is not None:
+                    on_source_correction(correction)
                 return False, reason
         if not result.is_complete or result.verdict not in {VERDICT_PASS, VERDICT_FINDINGS}:
             reason = result.diagnostic or f"strong reviewer returned {result.verdict}"
@@ -599,7 +602,7 @@ def _outstanding_strong_round(inputs: TwoTierGateInputs, pr_number: int) -> Tupl
     return strong_round, ""
 
 
-def _renew_stale_strong_round(github_client: Any, repo_name: str, pr_number: int, inputs: TwoTierGateInputs, result: AdversarialValidationResult, actions: List[str]) -> bool:
+def _renew_stale_strong_round(github_client: Any, repo_name: str, pr_number: int, inputs: TwoTierGateInputs, result: AdversarialValidationResult, actions: List[str], processing_status: Optional[ProcessedPRResult] = None) -> bool:
     """Renew stale audit authority after ordinary convergence without closing retained findings."""
     snapshot = inputs.gate.state.snapshot(pr_number)
     previous = snapshot.accepted_strong_round
@@ -609,12 +612,26 @@ def _renew_stale_strong_round(github_client: Any, repo_name: str, pr_number: int
     projection = project_accepted_findings(bridge, target, ())
     if not closure_projection_readable(projection) or not raw_ordinary_clear(settle_accepted_gaps(result, projection)):
         return False
-    observed = _ClosureTargetObserver(github_client, repo_name, pr_number)()
+    observer = _ClosureTargetObserver(github_client, repo_name, pr_number)
+    observed = observer()
     if (observed.head_sha, observed.base_sha, observed.contract.identity, observed.policy.identity) != (inputs.head_sha, inputs.base_sha, inputs.contract.identity, inputs.policy.identity):
         raise RuntimeError("PR review target changed before renewed strong audit admission")
+
+    def current_target() -> Tuple[TwoTierGateInputs, str]:
+        observer()
+        assert observer.inputs is not None
+        return observer.inputs, ""
+
     inputs.gate.ordinary_pass(pr_number, inputs.head_sha, inputs.base_sha, inputs.contract)
-    accepted, reason = _execute_pending_strong_audit(repo_name, pr_number, inputs)
-    published, publication_reason = _consume_pending_two_tier_publication(repo_name, pr_number, inputs, _ClosureTargetObserver(github_client, repo_name, pr_number), github_client=github_client)
+    accepted, reason = _execute_pending_strong_audit(
+        repo_name,
+        pr_number,
+        inputs,
+        current_target=current_target,
+        publication_authority=lambda sha, ref: _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
+        on_source_correction=lambda correction: _record_reviewer_correction(repo_name, pr_number, inputs.head_sha, actions, processing_status, correction),
+    )
+    published, publication_reason = _consume_pending_two_tier_publication(repo_name, pr_number, inputs, observer, github_client=github_client)
     actions.append(f"Renewed stale strong audit for PR #{pr_number}: {reason}; {publication_reason}; retained findings still require independent closure")
     _record_pr_stage(
         pr_number,
@@ -6825,9 +6842,9 @@ def _coordinate_pr_review(
                         repair_kwargs["allow_current_head_reassessment"] = True
                     repair_result = _delegate_cloud_review_thread_repair(repo_name, pr_data, **repair_kwargs)
                     actions.extend(repair_result)
-                    if revalidating_older_head_threads and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.acknowledged_no_actionable_feedback:
-                        # A completed ordinary correction must not starve an
-                        # authentic finding's first review on the current head.
+                    if (revalidating_older_head_threads or current_head_unreviewed) and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.acknowledged_no_actionable_feedback:
+                        # Acknowledged ordinary corrections can admit the first
+                        # current-head review without an older authentic finding.
                         # These ordinary roots retain their merge/closure gates.
                         acknowledged_repair_threads = repair_threads
                     if current_head_unreviewed and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.completed_no_actionable_feedback:
@@ -7600,7 +7617,7 @@ def _coordinate_pr_review(
                 # here (it needs the ordinary session's coverage, not an effective
                 # PASS) and is fenced against newer attempts at its own acceptance.
                 raw_val_result = val_result
-                if closure_input is None and closure_inputs is not None and _renew_stale_strong_round(github_client, repo_name, pr_number, closure_inputs, val_result, actions):
+                if closure_input is None and closure_inputs is not None and _renew_stale_strong_round(github_client, repo_name, pr_number, closure_inputs, val_result, actions, processing_status):
                     return actions
                 closure_outcome: Optional[OrdinaryClosureOutcome] = None
                 if closure_input is not None and closure_gate is not None:

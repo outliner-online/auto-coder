@@ -23,14 +23,17 @@ The production regression is
 
 ## Current-head review after acknowledged cloud repairs
 
-An authentic adversarial finding that has no applicable verdict on the current
-head can proceed to independent validation even when ordinary external review
-threads remain unresolved, provided the cloud repair producer observes that
-all selected ordinary discussions are complete, end with the PR implementer's
-explicit addressed marker, and have no newly actionable feedback or observed
-indeterminate delivery for that task. A delivered correction, unclassified
-reply, truncated discussion, pending provenance clarification, exhausted repair
-allowance, or unavailable ownership does not supply this admission.
+A current head with no applicable verdict can proceed to its first independent
+validation when only acknowledged ordinary external review threads remain.
+An authentic older-head adversarial finding can also continue to revalidation
+while those ordinary threads remain unresolved. Both paths require the cloud
+repair producer to observe that all selected ordinary discussions are complete,
+end with the PR implementer's explicit addressed marker, and have no newly
+actionable feedback or observed indeterminate delivery for that task. A delivered
+correction, unclassified reply, truncated discussion, pending provenance
+clarification, exhausted repair allowance, or unavailable ownership does not
+supply this admission. Ordinary-only admission retains the configured review-count
+limit; an addressed marker does not create an exception to that limit.
 
 This observation is carried by
 `CloudReviewRepairResult.acknowledged_no_actionable_feedback`. It grants only
@@ -44,8 +47,9 @@ addressed marker does not force another same-head review.
 
 The transition emits `pr.review-thread-gate` with outcome `DEFERRED`,
 `effect=acknowledged-review-reassessment`, `examined_head`,
-`blocking_thread_ids`, and `revalidation_thread_ids`. These facts distinguish
-review admission from delivery, accepted closure and merge completion.
+`blocking_thread_ids`, and `revalidation_thread_ids`. The last list is empty
+when only ordinary external roots remain. These facts distinguish review admission
+from delivery, accepted closure and merge completion.
 
 ## First current-head review after completed Codex feedback
 
