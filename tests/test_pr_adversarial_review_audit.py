@@ -94,6 +94,9 @@ def _build_pr_repo(tmp_path: Path) -> tuple[Path, str]:
     repo = tmp_path / "pr-repo"
     repo.mkdir(parents=True)
     _git(["init", "-q"], repo)
+    origin = tmp_path / "origin.git"
+    _git(["init", "--bare", "-q", str(origin)], tmp_path)
+    _git(["remote", "add", "origin", str(origin)], repo)
     _git(["config", "user.email", "author@example.com"], repo)
     _git(["config", "user.name", "PR Author"], repo)
     (repo / "sample.py").write_text("def greet():\n    return 'placeholder'\n")

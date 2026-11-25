@@ -19,6 +19,8 @@ from auto_coder.pr_review_execution import ReviewExecutionResult, ReviewMode
 from auto_coder.two_tier_pr_gate import TwoTierPrGate
 from auto_coder.utils import CommandResult
 
+pytestmark = pytest.mark.usefixtures("_use_real_commands")
+
 
 def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=cwd, check=True, text=True, capture_output=True).stdout.strip()
@@ -45,6 +47,10 @@ def _repository(tmp_path: Path) -> tuple[Path, str, str]:
     base = _git(repository, "rev-parse", "HEAD")
     (repository / "contract.txt").write_text("head\n")
     _git(repository, "commit", "-am", "head")
+    # Keep the production source snapshot and destination guard active offline.
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "clone", "--bare", str(repository), str(origin))
+    _git(repository, "remote", "add", "origin", str(origin))
     return repository, base, _git(repository, "rev-parse", "HEAD")
 
 

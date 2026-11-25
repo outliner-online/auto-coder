@@ -13,6 +13,7 @@ from auto_coder.issue_processor import _create_pr_for_issue
 from auto_coder.pr_processor import PRActionList, _handle_pr_merge, _is_local_llm_pr, is_local_llm_pr
 from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
 @pytest.fixture(autouse=True)
@@ -178,7 +179,7 @@ class TestHandlePrMergeFixLimitation:
     @patch("auto_coder.pr_processor.publish_adversarial_review", return_value=ReviewPublicationResult(True, "APPROVE", ""))
     @patch("auto_coder.pr_processor.isolated_pr_head_worktree")
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
-    def test_clean_pr_merges_regardless_of_pr_type(self, mock_merge, mock_worktree, mock_publish, mock_val, mock_mergeable, mock_exit_check):
+    def test_clean_pr_merges_regardless_of_pr_type(self, mock_merge, mock_worktree, mock_publish, mock_val, mock_mergeable, mock_exit_check, tmp_path):
         from auto_coder.adversarial_validator import AdversarialValidationResult
 
         mock_val.return_value = AdversarialValidationResult(result="PASS", summary="Pass", findings=[])
@@ -194,6 +195,7 @@ class TestHandlePrMergeFixLimitation:
             "head": {"ref": "issue-10", "sha": "sha_101"},
         }
         github_client.get_pull_request.return_value = {"head": {"sha": "sha_101"}}
+        mock_worktree.return_value = _simulated_pr_review_worktree(tmp_path / "local-review-worktree", "sha_101")
         with patch("auto_coder.pr_processor._check_github_actions_status", side_effect=authoritative_ci_status(success=True, ids=[1])):
             actions = _handle_pr_merge(github_client, "owner/repo", local_pr, config, {})
             assert any("Successfully merged PR #101" in a for a in actions)
@@ -208,6 +210,7 @@ class TestHandlePrMergeFixLimitation:
             "head": {"ref": "codex-branch", "sha": "sha_102"},
         }
         github_client.get_pull_request.return_value = {"head": {"sha": "sha_102"}}
+        mock_worktree.return_value = _simulated_pr_review_worktree(tmp_path / "cloud-review-worktree", "sha_102")
         with patch("auto_coder.pr_processor._check_github_actions_status", side_effect=authoritative_ci_status(success=True, ids=[2])):
             actions = _handle_pr_merge(github_client, "owner/repo", codex_pr, config, {})
             assert any("Successfully merged PR #102" in a for a in actions)
