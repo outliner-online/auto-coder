@@ -238,6 +238,14 @@ unresolved-thread gate. An explicit same-account guidance reply can produce one
 new handoff; its repeated polls are deferred. The existing trace schema and
 renderer remain unchanged; neither state establishes implementation completion.
 
+When unrelated requirement coverage remains unverified, an independently
+substantiated correction can still appear as a corrective handoff. The retained
+coverage and pending review obligations remain visible; a handoff is not an
+approval or completion. Replaying a previously blocked decision uses the existing
+`pr.repair-delegation` stage with `effect=adversarial-feedback-replay` and
+`additional_model_execution=false`. Reconstructed polling reuses a confirmed
+handoff rather than adding another model review or provider request.
+
 When acknowledged cloud corrections leave ordinary review threads unresolved,
 an authentic older-head finding can still enter its first current-head review.
 The existing review-thread gate records a deferred

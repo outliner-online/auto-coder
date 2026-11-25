@@ -135,10 +135,15 @@ hold the ordinary-attempt and accepted-lifecycle transition fences through the
 dependent publication and handoff. Reconcile existing publication receipts
 before sending any missing review; unresolved transmission uncertainty waits
 without a blind resend. Confirmed publication and provider delivery are reused
-without another model call. Typed evidence that fails applicability cannot fall
-through to legacy headline replay. Recovery grants neither closure nor approval;
-freshly observed corrective completion can still admit its independent closure
-review without an old STILL_VALID observation masking the completion.
+without another model call. This also recovers a previously published BLOCKED
+result whose independently actionable correction was suppressed by unrelated
+unverified coverage, even when its focused reconciliation attempt was already
+spent. Recovery re-derives the typed evidence before the unchanged-evidence wait;
+it does not reset stored attempts, alter coverage, invent a new correction, or
+resend a confirmed provider request. Typed evidence that fails applicability
+cannot fall through to legacy headline replay. Recovery grants neither closure
+nor approval; freshly observed corrective completion can still admit its
+independent closure review without an old STILL_VALID observation masking the completion.
 
 Cloud replay can use an explicitly identified STILL_VALID native thread in
 the retained report when its wording differs from the newly rendered finding.

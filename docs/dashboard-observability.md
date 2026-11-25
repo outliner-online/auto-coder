@@ -271,6 +271,19 @@ existing repair-delegation stage with `effect=adversarial-feedback-replay`,
 schema or renderer is required: delivery uses the existing handoff/wait facts;
 reusing evidence cannot render closure or merge completion.
 
+Independently evidenced ordinary corrections also retain the existing handoff
+trace when unrelated requirements remain unverified. The full coverage stays
+visible and never becomes approval or merge clearance. The regression
+`tests/test_effective_decision_pr_flow.py::test_unverified_coverage_does_not_strand_saved_independent_test_correction`
+drives both saved-review entry routes after reconstruction of a historical
+BLOCKED decision with a spent reconciliation revision. It asserts exactly one
+provider handoff, unchanged coverage, `effect=adversarial-feedback-replay`, and
+`additional_model_execution=false`, with no new reviewer, publication, closure,
+or approval. Run `bash scripts/test.sh tests/test_effective_review_decision.py
+tests/test_effective_decision_pr_flow.py -k 'independent or unverified'`.
+No event schema, processing origin, persisted format, or renderer change is
+needed; existing handoff and wait facts describe the actual effect.
+
 Capacity-refill exception containment adds the engine-status `refill_faults`
 collection; no execution-trace stage, provider route, durable-resumption record,
 or dashboard event schema changes. The collection reports repository, actual

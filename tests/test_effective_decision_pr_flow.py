@@ -2050,3 +2050,110 @@ def test_jules_origin_completion_without_a_commit_reaches_reassessment_through_t
 
     assert len(script.calls) == 1
     assert flow_env.cycle.snapshot(flow.pr).open_findings == ()
+
+
+@pytest.mark.parametrize("thread_gate_enabled", [True, False], ids=["early-unresolved-thread-route", "ordinary-saved-result-route"])
+def test_unverified_coverage_does_not_strand_saved_independent_test_correction(flow_env: Env, monkeypatch: pytest.MonkeyPatch, thread_gate_enabled: bool) -> None:
+    """PR #6035: spent reconciliation must not hide a retained, scoped test gap."""
+    from auto_coder import pr_processor
+    from auto_coder.adversarial_validator import IssueRequirement
+    from auto_coder.effective_decision_application import HANDOFF_NOT_REQUIRED
+    from auto_coder.execution_trace import Outcome
+    from tests.test_accepted_finding_bridge import _context
+
+    requirements = [
+        IssueRequirement("#2401/REQ-001", "Identify the configured acquisition source layout."),
+        IssueRequirement("#2401/REQ-002", "Preserve the native package authentication boundary."),
+        IssueRequirement("#2401/REQ-003", "Reject malformed source layouts and exhausted acquisition without reporting readiness."),
+    ]
+
+    def current_context():
+        context = _context()
+        context.issue_requirements = requirements
+        context.issue_context = "\n".join(f"{item.requirement_id}: {item.text}" for item in requirements)
+        return context
+
+    monkeypatch.setattr("tests.test_accepted_finding_bridge._context", current_context)
+    flow = make_flow(flow_env, monkeypatch, 6035, "cloud", saved_status=None, auto_status=True, provider_name="codex-cloud")
+    raw = json.loads(ordinary_response("none", result="NEEDS_TESTS"))
+    raw["summary"] = "A scoped negative-control gap is established; unrelated acquisition coverage remains unverified."
+    raw["requirement_coverage"] = [{"requirement_id": item.requirement_id, "status": "VERIFIED" if index == 2 else "UNVERIFIED", "evidence": "Current source inspected" if index == 2 else "Independent source evidence is unavailable"} for index, item in enumerate(requirements)]
+    raw["thread_dispositions"] = []
+    raw["test_oracle_gaps"] = [
+        {
+            "requirement_id": "#2401/REQ-003",
+            "anchor_path": "src/state.py",
+            "anchor_line": 40,
+            "status": "OPEN",
+            "authoritative_boundary": "src/state.py",
+            "invariant": "Malformed layouts and exhausted acquisition must not report readiness.",
+            "plausible_incorrect_implementation": "Accept a malformed source layout or enter legacy acquisition after all admitted transports fail.",
+            "why_tests_still_pass": "The real setup fixture exercises only successful acquisition for the supported layout.",
+            "material_consequence": "A failed acquisition can be reported as ready without a verified package source.",
+            "focused_regression_scenario": "Exercise malformed-layout rejection and total transport failure through the real setup entry point.",
+        }
+    ]
+    flow.model_responses = [json.dumps(raw)]
+    with patch("auto_coder.pr_processor._dispatch_effective_correction", side_effect=SimulatedCrash), pytest.raises(SimulatedCrash):
+        flow.run()
+    retained = flow.retained()
+    assert retained is not None and retained.ordinary_correction is not None
+    assert flow.model_calls == 1 and flow.handoffs == 0 and len(flow.reviews) == 1
+    evidence = retained.ordinary_correction
+    assert not evidence.requires_strong_policy
+    assert [entry.status for entry in evidence.restore().requirement_coverage] == ["UNVERIFIED", "UNVERIFIED", "VERIFIED"]
+    owners = [(blocker.blocker_id, blocker.accepted_scope) for blocker in flow.env.ledger.get_snapshot("https://api.github.com", REPO, flow.pr).blockers]
+    assert owners
+    assert flow.router is not None
+    root_ids = {root["id"] for roots in flow.router.review_roots.values() for root in roots}
+
+    # Preserve the old published diagnostic and its already-spent reconciliation
+    # allowance while keeping the normalized producing attempt and native root.
+    EffectiveDecisionStore(REPO).save(
+        replace(
+            retained,
+            status="BLOCKED",
+            next_action="RECONCILIATION",
+            handoff=HANDOFF_NOT_REQUIRED,
+            reconciliation_attempts=[retained.evidence_revision],
+            wait_reason="RECONCILIATION_PENDING",
+        )
+    )
+    for review in [*flow.reviews, *flow.router.review_records]:
+        review["body"] = review["body"].replace("adversarial validation: NEEDS_TESTS", "adversarial validation: BLOCKED")
+        review["event"] = "COMMENT"
+        if "state" in review:
+            review["state"] = "COMMENTED"
+    assert flow._published_status() == "BLOCKED"
+    flow.env = flow.env.reconstructed()
+    flow.model_responses = []
+
+    with patch("auto_coder.pr_processor._record_pr_stage", wraps=pr_processor._record_pr_stage) as stages:
+        first = flow.run(public_origin=True, thread_gate_enabled=thread_gate_enabled)
+        first_outcome = flow.status.outcome
+        flow.env = flow.env.reconstructed()
+        second = flow.run(public_origin=True, thread_gate_enabled=thread_gate_enabled)
+
+    replay_events = [call.args for call in stages.call_args_list if call.args[1] == "pr.repair-delegation" and call.args[4].get("effect") == "adversarial-feedback-replay"]
+    assert len(replay_events) == 2
+    for event in replay_events:
+        assert event[0] == flow.pr and event[3] is Outcome.ACCEPTED_HANDOFF
+        assert event[4]["examined_head"] == flow.head
+        assert event[4]["source_attempt_sequence"] == evidence.attempt_sequence
+        assert event[4]["additional_model_execution"] is False
+        assert event[4]["review_disposition"] == "CORRECTIVE_HANDOFF"
+        assert event[4]["handoff"] == HANDOFF_DISPATCHED
+    assert first_outcome is PRProcessingOutcome.DEFERRED and flow.status.outcome is PRProcessingOutcome.DEFERRED
+
+    resumed = flow.retained()
+    assert flow.model_calls == 1 and flow.handoffs == 1 and len(flow.reviews) == 1, (first, second)
+    assert resumed is not None and resumed.status == "NEEDS_TESTS" and resumed.next_action == "FOCUSED_TEST_REPAIR"
+    assert resumed.handoff == HANDOFF_DISPATCHED and resumed.ordinary_correction is not None
+    assert resumed.ordinary_correction.attempt_id == evidence.attempt_id
+    assert [entry.status for entry in resumed.ordinary_correction.restore().requirement_coverage] == ["UNVERIFIED", "UNVERIFIED", "VERIFIED"]
+    assert [(blocker.blocker_id, blocker.accepted_scope) for blocker in flow.env.ledger.get_snapshot("https://api.github.com", REPO, flow.pr).blockers] == owners
+    assert {root["id"] for roots in flow.router.review_roots.values() for root in roots} == root_ids
+    assert "malformed-layout rejection and total transport failure" in flow.handoff_text()
+    assert flow.merge.call_count == 0 and all(review["event"] != "APPROVE" for review in flow.reviews)
+    assert flow.env.cycle.snapshot(flow.pr).accepted_closure is None
+    flow.client.resolve_review_thread.assert_not_called()

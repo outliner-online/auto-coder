@@ -242,7 +242,7 @@ def test_post_preparation_authority_exception_keeps_original_job_retryable(tmp_p
     runner.close()
 
 
-def test_worktree_preparation_failure_retries_same_job_and_invokes_model_once(tmp_path: Path, monkeypatch) -> None:
+def test_worktree_preparation_failure_retries_same_job_and_invokes_model_once(tmp_path: Path, monkeypatch, _use_real_sleep) -> None:
     repository, head = _git_repository(tmp_path)
     monkeypatch.chdir(repository)
     request = replace(_request(), head_sha=head)
@@ -275,17 +275,20 @@ def test_worktree_preparation_failure_retries_same_job_and_invokes_model_once(tm
         patch("auto_coder.pr_correction_job.RepairAllowanceLedger", return_value=ledger),
         patch("auto_coder.local_review_repair.subprocess.run", side_effect=fail_first_preparation),
     ):
-        assert runner.poll() == 1
-        _wait_for(lambda: runner.active_count() == 0)
-        first = jobs.get(job.job_id)
-        assert first is not None and first.state is LocalJobState.PENDING and not first.provider_entered
-        first_repair = repairs.get(request)
-        assert first_repair is not None and first_repair.phase == "not_started"
-        replay = offer_pr_correction_job(request, "codex", store=jobs, repair_store=repairs, allowance_ledger=ledger)
-        assert replay is not None and replay.job_id == job.job_id
-        assert repairs.get(request).incarnation == first_repair.incarnation  # type: ignore[union-attr]
-        assert runner.poll() == 1
-        _wait_for(lambda: runner.active_count() == 0)
+        try:
+            assert runner.poll() == 1
+            _wait_for(lambda: runner.active_count() == 0)
+            first = jobs.get(job.job_id)
+            assert first is not None and first.state is LocalJobState.PENDING and not first.provider_entered
+            first_repair = repairs.get(request)
+            assert first_repair is not None and first_repair.phase == "not_started"
+            replay = offer_pr_correction_job(request, "codex", store=jobs, repair_store=repairs, allowance_ledger=ledger)
+            assert replay is not None and replay.job_id == job.job_id
+            assert repairs.get(request).incarnation == first_repair.incarnation  # type: ignore[union-attr]
+            assert runner.poll() == 1
+        finally:
+            # Finish real Git work and cleanup before restoring the patched stores.
+            runner.close(wait=True)
 
     completed = jobs.get(job.job_id)
     assert completed is not None and completed.state is LocalJobState.DOWNSTREAM_EFFECTS_PENDING
@@ -293,7 +296,6 @@ def test_worktree_preparation_failure_retries_same_job_and_invokes_model_once(tm
     executor.assert_called_once()
     assert completed.upstream_attempt == request.attempt_id
     assert completed.owner_generation == job.owner_generation
-    runner.close()
 
 
 def test_restart_recovers_publication_checkpoint_before_runner_artifact(tmp_path: Path, monkeypatch) -> None:

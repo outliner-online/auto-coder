@@ -16,11 +16,15 @@ evidence.
 
 A normalized ordinary `NEEDS_FIX` result may dispatch implementation repair
 when its coverage includes `VIOLATED` requirements with matching concrete
-findings. Such a violation is adjudicated evidence for correction, not missing
-evidence and never approval clearance. Unverified requirements, violations
-without matching findings, specification gaps, and unexplained changes still
-require reconciliation. `PASS` continues to require only `VERIFIED` or justified
-`IRRELEVANT` entries.
+findings. Each selected finding must have settled coverage for every requirement
+it names; a missing or unverified association cannot enter its repair scope.
+A complete material test gap similarly requires covered evidence for its own
+explicit requirement. Unrelated `UNVERIFIED` requirements do not suppress those
+independently substantiated corrections. Their coverage remains unchanged and
+must still be resolved before approval. Such a violation is adjudicated evidence
+for correction, not approval clearance. Unmatched violations, specification gaps,
+and unexplained changes remain non-authorizing. `PASS` continues to require only
+`VERIFIED` or justified `IRRELEVANT` entries.
 
 Operational `ERROR`, `EXHAUSTED`, `BLOCKED`, and `INCONCLUSIVE` outcomes wait
 without dispatching a repair while retaining known accepted obligations for a
@@ -34,7 +38,8 @@ the policy does not close findings itself.
 
 Pending closure acceptance and historical adjudication do not suppress
 independently upheld repairs or new demonstrated ordinary violations with complete
-requirement coverage. The decision separates current accepted `corrections`,
+coverage for the correction's own requirements. The decision separates current
+accepted `corrections`,
 `ordinary_findings` and `ordinary_gaps`, exact `pending_closures`, and historical
 `pending_reconciliation`. Only the current actionable sets reach the repair owner.
 Pending closures and adjudication still block
