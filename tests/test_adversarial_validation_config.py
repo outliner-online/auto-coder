@@ -18,6 +18,43 @@ from auto_coder.llm_backend_config import BackendConfig, LLMBackendConfiguration
 from auto_coder.quota_selector import BackendQuotaEvaluation
 
 
+@pytest.mark.parametrize("validation_kind,is_noedit", [("pr", False), ("strong_pr", False), ("issue", True), (None, True), ("unspecified-role", True)])
+def test_review_role_selects_codex_client_mode_without_automatic_resume(validation_kind, is_noedit):
+    """Exercise role resolution through the real factory and client constructor."""
+    config = LLMBackendConfiguration.load_from_dict(
+        {
+            "backend_adversarial_validation": {"order": ["codex-reviewer"]},
+            "backend_issue_adversarial_validation": {"order": ["codex-reviewer"]},
+            "backend_pr_adversarial_validation": {"order": ["codex-reviewer"]},
+            "backend_strong_pr_adversarial_validation": {"order": ["codex-reviewer"]},
+            "backends": {
+                "codex-reviewer": {
+                    "backend_type": "codex",
+                    "model": "gpt-5",
+                    "options": ["exec", "--json", "--sandbox", "workspace-write"],
+                    "options_for_noedit": ["exec", "--json", "--sandbox", "read-only"],
+                }
+            },
+        }
+    )
+    with (
+        patch("auto_coder.cli_helpers.get_llm_config", return_value=config),
+        patch("auto_coder.codex_client.get_llm_config", return_value=config),
+        patch("auto_coder.codex_client.subprocess.run") as version_probe,
+        patch("auto_coder.quota_selector.evaluate_backend_quota", return_value=BackendQuotaEvaluation("codex-reviewer")),
+        patch("auto_coder.quota_selector.rank_high_score_backends_by_quota", return_value=["codex-reviewer"]),
+    ):
+        version_probe.return_value.returncode = 0
+        manager = resolve_adversarial_validation_availability(validation_kind).backend_manager
+
+    assert manager is not None
+    assert manager._automatic_session_resume is False
+    client = manager._clients["codex-reviewer"]
+    assert client.use_noedit_options is is_noedit
+    assert client.options == ["exec", "--json", "--sandbox", "read-only" if is_noedit else "workspace-write"]
+    assert client.capture_final_message is True
+
+
 class TestStrongPRAdversarialValidationConfiguration:
     """Test loading, saving, and getters for [backend_strong_pr_adversarial_validation]."""
 

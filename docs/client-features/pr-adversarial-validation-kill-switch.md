@@ -7,6 +7,13 @@ evidence collection and at LLM and dynamic-check boundaries; unverifiable or
 redirected execution fails closed. Concurrent attempts own and clean up only
 their respective worktrees.
 
+Controller-designated editable reviews also compare the source-file snapshot,
+including uncommitted additions, deletions, contents, modes, and symlinks. A
+matching HEAD alone does not certify an edited checkout. Source changes stop
+verdict consumption and enter controller-owned correction publication followed
+by independent new-head review and CI; see
+[Editable PR reviewers](editable-pr-reviewers.md).
+
 Linked-worktree fetch, registration and removal use the same cross-thread and
 cross-process lease keyed by the physical Git common-directory identity. Linked
 callers and path aliases therefore coordinate on one registry. The caller's

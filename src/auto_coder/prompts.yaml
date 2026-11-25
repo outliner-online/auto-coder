@@ -695,13 +695,44 @@ pr:
     Example format:
     {"title": "Fix authentication bug in login flow", "body": "Updated the authentication logic to properly handle edge cases when users have special characters in their passwords. This resolves the login failures reported in the issue."}
 
-  two_tier_review_execution: |-
-    You are executing the explicitly tagged read-only PR reviewer role $mode.
-    Do not edit files, continue a prior conversation, mutate GitHub, or claim merge authority.
+  read_only_review_permissions: |-
+    This invocation is strictly read-only. Do not edit files or repository state.
     Do not execute test wrappers, formatters, builds, setup scripts, or dependency
     installers: they can mutate repository files even when called for verification.
     Inspect source/tests and supplied CI evidence. Report unavailable execution
     evidence honestly instead of attempting a mutating check.
+    Request any necessary dynamic check through the response protocol when available.
+
+  editable_review_permissions: |-
+    This invocation permits edits in its private PR review workspace.
+    Inspect the current implementation, add focused regression tests, and correct
+    demonstrated defects within the supplied explicit Requirements and review scope.
+    You may run relevant focused tests and necessary noninteractive commands,
+    including setup, dependency installation, builds, and formatting for that work.
+    Verify that the target repository's test wrapper honors the selected test scope.
+    Do not run the full repository suite or reconstruct it through batches; CI owns
+    the complete suite. No automatic unscoped baseline is required for this review.
+
+    Retain only intended source, test, and documentation corrections. Put disposable
+    investigation scripts, logs, and generated verification output in .agent-tmp/
+    or repository-ignored output locations. Revert temporary experiments and
+    incidental tracked-file changes that are not part of the intended correction.
+    Do not change branches or HEAD, stage, commit, push, merge, or mutate GitHub.
+    The controller owns committing and publishing retained changes to the existing PR.
+
+    Report the commands actually run and distinguish passed, failed, interrupted,
+    and not-run checks. Test evidence describes the exact files that were tested;
+    an unchanged HEAD does not prove an edited workspace still matches that commit.
+    Return the required review response with the supplied identity values unchanged.
+    If you retain any source changes, your verdict cannot approve those changes:
+    the controller invalidates that verdict, publishes a new head, and requires
+    independent review and CI for the new candidate before merge. Do not claim
+    that your own correction establishes independent approval or closes a thread.
+
+  two_tier_review_execution: |-
+    You are executing the explicitly tagged PR reviewer role $mode.
+    $review_permissions
+    Do not continue a prior conversation, mutate GitHub, or claim merge authority.
     Requirements below are the only normative implementation contract. Objective,
     Context, acceptance examples, prior reviewers, and model reputation are evidence only.
 
@@ -806,8 +837,8 @@ pr:
     BOUNDED scope can authorize bounded closure; EXPANDED or UNKNOWN scope
     records convergence and requires a renewed strong audit. Do not return
     INCONCLUSIVE solely because the scope requires that renewed audit.
-    Never report
-    a test as executed unless the supplied evidence proves its execution.
+    Never report a test as executed unless observed execution evidence proves
+    its execution against the relevant source snapshot.
     The caller owns the review mode; do not include a `mode` field in the response.
     The decision key is `result`; never return a `verdict` key.
 
@@ -866,11 +897,7 @@ pr:
 
   adversarial_validation: |-
     You are an expert adversarial software correctness reviewer with deep domain expertise.
-    This invocation is strictly read-only. Do not execute test wrappers,
-    formatters, builds, setup scripts, or dependency installers: they can mutate
-    repository files even when called for verification. Inspect source/tests and
-    supplied exact-head CI evidence. Request any necessary dynamic check through
-    the response protocol instead of launching a mutating check yourself.
+    $review_permissions
 
     $closure_extension
 

@@ -16,6 +16,7 @@ from auto_coder.pr_processor import (
 from auto_coder.util.gh_cache import GitHubClient, ReviewThread, ReviewThreadComment
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
 @pytest.fixture
@@ -325,9 +326,9 @@ def test_handle_pr_merge_fails_closed_when_real_review_thread_lookup_fails(mock_
 @patch("auto_coder.pr_processor.publish_adversarial_review", return_value=ReviewPublicationResult(True, "APPROVE", ""))
 @patch("auto_coder.pr_processor.isolated_pr_head_worktree")
 @patch("auto_coder.pr_processor._merge_pr")
-def test_handle_pr_merge_proceeds_when_all_threads_resolved(mock_merge_pr, mock_worktree, mock_publish, mock_adv_val, mock_has_unresolved, mock_checks, mock_mergeable, mock_exit_if_in_progress):
+def test_handle_pr_merge_proceeds_when_all_threads_resolved(mock_merge_pr, mock_worktree, mock_publish, mock_adv_val, mock_has_unresolved, mock_checks, mock_mergeable, mock_exit_if_in_progress, tmp_path):
     mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
-    mock_worktree.return_value.__enter__.return_value = "/tmp/worktree"
+    mock_worktree.return_value = _simulated_pr_review_worktree(tmp_path / "review-worktree", "123abc456")
     mock_has_unresolved.return_value = False
     mock_merge_pr.return_value = True
     from auto_coder.adversarial_validator import AdversarialValidationResult

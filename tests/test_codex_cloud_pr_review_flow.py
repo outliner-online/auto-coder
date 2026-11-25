@@ -26,6 +26,7 @@ from auto_coder.review_thread_validation import ClaimedReviewThread
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
 @pytest.fixture(autouse=True)
@@ -266,7 +267,7 @@ def test_non_codex_pr_preserves_generic_review_gate() -> None:
     send_followup.assert_not_called()
 
 
-def test_single_pr_merge_entry_validates_claimed_thread_without_redelegating() -> None:
+def test_single_pr_merge_entry_validates_claimed_thread_without_redelegating(tmp_path) -> None:
     client = _github_client()
     client.get_pull_request.return_value = {"head": {"sha": "head-1"}}
     claimed = ClaimedReviewThread(
@@ -311,7 +312,7 @@ def test_single_pr_merge_entry_validates_claimed_thread_without_redelegating() -
         patch("auto_coder.pr_processor._delegate_cloud_review_thread_repair") as delegate_review_repair,
     ):
         label_manager.return_value.__enter__.return_value = MagicMock()
-        worktree.return_value.__enter__.return_value = "/tmp/worktree"
+        worktree.return_value = _simulated_pr_review_worktree(tmp_path / "review-worktree", "head-1")
         result = _process_pr_for_merge("owner/repo", _pr_data(), config)
 
     assert any("claimed-addressed review thread" in action for action in result.actions_taken)

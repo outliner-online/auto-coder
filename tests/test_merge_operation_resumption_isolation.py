@@ -10,7 +10,7 @@ import pytest
 from src.auto_coder.automation_engine import _MergeOperationResumeHandler
 from src.auto_coder.execution_trace import EventKind, Outcome, TraceCollector
 from src.auto_coder.merge_operation_scheduler import RESUME_RETRY_INTERVAL_SECONDS, MergeOperationScheduler, get_merge_operation_scheduler
-from src.auto_coder.merge_operation_state import BlockReason, ConfirmationSource, EffectName, EffectReceipt, EffectState, MergeOperationIdentity, MergeOperationPersistenceError, MergeOperationStore, OperationStatus
+from src.auto_coder.merge_operation_state import BlockReason, ConfirmationSource, EffectName, EffectReceipt, EffectSenderBinding, EffectState, MergeOperationIdentity, MergeOperationPersistenceError, MergeOperationStore, OperationStatus, ReservationRefusal
 from src.auto_coder.util.github_request_outcome import GitHubApiOutcome, GitHubRequestError
 
 
@@ -295,3 +295,45 @@ async def test_binding_is_required_immutable_and_not_process_global():
     with pytest.raises(ValueError, match="bound"):
         first.register_resume_handler(Mock(), repository="acme/other")
     second.register_resume_handler(Mock(), repository="acme/other")
+
+
+@pytest.mark.asyncio
+async def test_bound_uncertain_attempt_survives_production_scheduler_recovery(tmp_path):
+    path = tmp_path / "shared.db"
+    store = MergeOperationStore(path)
+    operation = create(store)
+    identity = operation.identity
+    principal = EffectSenderBinding("controller", identity.api_origin, identity.repository, 11, 22, "controller[bot]")
+    reservation = store.reserve_app_attempt(identity, EffectName.MERGE, principal, now=100)
+    assert reservation.granted
+    reopened = MergeOperationStore(path)
+    clock = Clock(now=101)
+    engine = Mock()
+    scheduler = bind(reopened, identity.repository, clock, engine)
+    await scheduler._recover_interrupted()
+    recovered = reopened.get(identity)
+    effect = recovered.effect(EffectName.MERGE)
+    assert effect.state is EffectState.DELIVERY_UNKNOWN
+    assert effect.sender_binding == principal
+    assert effect.attempt_id == reservation.attempt_id
+    assert effect.generation == reservation.generation
+    assert effect.receipt is None
+    assert recovered.not_before == operation.not_before
+    assert engine.mock_calls == []
+
+    changed = EffectSenderBinding("controller", identity.api_origin, identity.repository, 11, 23, "controller[bot]")
+    refused = reopened.reserve_app_attempt(identity, EffectName.MERGE, changed, now=102)
+    assert refused.refusal is ReservationRefusal.PRINCIPAL_MISMATCH
+    assert reopened.get(identity) == recovered
+    matching = reopened.reserve_app_attempt(identity, EffectName.MERGE, principal, now=102)
+    assert matching.refusal is ReservationRefusal.INELIGIBLE
+    assert reopened.get(identity) == recovered
+    observation = EffectReceipt(ConfirmationSource.STATE_OBSERVATION, reviewer_identity="another-observer", target_head_sha="head", merge_commit_sha="confirmed-merge")
+    assert reopened.record_confirmed_complete(identity, EffectName.MERGE, reservation.attempt_id, reservation.generation, observation, now=103)
+    settled = MergeOperationStore(path).get(identity)
+    assert settled.status is OperationStatus.MERGE_CONFIRMED
+    assert settled.effect(EffectName.MERGE).sender_binding == principal
+    assert settled.effect(EffectName.MERGE).receipt == observation
+    await scheduler._recover_interrupted()
+    assert reopened.get(identity) == settled
+    assert reopened.due(clock(), repository=identity.repository) == []

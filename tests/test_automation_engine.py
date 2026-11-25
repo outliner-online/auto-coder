@@ -1658,8 +1658,9 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
             }
         ]
 
-    def test_process_single_propagates_adversarial_validation_execution_failure(self, mock_github_client):
+    def test_process_single_propagates_adversarial_validation_execution_failure(self, mock_github_client, tmp_path):
         """A validator crash must reach the completion boundary as a failure."""
+        from auto_coder.editable_review import ReviewWorkspaceSnapshot
         from auto_coder.pr_processor import AdversarialValidationEligibility, ClaimedReviewThreadGateState, CodexReviewState
 
         config = AutomationConfig()
@@ -1693,12 +1694,21 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
             ),
             patch("auto_coder.pr_processor._get_codex_review_state", return_value=CodexReviewState()),
             patch("auto_coder.pr_processor._get_published_adversarial_validation_status", return_value=(None, None)),
-            patch("auto_coder.pr_processor.isolated_pr_head_worktree"),
-            patch("auto_coder.pr_processor.run_adversarial_validation", side_effect=RuntimeError("validator subprocess crashed")),
+            patch("auto_coder.pr_processor.isolated_pr_head_worktree") as worktree,
+            patch(
+                "auto_coder.pr_processor.capture_review_workspace",
+                return_value=ReviewWorkspaceSnapshot(tmp_path, "abc123", (), "https://github.com/owner/repo.git"),
+            ) as capture,
+            patch("auto_coder.pr_processor.run_adversarial_validation", side_effect=RuntimeError("validator subprocess crashed")) as validator,
             patch("auto_coder.pr_processor.publish_adversarial_review", return_value=Mock(success=True, event="submitted")),
         ):
+            # This propagation test supplies its synthetic workspace at both admission boundaries.
+            worktree.return_value.__enter__.return_value = str(tmp_path)
             result = engine.process_single("owner/repo", "pr", 92)
 
+        capture.assert_called_once_with(str(tmp_path), "abc123")
+        validator.assert_called_once()
+        assert validator.call_args.kwargs["execution_cwd"] == str(tmp_path)
         assert result["errors"] == ["Error processing pr #92: validator subprocess crashed"]
         assert result["prs_processed"][0]["outcome"] == "failed"
         assert any("ERROR: Adversarial validation failed for PR #92" in action for action in result["prs_processed"][0]["actions_taken"])

@@ -1759,7 +1759,8 @@ class TestBuildAdversarialValidationContext:
         assert "file_late.py" in context.all_changed_files
         assert "file1.py" in context.all_changed_files
 
-    def test_rendered_prompt_preserves_early_and_late_file_patches_in_full(self):
+    @pytest.mark.parametrize("editable", [False, True])
+    def test_rendered_prompt_preserves_early_and_late_file_patches_in_full(self, editable):
         """Neither an oversized early patch nor a later material file may be locally dropped (REQ-001, REQ-002)."""
         mock_client = MagicMock()
         diff_prefix = "diff --git a/src/early.py b/src/early.py\n+++ b/src/early.py\n" + ("+early_line\n" * 200)
@@ -1784,6 +1785,7 @@ class TestBuildAdversarialValidationContext:
         changed_tests_str = "\n".join(f"- {t}" for t in context.changed_tests) if context.changed_tests else "(No test files detected in diff)"
         rendered_prompt = render_prompt(
             "pr.adversarial_validation",
+            review_permissions=render_prompt("pr.editable_review_permissions" if editable else "pr.read_only_review_permissions", include_header=False),
             review_policy=render_prompt("pr.adversarial_validation_initial_review"),
             repo_name="owner/repo",
             pr_number=100,
@@ -1798,8 +1800,14 @@ class TestBuildAdversarialValidationContext:
         )
 
         assert "Complete Changed-File Manifest" in rendered_prompt
-        assert "This invocation is strictly read-only" in rendered_prompt
-        assert "Request any necessary dynamic check through" in rendered_prompt
+        if editable:
+            assert "permits edits in its private PR review workspace" in rendered_prompt
+            assert "independent review and CI for the new candidate before merge" in rendered_prompt
+            assert "strictly read-only" not in rendered_prompt
+        else:
+            assert "This invocation is strictly read-only" in rendered_prompt
+            assert "Request any necessary dynamic check through" in rendered_prompt
+        assert "$review_permissions" not in rendered_prompt
         assert "src/early.py" in rendered_prompt
         assert "+early_line" in rendered_prompt
         assert "src/late_secret_feature.py" in rendered_prompt
@@ -2185,7 +2193,8 @@ class TestBuildAdversarialValidationContext:
         mock_config.get_backend_config.return_value = mock_backend
         mock_get_config.return_value = mock_config
 
-        with patch("auto_coder.claude_client.CommandExecutor.run_command") as mock_run:
+        with patch("auto_coder.claude_client.CommandExecutor.run_command") as mock_run, patch("auto_coder.claude_client.check_claude_usage_or_raise"):
+            # This is an argv-policy unit test; provider usage is an external boundary.
             mock_run.return_value = MagicMock(success=True, stdout="output", stderr="", returncode=0)
             from auto_coder.claude_client import ClaudeClient
 
@@ -2214,7 +2223,8 @@ class TestBuildAdversarialValidationContext:
         mock_config.get_backend_config.return_value = mock_backend
         mock_get_config.return_value = mock_config
 
-        with patch("auto_coder.claude_client.CommandExecutor.run_command") as mock_run:
+        with patch("auto_coder.claude_client.CommandExecutor.run_command") as mock_run, patch("auto_coder.claude_client.check_claude_usage_or_raise"):
+            # This is an argv-policy unit test; provider usage is an external boundary.
             mock_run.return_value = MagicMock(success=True, stdout="output", stderr="", returncode=0)
             from auto_coder.claude_client import ClaudeClient
 
@@ -2247,7 +2257,8 @@ class TestBuildAdversarialValidationContext:
         mock_config.get_backend_config.return_value = mock_backend
         mock_get_config.return_value = mock_config
 
-        with patch("auto_coder.claude_client.CommandExecutor.run_command") as mock_run:
+        with patch("auto_coder.claude_client.CommandExecutor.run_command") as mock_run, patch("auto_coder.claude_client.check_claude_usage_or_raise"):
+            # This is an argv-policy unit test; provider usage is an external boundary.
             mock_run.return_value = MagicMock(success=True, stdout="output", stderr="", returncode=0)
             from auto_coder.claude_client import ClaudeClient
 
