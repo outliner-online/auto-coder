@@ -340,6 +340,50 @@ def test_cli_difficult_issue_retains_indeterminate_jules_handoff_before_claude_s
     assert retained.backend_name == "historical-jules"
 
 
+def test_cli_difficult_issue_without_high_score_config_retains_indeterminate_jules_handoff(tmp_path, monkeypatch):
+    """REQ-004: the difficult local fallback cannot bypass historical ownership."""
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+    from auto_coder.issue_dispatch import DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+
+    issue_number = 2896
+    _write_config(
+        tmp_path,
+        '[backend]\norder = ["ordinary-local"]\n\n' '[backends.ordinary-local]\nbackend_type = "codex"\nenabled = true\n',
+        monkeypatch,
+    )
+    historical = CloudRun(
+        "owner/repo",
+        issue_number,
+        0,
+        "jules",
+        backend_name="historical-jules",
+        submission_outcome="indeterminate",
+    )
+    stored, created = CloudRunRepository("owner/repo").acquire_submission_claim(historical)
+    assert created is True
+    assert stored == historical
+    github = _ordinary_issue_github(issue_number)
+    github.get_issue_dispatch_snapshot_strict.return_value["labels"].append({"name": "difficult"})
+
+    with (
+        patch("auto_coder.cli_commands_main.get_repo_or_detect", return_value="owner/repo"),
+        patch("auto_coder.cli_commands_main.GitHubClient.get_instance", return_value=github),
+        patch("auto_coder.automation_engine.AutomationEngine._check_and_handle_closed_branch", return_value=True),
+        patch("auto_coder.automation_engine.get_current_branch", return_value="main"),
+        patch("auto_coder.cli_commands_main.get_current_branch", return_value="main"),
+        patch("auto_coder.issue_processor._take_issue_actions") as local_send,
+    ):
+        result = _invoke_only("owner/repo", issue_number)
+
+    assert result.exit_code == 0, result.output
+    local_send.assert_not_called()
+    retained = IssueDispatchGuard().inspect(IssueAttemptIdentity("owner", "repo", issue_number, "0"))
+    assert retained is not None
+    assert retained.outcome is DispatchOutcome.INDETERMINATE
+    assert retained.provider == "jules"
+    assert retained.backend_name == "historical-jules"
+
+
 def test_production_dispatch_skips_raw_jules_alias_before_local_fallback(monkeypatch, tmp_path):
     from unittest.mock import MagicMock
 

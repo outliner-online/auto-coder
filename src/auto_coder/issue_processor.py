@@ -1229,6 +1229,18 @@ def _process_issue_high_score_cloud(
             dispatch_observer(dispatch)
         return dispatch.actions or [dispatch.result.diagnostic]
 
+    from .issue_dispatch import IssueAttemptIdentity, IssueDispatchGuard
+
+    owner, repository = repo_name.split("/", 1)
+    issue_number = int(issue_data["number"])
+    attempt_id = retry_authority.attempt_id if retry_authority is not None else str(get_current_attempt(repo_name, issue_number))
+    retained = IssueDispatchGuard().inspect(IssueAttemptIdentity(owner, repository, issue_number, attempt_id))
+    if retained is not None:
+        dispatch = IssueDispatchExecution(retained, [retained.diagnostic])
+        if dispatch_observer is not None:
+            dispatch_observer(dispatch)
+        return dispatch.actions
+
     from .cli_helpers import create_high_score_backend_manager, create_high_score_cloud_backend_manager
 
     backend_manager = create_high_score_cloud_backend_manager() or create_high_score_backend_manager()
