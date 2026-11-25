@@ -44,6 +44,8 @@ def sources(slots):
     return slots._read()[ImplementationOwner("issue", 9).key][CodexWorkAccounting._FIELD][FIELD]
 
 
+# Real owner-lock contention needs the production retry backoff.
+@pytest.mark.usefixtures("_use_real_sleep")
 @pytest.mark.parametrize(
     "control",
     [
