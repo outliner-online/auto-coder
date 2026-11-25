@@ -149,7 +149,13 @@ class AuditGitHubClient(MagicMock):
 
 
 def _build_github_client(head_sha: str, issue_body: str = VALID_ISSUE_BODY, *, repo: Optional[Path] = None, base_sha: Optional[str] = None) -> MagicMock:
+    from auto_coder.github_controller_auth import ControllerIdentity
+
     client = AuditGitHubClient()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
+    client.get_authenticated_user_login.return_value = "controller"
+    client.get_pr_comments_strict.return_value = []
+    client.get_pr_review_threads_strict.return_value = []
     client.get_pr_diff.return_value = PR_DIFF
     client.get_pr_changed_file_count.return_value = 1
     client.get_issue.return_value = {"number": ISSUE_NUMBER, "title": "Add greet()", "body": issue_body, "state": "open"}
