@@ -169,11 +169,7 @@ def parse_owned_receipt(thread: ReviewThread, authenticated_login: str | Control
             trusted = is_same_github_login(comment.author_login, authenticated_login)
         if trusted and relevant:
             candidate = _parse_receipt_body(body, comment.database_id)
-            if isinstance(authenticated_login, ControllerAuthorSet) and (
-                candidate.api_origin != authenticated_login.api_origin
-                or candidate.repository.casefold() != authenticated_login.repository.casefold()
-                or (pr_number is not None and candidate.pr_number != pr_number)
-            ):
+            if isinstance(authenticated_login, ControllerAuthorSet) and (candidate.api_origin != authenticated_login.api_origin or candidate.repository.casefold() != authenticated_login.repository.casefold() or (pr_number is not None and candidate.pr_number != pr_number)):
                 raise ClosureReceiptError("Owned closure receipt belongs to a different API/repository/PR namespace")
             owned.append(candidate)
     if not owned:

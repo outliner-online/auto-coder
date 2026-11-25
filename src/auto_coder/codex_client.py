@@ -51,7 +51,7 @@ class CodexClient(LLMClientBase):
             openai_base_url: OpenAI base URL (optional, for OpenAI-compatible backends).
             use_noedit_options: If True, use options_for_noedit instead of options.
             capture_final_message: Use Codex's dedicated final-message output for
-                structured no-edit review responses.
+                structured review responses in either execution mode.
         """
         super().__init__()
         self.use_noedit_options = use_noedit_options
@@ -399,7 +399,7 @@ class CodexClient(LLMClientBase):
             # validator only needs the final assistant payload. Ask Codex to
             # write that payload through its dedicated output channel so an
             # incidental non-JSON stdout line cannot corrupt a valid result.
-            if self.capture_final_message and is_noedit and "--json" in cmd:
+            if self.capture_final_message and "--json" in cmd:
                 workspace_binding = get_current_local_workspace()
                 final_message_file = tempfile.NamedTemporaryFile(
                     prefix="auto-coder-codex-final-",

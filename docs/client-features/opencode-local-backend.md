@@ -75,7 +75,7 @@ diff, untracked and ignored file contents, and directory modes, excluding
 `.git` and conventional disposable caches) before running and compares it
 afterward; any difference restores the pre-run state and fails the
 invocation. A no-edit result is never promoted or published; it is returned
-directly to the caller (e.g. adversarial review) as read-only output.
+directly to an explicitly read-only caller as read-only output.
 
 A successful result requires exit status zero, a single consistent
 root-session event stream with no session-level error event, and a
@@ -174,7 +174,15 @@ authoritative: an order that resolves to no candidate or an incapable backend
 blocks validation rather than silently falling back to generic
 `[backend_adversarial_validation]`.
 
-**Strict no-edit enforcement.** Adversarial review invocations always run with
+**Role-selected execution mode.** Controller-designated ordinary PR reviews and
+Strong Audit use editable options, allowing source fixes and focused verification
+inside the invocation's private workspace. Source changes produce a correction
+candidate for controller publication and require independent new-head review and
+CI; they cannot turn the editing review into approval. Issue/specification
+reviews and explicit no-edit verification retain the policy below. See
+[Editable PR reviewers](editable-pr-reviewers.md).
+
+**Strict no-edit enforcement.** Explicit no-edit review invocations run with
 `is_noedit=True` (`use_noedit_options=True`), enforcing the generated
 `autocoder-noedit-*` agent policy that denies all execution, bash, edit, and write
 tools while permitting only `read`, `glob`, and `grep`. Preflight verification
@@ -219,12 +227,16 @@ review managers do not read, write, or alter `backend_session_state.json`.
   are bound to an immutable `evidence_validation_snapshot` (PR HEAD SHA and
   normative Issue contract hash). Changes to the PR HEAD or Issue contract
   invalidate applying older cached results, requiring a fresh validation pass.
+  A reviewer-produced correction also clears the PR's saved transport session
+  identities before publication, while preserving accepted lifecycle evidence;
+  the next candidate must receive an independent conversation.
 - **Persistence resilience and cleanup:** If writing to `ReviewerSessionRegistry`
   fails, the unpersisted checkpoint is cleared from the validation result so
   non-durable state is not assumed. When a PR is closed or merged, Auto-Coder
   automatically removes its associated reviewer session entries.
 - **Failover:** If an OpenCode review backend fails, failover proceeds strictly
-  through configured eligible read-only review backends in priority order. If all
+  through configured eligible synchronous local review backends in priority order,
+  retaining the caller's execution mode. If all
   candidates fail or are exhausted, review fails closed, blocking PR merge.
 
 ### Distributed container runtime and operator setup

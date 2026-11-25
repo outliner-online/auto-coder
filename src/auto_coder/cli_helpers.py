@@ -322,7 +322,7 @@ def build_backend_manager(
     models: mapping backend -> model_name (all backends respect this configuration).
     use_noedit_options: If True, use options_for_noedit instead of options for clients.
     capture_codex_final_message: Use Codex's dedicated final-message output for
-        structured no-edit review responses.
+        structured review responses in either execution mode.
     automatic_session_resume: Continue the last implementation session when the
         same backend is used consecutively.
     """
@@ -958,8 +958,8 @@ def is_read_only_review_capable_backend(backend_name: Optional[str], config: Opt
     return normalized in READ_ONLY_REVIEW_CAPABLE_TYPES
 
 
-def _build_adversarial_validation_manager_from_capable_backends(capable_backends: List[str], config: Any, execution_cwd: Optional[str] = None) -> Optional[BackendManager]:
-    """Build a BackendManager from an already capability-filtered backend name list."""
+def _build_adversarial_validation_manager_from_capable_backends(capable_backends: List[str], config: Any, execution_cwd: Optional[str] = None, *, use_noedit_options: bool = True) -> Optional[BackendManager]:
+    """Build a local reviewer with the calling review role's execution mode."""
     from .quota_selector import rank_high_score_backends_by_quota
 
     selected_backends = rank_high_score_backends_by_quota(capable_backends, config)
@@ -976,7 +976,7 @@ def _build_adversarial_validation_manager_from_capable_backends(capable_backends
             selected_backends=selected_backends,
             primary_backend=primary_backend,
             models=models,
-            use_noedit_options=True,
+            use_noedit_options=use_noedit_options,
             capture_codex_final_message=True,
             automatic_session_resume=False,
         )
@@ -1141,7 +1141,12 @@ def resolve_adversarial_validation_availability(validation_kind: Optional[str] =
     # REQ-003). A construction/execution failure for it falls back to the
     # existing generic None outcome (non-quota unavailable, REQ-003), never
     # EXHAUSTED, because it is not part of the quota-ineligible set above.
-    manager = _build_adversarial_validation_manager_from_capable_backends(quota_eligible, config, execution_cwd=execution_cwd)
+    manager = _build_adversarial_validation_manager_from_capable_backends(
+        quota_eligible,
+        config,
+        execution_cwd=execution_cwd,
+        use_noedit_options=validation_kind not in {"pr", "strong_pr"},
+    )
     return AdversarialValidationAvailability(backend_manager=manager)
 
 
@@ -1150,8 +1155,10 @@ def create_adversarial_validation_backend_manager(validation_kind: Optional[str]
 
     Args:
         validation_kind: "issue" to prefer [backend_issue_adversarial_validation],
-            "pr" to prefer [backend_pr_adversarial_validation], or None/anything else
-            to use only the legacy [backend_adversarial_validation] resolution.
+            "pr" to prefer [backend_pr_adversarial_validation], "strong_pr" for
+            the dedicated strong route, or None/anything else to use only the
+            legacy [backend_adversarial_validation] resolution. PR reviewers use
+            editing options; Issue and unspecified review roles stay read-only.
 
     A present dedicated configuration for the requested kind is authoritative: if its
     candidates are non-empty but none are read-only-review capable, this returns None
@@ -1160,10 +1167,10 @@ def create_adversarial_validation_backend_manager(validation_kind: Optional[str]
     requested kind, resolution falls back to the legacy [backend_adversarial_validation]
     settings, and finally to high-score order, filtering strictly for backends whose
     effective backend_type supports synchronous read-only review capability.
-    Cloud coding backends, codex-mcp, and write-capable clients are rejected.
+    Cloud coding backends, codex-mcp, and unsupported local clients are rejected.
 
     Returns:
-        BackendManager instance configured strictly with read-only capable models,
-        or None if no read-only capable backend is available (fail-closed).
+        BackendManager using supported synchronous local clients in the selected
+        role's execution mode, or None if no capable backend is available.
     """
     return resolve_adversarial_validation_availability(validation_kind).backend_manager

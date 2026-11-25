@@ -16,6 +16,15 @@ invocation, including custom `backend_type = "codex"` aliases, auto-coder
 removes dangerous/YOLO flags and initially selects `--sandbox read-only`,
 `--ask-for-approval never`, and the configured safe approval reviewer override.
 
+Controller-designated ordinary PR reviews and Strong Audit now use the editable
+client options, while Issue/specification and explicit no-edit verification
+retain this no-edit policy. An explicitly capture-enabled review uses Codex's
+dedicated final-message output in either mode, so diagnostic JSONL output does
+not replace the terminal structured response. The temporary final-message file
+is removed before workspace handoff. Editable reviewer output still requires the
+source-change and independent-review handling documented in
+[Editable PR reviewers](editable-pr-reviewers.md).
+
 For a current controller-created private workspace and matching no-edit execution
 boundary, the supervised command launcher replaces that selection with
 `--sandbox danger-full-access`. Auto-Coder's mandatory Landlock/ptrace policy
@@ -47,10 +56,14 @@ inspection with `git status` does not attempt an optional `.git/index.lock`
 write. Required Git mutations remain denied by the same filesystem policy.
 The production image pins Codex 0.159.2. Real-CLI conformance runs with the
 existing `opencode_live` suite in its privileged controller/non-root worker
-container profile (`tests/test_codex_noedit_runtime.py`); it drives Strong Audit
-through the production factory, executor, client, supervisor, and durable state,
-including denied writes followed by accepted exit-0 payloads and malformed
-non-authoritative payloads.
+container profile (`tests/test_codex_noedit_runtime.py`). Explicit no-edit
+verification uses the production factory, `execute_review`, client, and
+supervisor without a PR edit designation; source, Git metadata, caller, and peer
+write attempts remain denied. The same suite separately drives editable Strong
+Audit through its production producer and durable state. Nonwriting valid
+verdicts retain their normal acceptance rules, malformed results remain
+non-authoritative, and a retained source edit withholds the editing verdict.
+The controlled provider is configured in both mode-specific CLI option lists.
 
 A caught write denial is advisory even if Codex later emits PASS and exits 0.
 The supervisor preserves successful completion and the boundary retains the

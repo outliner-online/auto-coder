@@ -1,4 +1,4 @@
-"""Read-only execution boundary for two-tier PR review.
+"""Revision-bound execution boundary for two-tier PR review.
 
 The durable state machine lives in :mod:`pr_review_cycle`.  This module owns
 only role-specific prompt assembly, backend invocation, and strict validation
@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Mapping, Optional, Sequence, Tuple
 
 from .backend_manager import BackendManager, run_llm_prompt
+from .editable_review import ReviewChangesProduced, assert_review_workspace_unchanged
+from .invocation_admission import pr_review_designated
 from .logger_config import get_logger
 from .pr_review_cycle import ContractSnapshot, Finding, StrongPolicyIdentity
 from .prompt_loader import render_prompt
@@ -110,6 +112,7 @@ def build_review_prompt(review_input: ReviewExecutionInput, *, embedded_closure:
     findings = json.dumps([_finding_payload(item) for item in review_input.findings], indent=2, sort_keys=True)
     return render_prompt(
         "pr.two_tier_review_execution",
+        review_permissions=render_prompt("pr.editable_review_permissions" if pr_review_designated() else "pr.read_only_review_permissions", include_header=False),
         response_object="the nested `closure_assessment` object" if embedded_closure else "the JSON response",
         mode=review_input.mode.value,
         round_id=review_input.round_id,
@@ -138,11 +141,18 @@ def execute_review(
     backend_manager: BackendManager,
     execution_cwd: str,
 ) -> ReviewExecutionResult:
-    """Invoke a reviewer in read-only mode against the exact requested head."""
+    """Invoke the reviewer and refuse verdicts about a source tree it changed."""
     execution_token = bind_command_execution_cwd(execution_cwd)
     try:
         _verify_head(execution_cwd, review_input.head_sha)
-        response = run_llm_prompt(build_review_prompt(review_input), backend_manager=backend_manager, is_noedit=True)
+        response = run_llm_prompt(build_review_prompt(review_input), backend_manager=backend_manager, is_noedit=not pr_review_designated())
+        try:
+            assert_review_workspace_unchanged()
+        except ReviewChangesProduced:
+            session_id = getattr(backend_manager, "_last_session_id", None)
+            if isinstance(session_id, str) and session_id:
+                backend_manager.release_local_session(session_id)
+            raise
         _verify_head(execution_cwd, review_input.head_sha)
     finally:
         reset_command_execution_cwd(execution_token)

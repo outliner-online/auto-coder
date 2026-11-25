@@ -163,10 +163,32 @@ class ReviewerSessionRegistry:
         with self._lock:
             data = self._load()
             data[self._key(session.repository, session.pr_number, session.backend_name, session.backend_type, session.model_name)] = asdict(session)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(f"{self.path.suffix}.{os.getpid()}.tmp")
-            temporary.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-            os.replace(temporary, self.path)
+            self._write(data)
+
+    def _write(self, data: dict[str, dict[str, object]]) -> None:
+        """Atomically replace retained state while the registry lock is held."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(f"{self.path.suffix}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, self.path)
+
+    def invalidate_transport_for_pr(self, repository: str, pr_number: int) -> None:
+        """Require fresh reviewer conversations without discarding accepted evidence.
+
+        An editing reviewer cannot independently approve its own resulting
+        candidate. Retain its lifecycle facts, but clear every saved transport
+        identity for this PR so none of those conversations can be continued.
+        A subsequently completed independent review supplies its own checkpoint.
+        """
+        with self._lock:
+            data = self._load()
+            changed = False
+            for raw in data.values():
+                if isinstance(raw, dict) and raw.get("repository") == repository and raw.get("pr_number") == pr_number and raw.get("session_id"):
+                    raw["session_id"] = ""
+                    changed = True
+            if changed:
+                self._write(data)
 
     def remove_pr(self, repository: str, pr_number: int) -> None:
         with self._lock:

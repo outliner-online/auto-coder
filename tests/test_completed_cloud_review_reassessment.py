@@ -23,6 +23,7 @@ from auto_coder.pr_processor import (
 )
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.test_accepted_finding_bridge import _simulated_review_source
 
 REPOSITORY = "owner/repo"
 TASK = "task_e_review6019"
@@ -162,7 +163,10 @@ def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path
     config.ENABLE_ADVERSARIAL_VALIDATION = True
     config.MAX_ADVERSARIAL_VALIDATIONS = 0 if case == "review_cap" else 10
     collector = get_trace_collector()
+    worktree = tmp_path / "review-workspace"
+    worktree.mkdir()
     with ExitStack() as stack:
+        stack.enter_context(_simulated_review_source(worktree, HEAD))
         patches = {
             "CloudManager.get_binding": {"return_value": CloudTaskBinding(provider="codex-cloud", task_id=TASK)},
             "_cloud_review_repair_state_path": {"return_value": receipts},
@@ -182,6 +186,7 @@ def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path
             "_merge_pr": {},
         }
         mocks = {name: stack.enter_context(patch("auto_coder.pr_processor." + name, **kwargs)) for name, kwargs in patches.items()}
+        mocks["isolated_pr_head_worktree"].return_value.__enter__.return_value = str(worktree)
         native = None
         if case == "later_failed":
             from auto_coder.pr_processor import CloudTaskOrigin, CloudTaskOriginResolution
@@ -206,6 +211,7 @@ def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path
     assert not any((event.facts or {}).get("effect") == ("settled-cloud-task-reassessment" if readiness is CodexReviewFeedbackReadiness.COMPLETED else "completed-cloud-review-reassessment") for event in events)
     if expects_validation:
         mocks["run_adversarial_validation"].assert_called_once()
+        assert mocks["run_adversarial_validation"].call_args.kwargs["execution_cwd"] == str(worktree)
         assert thread.id not in mocks["run_adversarial_validation"].call_args.kwargs["claimed_review_threads_section"]
         assert len(reassessments) == 1
         assert reassessments[0].outcome == Outcome.DEFERRED

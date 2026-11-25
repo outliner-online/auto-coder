@@ -3,9 +3,10 @@
 import hashlib
 import json
 import time
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from datetime import datetime, timezone
-from threading import Event, Thread
+from pathlib import Path
+from threading import Event, Thread, get_ident
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, Mock, patch
 
@@ -55,6 +56,7 @@ from auto_coder.util.gh_cache import GitHubClient, ReviewThread, ReviewThreadCom
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from auto_coder.utils import CommandResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.test_accepted_finding_bridge import _simulated_review_source
 from tests.test_review_thread_closure_receipt import BASE, HEAD, PR_NUMBER, REPOSITORY, THREAD_ID
 from tests.test_review_thread_closure_receipt import receipt_scenario as receipt_scenario
 from tests.test_review_thread_validation import _closure_client
@@ -73,6 +75,38 @@ def controller_github_client() -> GitHubClient:
     client.get_authenticated_user_login = MagicMock(return_value="controller")
     client.get_authenticated_controller_identity = lambda *_: ControllerIdentity(client.get_authenticated_user_login(), account_id=2 if client.get_authenticated_user_login() == "implementer" else 20)
     return client
+
+
+@pytest.fixture(autouse=True)
+def declared_mock_review_source(tmp_path, monkeypatch):
+    """Supply source evidence only for these explicitly mocked worktree contexts.
+
+    The lifecycle cases use synthetic GitHub SHAs and stub the reviewer itself.
+    Reuse the shared empty-source model without changing their review, closure,
+    publication, or merge assertions. Real worktrees retain the real admission.
+    """
+    from auto_coder import pr_processor
+
+    capture = pr_processor.capture_review_workspace
+    owner_thread = get_ident()
+    source = tmp_path / "simulated-review-source"
+    with ExitStack() as source_contexts:
+
+        def capture_declared(cwd, expected_head):
+            worktree = pr_processor.isolated_pr_head_worktree
+            if get_ident() != owner_thread or not isinstance(worktree, Mock) or isinstance(cwd, (str, Path)) and (Path(cwd) / ".git").exists():
+                return capture(cwd, expected_head)
+            assert worktree.call_args is not None, "the declared worktree must be entered before source capture"
+            assert worktree.call_args.args[2] == expected_head, "source capture must use the head requested from the declared worktree"
+            source.mkdir(exist_ok=True)
+            source_contexts.enter_context(_simulated_review_source(source, expected_head))
+            simulated_capture = pr_processor.capture_review_workspace
+            # Keep this adapter outermost for repeated contexts yielding None or mocks.
+            monkeypatch.setattr(pr_processor, "capture_review_workspace", capture_declared)
+            return simulated_capture(str(source), expected_head)
+
+        monkeypatch.setattr(pr_processor, "capture_review_workspace", capture_declared)
+        yield
 
 
 def codex_review_summary(status: str, reviewed_sha: str = "original1") -> dict[str, object]:
