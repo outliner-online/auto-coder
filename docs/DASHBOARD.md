@@ -583,3 +583,13 @@ document. Existing unavailable/deferred diagnostics apply; ordinary tasks withou
 Strong provenance and the legacy journal reader/writer are unchanged. The extra-row
 controls in `tests/test_strong_correction_scope.py` cover even a would-succeed
 reconciliation without new POSTs or journal normalization.
+
+A PR stalled after a completed review can show
+`effect=saved-discussion-binding-recovery` under adversarial validation. The
+`Deferred` stage means that one independent review was admitted to reconstruct
+missing discussion evidence; it is not a new approval, completed closure or
+successful merge. `thread_ids` lists the exact retained discussion inputs and
+`reason` explains the recovery. Follow the later validation, publication and
+merge events for the outcome. Repeated observations of unchanged input do not
+admit another binding-recovery review, including after a restart or failed
+review. See [saved PR review resumption](client-features/saved-pr-review-resumption.md).

@@ -4204,3 +4204,24 @@ competing claims and restart reconciliation. Run the explicit commands in
 [the feature fragment](client-features/cancelled-pr-ci-recovery.md). The
 [non-production GitHub fixture](ci-cancellation-fixture-evidence.md) is separate
 external selectivity evidence and is not represented as infrastructure diagnosis.
+
+### Completed discussion review binding recovery
+
+A published PASS whose producing normalized discussion binding was discarded
+can retain a consumed admission key and a pending discussion input. The bounded
+recovery path emits `pr.adversarial-validation` / `Deferred` with
+`effect=saved-discussion-binding-recovery`, `examined_head`, exact `thread_ids`,
+`requires_reassessment=true`, and `reason` only after its durable recovery
+admission succeeds. This is a request for independent current-input review,
+not review completion, correction delivery, closure acceptance or merge
+permission. The existing dashboard detail view renders the stage and facts;
+there is no new processing origin, outcome or renderer schema.
+
+Run `bash scripts/test.sh tests/test_completed_discussion_revalidation_recovery.py
+ tests/test_closure_discussion_origin_binding.py` for the production coordinator
+regression, exact admission facts, reconstructed continuation, single-use
+recovery allowance, incomplete/failed/interrupted recovery controls, and
+originating-Strong-round binding checks. The original closure effect must become
+confirmed without changing its payload or duplicating its publication. These
+controlled transport regressions do not independently establish live GitHub
+progress. See [saved PR review resumption](client-features/saved-pr-review-resumption.md).
