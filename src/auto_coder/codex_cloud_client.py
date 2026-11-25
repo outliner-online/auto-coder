@@ -788,6 +788,8 @@ class CodexCloudClient(CloudTaskClientBase):
         the provider has omitted a historical baseline, separately observe a
         settled current task for first-current-head review admission only. The
         caller owns current-head, review-count, closure and correction gates.
+        A later failed request does not invalidate earlier completed feedback,
+        but requires separate native evidence that current work is idle.
         """
         if (
             not is_valid_codex_cloud_task_id(task_id)
@@ -855,9 +857,24 @@ class CodexCloudClient(CloudTaskClientBase):
                     return CodexReviewFeedbackReadiness.WAITING
                 baselines.add(record.pre_send_turn_id)
             task = self.get_task(task_id)
-            if not isinstance(task, CloudTask) or task.task_id != task_id or task.state is not CloudTaskState.COMPLETED:
+            # The CLI can exit nonzero for a failed task and omit its normalized
+            # summary. Only independent native failed-turn evidence can replace it.
+            inspect_failed_task = task is None or (isinstance(task, CloudTask) and task.task_id == task_id and task.state is CloudTaskState.FAILED)
+            if not inspect_failed_task and not (isinstance(task, CloudTask) and task.task_id == task_id and task.state is CloudTaskState.COMPLETED):
                 return CodexReviewFeedbackReadiness.WAITING
             wham = self.wham_client or CodexWhamClient()
+            failed_turn = None
+            failed_turns = []
+            if inspect_failed_task:
+                from .codex_followup_causality import failed_current_task
+
+                current = wham.get_task(task_id)
+                if current is None:
+                    return CodexReviewFeedbackReadiness.WAITING
+                failed_turns = wham.get_task_turns(task_id, require_complete=True)
+                failed_turn = failed_current_task(task_id, current, failed_turns)
+                if failed_turn is None:
+                    return CodexReviewFeedbackReadiness.WAITING
             unresolved_baselines = set()
             for baseline in sorted(baselines):
                 completed = wham.resolve_completed_assistant_turn_after(task_id, baseline)
@@ -865,6 +882,10 @@ class CodexCloudClient(CloudTaskClientBase):
                     unresolved_baselines.add(baseline)
             readiness = CodexReviewFeedbackReadiness.COMPLETED
             if unresolved_baselines:
+                # Failed current work cannot substitute for completion of any
+                # selected request, including one whose history disappeared.
+                if inspect_failed_task:
+                    return CodexReviewFeedbackReadiness.WAITING
                 from .codex_followup_causality import settled_current_task
                 from .codex_wham_client import _turn_created_at_key
 
@@ -892,6 +913,8 @@ class CodexCloudClient(CloudTaskClientBase):
                 if settled_current_task(task_id, wham.get_task(task_id), turns) != assistant:
                     return CodexReviewFeedbackReadiness.WAITING
                 readiness = CodexReviewFeedbackReadiness.CURRENT_TASK_SETTLED
+            if failed_turn is not None and failed_current_task(task_id, wham.get_task(task_id), failed_turns) != failed_turn:
+                return CodexReviewFeedbackReadiness.WAITING
             # Another task may update this shared journal while provider reads
             # run. Only changes to this owning task invalidate its observation.
             return readiness if read_owned_receipts() == initial else CodexReviewFeedbackReadiness.WAITING

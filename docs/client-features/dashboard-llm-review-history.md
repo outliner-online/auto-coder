@@ -271,6 +271,15 @@ work, the reviewer limit and saved-verdict deduplication retain their existing
 admission behavior. Runnable regressions are listed in
 `docs/dashboard-observability.md`.
 
+The same completed-feedback event applies when a later CI request failed but
+all selected older feedback has positive native completion evidence and the
+exact current failed/error request is independently confirmed idle twice.
+It describes completion of the selected feedback, not success of the later
+failed request. Missing selected completion, cancellation, active work or
+changed current evidence still defer without a review invocation. The
+production regression exercises the real readiness observer and the mounted
+detail renderer; no new event origin or schema is introduced.
+
 ### Retained feedback with a settled current Codex task
 
 When historical pre-send evidence is absent, the separate first-current-head

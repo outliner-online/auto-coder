@@ -119,20 +119,24 @@ def test_completed_delivery_observation_does_not_replay_feedback(tmp_path, case,
     github.reply_to_review_thread.assert_not_called()
 
 
-@pytest.mark.parametrize("readiness", [CodexReviewFeedbackReadiness.COMPLETED, CodexReviewFeedbackReadiness.CURRENT_TASK_SETTLED])
 @pytest.mark.parametrize(
-    "case, expects_validation",
+    "case, expects_validation, readiness",
     [
-        ("completed", True),
-        ("completed_post_codex", True),
-        ("changed_post_codex", False),
-        ("not_completed", False),
-        ("truncated", False),
-        ("review_cap", False),
-        ("saved_verdict", False),
-    ],
+        (case, expects_validation, readiness)
+        for readiness in (CodexReviewFeedbackReadiness.COMPLETED, CodexReviewFeedbackReadiness.CURRENT_TASK_SETTLED)
+        for case, expects_validation in (
+            ("completed", True),
+            ("completed_post_codex", True),
+            ("changed_post_codex", False),
+            ("not_completed", False),
+            ("truncated", False),
+            ("review_cap", False),
+            ("saved_verdict", False),
+        )
+    ]
+    + [("later_failed", True, CodexReviewFeedbackReadiness.COMPLETED)],
 )
-def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path, case, expects_validation, readiness):
+def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path, monkeypatch, case, expects_validation, readiness):
     """The real receipt-only delegation path reaches one validator without closing ordinary roots."""
     from auto_coder.execution_trace import Outcome, get_trace_collector
     from tests.test_dashboard_observability import _mounted_detail
@@ -178,7 +182,20 @@ def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path
             "_merge_pr": {},
         }
         mocks = {name: stack.enter_context(patch("auto_coder.pr_processor." + name, **kwargs)) for name, kwargs in patches.items()}
-        completed = stack.enter_context(patch("auto_coder.codex_cloud_client.CodexCloudClient.observe_review_feedback_readiness", return_value=CodexReviewFeedbackReadiness.WAITING if case == "not_completed" else readiness))
+        native = None
+        if case == "later_failed":
+            from auto_coder.pr_processor import CloudTaskOrigin, CloudTaskOriginResolution
+            from auto_coder.pr_repair import ExistingPrRepairTarget
+            from tests.test_codex_failed_task_review_feedback import install_failed_feedback_evidence
+
+            target = ExistingPrRepairTarget(REPOSITORY, PR, "feature", "main", HEAD)
+            native = install_failed_feedback_evidence(monkeypatch, tmp_path / "native-followups.json", REPOSITORY, TASK, target, identity)
+            native_before = native[1].read_bytes()
+            origin = CloudTaskOrigin(provider="codex-cloud", task_id=TASK, client=native[0])
+            stack.enter_context(patch("auto_coder.pr_processor._resolve_cloud_task_origin", return_value=CloudTaskOriginResolution(origin=origin)))
+            completed = None
+        else:
+            completed = stack.enter_context(patch("auto_coder.codex_cloud_client.CodexCloudClient.observe_review_feedback_readiness", return_value=CodexReviewFeedbackReadiness.WAITING if case == "not_completed" else readiness))
         send = stack.enter_context(patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup"))
         execution = stack.enter_context(collector.start_execution(REPOSITORY, "pr", PR, origin="worker"))
         actions = _handle_pr_merge(github, REPOSITORY, _pr(), config, {})
@@ -202,9 +219,17 @@ def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path
     else:
         mocks["run_adversarial_validation"].assert_not_called()
     if case == "saved_verdict":
+        assert completed is not None
         completed.assert_not_called()
         mocks["_replay_saved_nonpass_review"].assert_called_once()
         assert reassessments == []
+    if native is not None:
+        assert native[3].call_count >= 1
+        assert native[5].call_count >= 2
+        assert native[1].read_bytes() == native_before
+        native[0].send_followup.assert_not_called()
+        native[0].wham_client.send_follow_up.assert_not_called()
+        assert native[6].current_assistant_turn.status == "failed"
     mocks["_merge_pr"].assert_not_called()
     send.assert_not_called()
     github.resolve_review_thread.assert_not_called()
