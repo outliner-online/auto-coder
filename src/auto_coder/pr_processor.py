@@ -3819,7 +3819,16 @@ def _is_dependabot_pr(pr_obj: Any) -> bool:
         login_lower = login.lower()
         if "google-labs-jules[bot]" in login_lower:
             return False
-        if "dependabot" in login_lower or "renovate" in login_lower or login_lower.endswith("[bot]"):
+        if "dependabot" in login_lower or "renovate" in login_lower:
+            return True
+        # Controller-App PRs retain the same explicit publication evidence as
+        # their former controller-user authored equivalents.  A generic bot
+        # suffix must not override that stronger origin evidence and bypass
+        # ordinary review or local repair routing.
+        body = str(pr_obj.get("body") or "") if isinstance(pr_obj, dict) else str(getattr(pr_obj, "body", "") or "")
+        if login_lower.endswith("[bot]") and any(marker in body for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
+            return False
+        if login_lower.endswith("[bot]"):
             return True
     except Exception:
         # Best-effort detection only; never fail hard here
@@ -10056,7 +10065,8 @@ def _is_local_llm_pr(pr_data: Dict[str, Any]) -> bool:
     if not pr_data:
         return False
 
-    # Exclude cloud LLM PRs and dependency bots
+    # Exclude cloud LLM PRs and dependency bots. Explicit local origin markers
+    # are evaluated by the dependency classifier without recursing here.
     if _is_jules_pr(pr_data):
         return False
     if _is_codex_or_claude_pr(pr_data):

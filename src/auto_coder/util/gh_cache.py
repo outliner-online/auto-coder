@@ -55,7 +55,7 @@ from .github_request_outcome import (
 if TYPE_CHECKING:
     from ..controller_identity_history import ControllerAuthorSet, ControllerHistoryCache
     from ..github_app_reviewer import ReviewerAppIdentity
-    from ..github_controller_auth import ControllerIdentity
+    from ..github_controller_auth import ControllerAuthProvider, ControllerCredential, ControllerIdentity
     from ..issue_review_publication import PublicationReceipt
 
 logger = get_logger(__name__)
@@ -710,12 +710,13 @@ class SafeGhApiProxy:
 
 
 def get_ghapi_client(
-    token: str,
+    token: str = "",
     *,
     admission_hook: AdmissionHook | None = None,
     observation_hook: ObservationHook | None = None,
     subsystem: str = "ghapi",
     extra_headers: Mapping[str, str] | None = None,
+    credential_source: Callable[[], "ControllerCredential"] | None = None,
 ) -> GhApi:
     """
     Returns a GhApi instance configured with hishel caching for GET requests.
@@ -749,6 +750,13 @@ def get_ghapi_client(
 
             # Merge headers
             headers = {**self.headers, **(headers or {})}
+            # Installation credentials are deliberately selected at the final
+            # adapter boundary, rather than when this long-lived GhApi object is
+            # constructed.  Pagination and retries therefore cannot retain an
+            # expired token or a token selected for another repository.
+            if credential_source is not None:
+                credential = credential_source()
+                headers["Authorization"] = f"Bearer {credential.token}"
 
             if route:
                 import urllib.parse
@@ -949,6 +957,26 @@ def is_implementation_ready(issue_snapshot: Dict[str, Any]) -> bool:
     return any(str(label.get("name", "") if isinstance(label, dict) else label).strip().lower() == IMPLEMENTATION_READY_LABEL for label in labels if isinstance(label, (dict, str)))
 
 
+def create_controller_client(
+    repo_name: str,
+    *,
+    provided_token: str | None = None,
+    auth_provider: "ControllerAuthProvider | None" = None,
+    disable_labels: bool = False,
+) -> "GitHubClient":
+    """Create an injected repository client without mutating the legacy singleton.
+
+    Startup selection intentionally remains with callers.  Supplying a provider
+    is useful for composition and tests; otherwise the prerequisite selector
+    chooses App mode when configured and the established personal mode when not.
+    """
+    if auth_provider is None:
+        from ..github_controller_auth import select_controller_auth
+
+        auth_provider = select_controller_auth(repo_name, provided_token=provided_token)
+    return GitHubClient(disable_labels=disable_labels, auth_provider=auth_provider, repository=repo_name)
+
+
 class GitHubClient:
     """GitHub API client for managing issues and pull requests using GhApi.
 
@@ -961,7 +989,7 @@ class GitHubClient:
     # Class variable to hold the lock for thread-safety
     _lock = threading.Lock()
 
-    def __init__(self, token: str, disable_labels: bool = False):
+    def __init__(self, token: str = "", disable_labels: bool = False, *, auth_provider: "ControllerAuthProvider | None" = None, repository: str | None = None):
         """Initialize GitHub client with API token.
 
         Args:
@@ -969,6 +997,12 @@ class GitHubClient:
             disable_labels: If True, all label operations are no-ops
         """
         self.token = token
+        if auth_provider is not None and token:
+            raise ValueError("Controller App authentication cannot be combined with a static token")
+        if auth_provider is not None and not repository:
+            raise ValueError("Controller App authentication requires a repository")
+        self._auth_provider = auth_provider
+        self._auth_repository = repository
         self.disable_labels = disable_labels
         self._initialized = True
         self._sub_issue_cache: Dict[Tuple[str, int], List[int]] = {}
@@ -1008,8 +1042,28 @@ class GitHubClient:
         with cls._lock:
             cls._instance = None
 
+    def _credential_for(self, repo_name: str, required_permissions: Mapping[str, str]) -> "ControllerCredential":
+        """Select one repository-bound credential for the next wire request."""
+        from ..github_controller_auth import ControllerCredential
+
+        if self._auth_provider is not None:
+            if self._auth_repository is None or repo_name.casefold() != self._auth_repository.casefold():
+                raise RuntimeError("Controller client repository binding mismatch")
+            return self._auth_provider.credential_for(repo_name, required_permissions)
+        return ControllerCredential(self.token, "personal", repository=repo_name, permissions=tuple(sorted(required_permissions.items())), snapshot_id="legacy")
+
+    def api_for(self, repo_name: str, *, required_permissions: Mapping[str, str] | None = None, subsystem: str = "ghapi", extra_headers: Mapping[str, str] | None = None) -> GhApi:
+        """Return a GhApi adapter that refreshes repository auth for every send."""
+        permissions = dict(required_permissions or {})
+        return get_ghapi_client(
+            self.token,
+            subsystem=subsystem,
+            extra_headers=extra_headers,
+            credential_source=lambda: self._credential_for(repo_name, permissions),
+        )
+
     @retry_with_backoff()
-    def graphql_query(self, query: str, variables: Optional[Dict[str, Any]] = None, extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def graphql_query(self, query: str, variables: Optional[Dict[str, Any]] = None, extra_headers: Optional[Dict[str, str]] = None, *, repo_name: str | None = None) -> Dict[str, Any]:
         """
         Executes a GraphQL query against the GitHub API using a caching client.
 
@@ -1027,8 +1081,16 @@ class GitHubClient:
         """
         client = get_caching_client()
         url = "https://api.github.com/graphql"
+        if repo_name is None and self._auth_provider is not None:
+            owner = variables.get("owner") if variables else None
+            name = variables.get("name") if variables else None
+            if isinstance(owner, str) and isinstance(name, str):
+                repo_name = f"{owner}/{name}"
+            else:
+                raise ValueError("App-mode GraphQL requests require repository context")
+        credential = self._credential_for(repo_name or "", {"metadata": "read"})
         headers = {
-            "Authorization": f"bearer {self.token}",
+            "Authorization": f"bearer {credential.token}",
             "Content-Type": "application/json",
         }
         if extra_headers:
@@ -1998,37 +2060,53 @@ class GitHubClient:
             PR details dict if found, None otherwise
         """
         try:
-            prs = self.get_open_pull_requests(repo_name)
-            for pr in prs:
-                # Handle both AttrDict and dict
-                head_ref = pr.get("head", {}).get("ref") if isinstance(pr, dict) else pr.head.ref
-
-                if head_ref == branch_name:
-                    pr_number = pr.get("number") if isinstance(pr, dict) else pr.number
-                    logger.info(f"Found PR #{pr_number} with head branch '{branch_name}'")
-                    return self.get_pr_details(pr)
-            logger.debug(f"No open PR found with head branch '{branch_name}'")
-            return None
+            if self._auth_provider is None:
+                prs = self.get_open_pull_requests(repo_name)
+                for pr in prs:
+                    details = self.get_pr_details(pr)
+                    if details.get("head", {}).get("ref") == branch_name:
+                        return details
+                return None
+            return self._find_pr_by_head_branch(repo_name, branch_name, state="open")
         except Exception as e:
             logger.warning(f"Failed to search for PR with head branch '{branch_name}': {e}")
             return None
 
-    def find_pr_by_head_branch_strict(self, repo_name: str, branch_name: str) -> Optional[Dict[str, Any]]:
-        """Find an open or closed head-branch PR, propagating lookup failures."""
+    def _find_pr_by_head_branch(self, repo_name: str, branch_name: str, *, state: str) -> Optional[Dict[str, Any]]:
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token, extra_headers={"Cache-Control": "no-cache"})
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"})
         page = 1
         while True:
-            prs = api.pulls.list(owner, repo, state="all", head=f"{owner}:{branch_name}", per_page=100, page=page)
+            prs = api.pulls.list(owner, repo, state=state, head=f"{owner}:{branch_name}", per_page=100, page=page)
             if not prs:
                 return None
             for pr in prs:
                 details = self.get_pr_details(pr)
                 if details.get("head", {}).get("ref") == branch_name:
+                    logger.info(f"Found PR #{details.get('number')} with head branch '{branch_name}'")
                     return details
             if len(prs) < 100:
                 return None
             page += 1
+
+    def find_pr_by_head_branch_strict(self, repo_name: str, branch_name: str) -> Optional[Dict[str, Any]]:
+        """Find an open or closed head-branch PR, propagating lookup failures."""
+        if self._auth_provider is None:
+            owner, repo = repo_name.split("/")
+            api = get_ghapi_client(self.token, extra_headers={"Cache-Control": "no-cache"})
+            page = 1
+            while True:
+                prs = api.pulls.list(owner, repo, state="all", head=f"{owner}:{branch_name}", per_page=100, page=page)
+                if not prs:
+                    return None
+                for pr in prs:
+                    details = self.get_pr_details(pr)
+                    if details.get("head", {}).get("ref") == branch_name:
+                        return details
+                if len(prs) < 100:
+                    return None
+                page += 1
+        return self._find_pr_by_head_branch(repo_name, branch_name, state="all")
 
     def _get_issue_timeline(
         self,
@@ -2278,6 +2356,10 @@ class GitHubClient:
         strict lookup: an absent or malformed identity must not widen the set
         of trusted comment authors.
         """
+        if self._auth_provider is not None:
+            if self._auth_repository is None:
+                raise RuntimeError("Controller repository is unavailable")
+            return self._auth_provider.identity_for(self._auth_repository).login
         api = get_ghapi_client(self.token)
         user = api.users.get_authenticated()
         login = user.get("login") if isinstance(user, dict) else getattr(user, "login", None)
@@ -2287,6 +2369,11 @@ class GitHubClient:
 
     def get_authenticated_controller_identity(self, repo_name: str | None = None) -> "ControllerIdentity":
         """Return the positive account ID and canonical login proven by this token."""
+        if self._auth_provider is not None:
+            target = repo_name or self._auth_repository
+            if target is None:
+                raise RuntimeError("Controller repository is unavailable")
+            return self._auth_provider.identity_for(target)
         return self._controller_identity_for_token(self.token, repo_name)
 
     def _controller_identity_for_token(self, token: str, repo_name: str | None = None) -> "ControllerIdentity":

@@ -1797,8 +1797,7 @@ def _create_pr_for_issue(
 
         # Create PR using GhApi
         try:
-            token = github_client.token
-            api = get_ghapi_client(token)
+            api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write", "issues": "write"})
             owner, repo = repo_name.split("/")
 
             # Check if PR already exists

@@ -65,14 +65,15 @@ class BaseUpdateConflictExecutionService:
         operation: Any = None,
         *,
         config: Any = None,
+        github_client: Any = None,
     ) -> PRRepairResult:
         """Execute one route selected by the caller; never introduce fallback."""
         if config is not None:
             from . import pr_processor as p
 
             try:
-                token = p.GitHubClient.get_instance().token
-                api = p.get_ghapi_client(token)
+                client = github_client or p.GitHubClient.get_instance()
+                api = client.api_for(request.repository, required_permissions={"pull_requests": "read"})
                 owner, repo = request.repository.split("/")
                 current_pr = api.pulls.get(owner, repo, request.pr_number)
             except Exception as exc:

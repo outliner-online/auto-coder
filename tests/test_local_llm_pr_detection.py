@@ -143,6 +143,7 @@ class TestCreatePrForIssueMarker:
 
         mock_api = MagicMock()
         mock_api.pulls.create.return_value = {"number": 101, "html_url": "https://github.com/owner/repo/pull/101"}
+        mock_gh.api_for.return_value = mock_api
 
         config = AutomationConfig()
         config.PR_LABEL_COPYING_ENABLED = False
@@ -150,7 +151,6 @@ class TestCreatePrForIssueMarker:
         with (
             patch("auto_coder.issue_processor.get_commit_log", return_value=""),
             patch("auto_coder.issue_processor.run_llm_noedit_prompt", side_effect=RuntimeError("No test backend configured")),
-            patch("auto_coder.issue_processor.get_ghapi_client", return_value=mock_api),
             patch("auto_coder.issue_processor.validate_issue_references"),
         ):
             res = _create_pr_for_issue(
