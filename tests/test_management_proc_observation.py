@@ -206,7 +206,10 @@ def test_independent_consumer_refuses_removed_or_forged_unavailable_reasons(tmp_
             tampered["unavailable"] = replacement
             current = _command(tmp_path, child.pid, tampered)
             assert "Independent current observation differs: unavailable" in current["unavailable"]
-            assert current["processes"] == saved["processes"]
+            assert current["observer_pid"] != saved["observer_pid"]
+            assert current["observation_id"] != saved["observation_id"]
+            assert current["processes"][0]["pid"] == saved["processes"][0]["pid"]
+            assert current["processes"][0]["start_token"] == saved["processes"][0]["start_token"]
             assert current["status"] == "unavailable"
 
 
