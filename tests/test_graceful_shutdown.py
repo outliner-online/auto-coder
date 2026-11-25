@@ -4,6 +4,7 @@ import signal
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -157,6 +158,69 @@ def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch
     asyncio.run(scenario())
     routing.assert_called_once_with("owner/repo", 23, candidate.data)
     engine._process_single_candidate.assert_not_called()
+    assert engine.invalidations.pending_count("owner/repo") == 1
+
+
+def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    candidate = Candidate(type="issue", data={"number": 25, "state": "open"}, priority=0, issue_number=25)
+    routing = MagicMock()
+    validation_entered = threading.Event()
+    release_validation = threading.Event()
+    executor_blocked = threading.Event()
+    release_executor = threading.Event()
+    monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args: candidate)
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+
+        async def wait_until_set(event):
+            for _ in range(200):
+                if event.is_set():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("timed out waiting for executor boundary")
+
+        def occupy_executor():
+            executor_blocked.set()
+            assert release_executor.wait(5)
+
+        def validation(*_args):
+            validation_entered.set()
+            assert release_validation.wait(5)
+            # Queue a real to_thread call ahead of the worker's next owned
+            # operation, reproducing executor backlog at the handoff.
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(asyncio.to_thread(occupy_executor)))
+
+        monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", validation)
+        assert await engine.invalidate_entity("owner/repo", "issue", 25, "queued-routing")
+        worker = asyncio.create_task(engine._worker_loop("owner/repo", 0, "issue"))
+        await wait_until_set(validation_entered)
+        release_validation.set()
+        await wait_until_set(executor_blocked)
+        for _ in range(200):
+            if any("post-validation stage routing" in value for value in engine._critical_operations.values()):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("post-validation routing was not queued behind the executor blocker")
+
+        assert engine.request_graceful_shutdown("SIGTERM")
+        release_executor.set()
+        await asyncio.wait_for(worker, 2)
+        executor.shutdown(wait=True)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release_validation.set()
+        release_executor.set()
+
+    routing.assert_called_once_with("owner/repo", 25, candidate.data)
     assert engine.invalidations.pending_count("owner/repo") == 1
 
 

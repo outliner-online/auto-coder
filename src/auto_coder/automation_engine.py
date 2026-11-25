@@ -4100,6 +4100,14 @@ class AutomationEngine:
             self.issue_stage_routing.remove_departed_family_children(repo_name, issue_number, ())
             self._route_standalone_issue(repo_name, current)
 
+    def _route_issue_stages_after_validation_if_admitted(self, repo_name: str, issue_number: int, snapshot: Dict[str, Any]) -> bool:
+        """Enter post-validation routing only while lifecycle admission is open."""
+        with self._lifecycle_lock:
+            if self._lifecycle is not EngineLifecycle.RUNNING:
+                return False
+        self._route_issue_stages_authoritatively(repo_name, issue_number, snapshot)
+        return True
+
     def _refresh_issue_stage_routing(self, repo_name: str, issue_number: int) -> None:
         """Reclassify after processing from a new strict GitHub snapshot."""
         with self._issue_routing_lock(repo_name, issue_number):
@@ -4996,9 +5004,9 @@ class AutomationEngine:
                                 # Validation may have persisted only a subset
                                 # before ERROR. Re-read durable decisions so the
                                 # lane retains exactly the retryable identities.
-                                await self._run_local_critical(
+                                routing_started = await self._run_local_critical(
                                     f"worker {worker_id} post-validation stage routing for issue #{item_number}",
-                                    self._route_issue_stages_authoritatively,
+                                    self._route_issue_stages_after_validation_if_admitted,
                                     repo_name,
                                     int(item_number),
                                     candidate.data,
@@ -5007,6 +5015,8 @@ class AutomationEngine:
                                 if validation_error is not None:
                                     raise validation_error
                                 raise
+                            if not routing_started:
+                                return
                             if validation_error is not None:
                                 raise validation_error
                             if self.is_draining:
