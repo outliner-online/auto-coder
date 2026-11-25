@@ -210,6 +210,7 @@ def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(mon
             raise AssertionError("post-validation routing was not queued behind the executor blocker")
 
         assert engine.request_graceful_shutdown("SIGTERM")
+        assert await engine.invalidate_entity("owner/repo", "issue", 25, "newer-queued-routing")
         release_executor.set()
         await asyncio.wait_for(worker, 2)
         executor.shutdown(wait=True)
@@ -222,6 +223,11 @@ def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(mon
 
     routing.assert_called_once_with("owner/repo", 25, candidate.data)
     assert engine.invalidations.pending_count("owner/repo") == 1
+    restarted = AutomationEngine(MagicMock(), AutomationConfig())
+    recovered = restarted.invalidations.claim("owner/repo")
+    assert recovered is not None
+    assert recovered.identity == EntityIdentity("owner/repo", "issue", 25)
+    assert recovered.generation == 2
 
 
 def test_parent_validation_routes_normally_while_admission_is_open(monkeypatch, tmp_path):
@@ -229,8 +235,10 @@ def test_parent_validation_routes_normally_while_admission_is_open(monkeypatch, 
     engine = AutomationEngine(MagicMock(), AutomationConfig())
     candidate = Candidate(type="issue", data={"number": 24, "state": "open"}, priority=0, issue_number=24)
     routing = MagicMock()
+    post_validation_handoff = MagicMock(wraps=engine._route_issue_stages_after_validation_if_admitted)
     monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args: candidate)
     monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+    monkeypatch.setattr(engine, "_route_issue_stages_after_validation_if_admitted", post_validation_handoff)
     monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", lambda *_args: None)
     monkeypatch.setattr("auto_coder.automation_engine.is_item_closed_on_github", lambda *_args: False)
     engine._process_single_candidate = MagicMock(return_value=CandidateProcessingResult(type="issue", number=24, success=True))
@@ -246,6 +254,7 @@ def test_parent_validation_routes_normally_while_admission_is_open(monkeypatch, 
 
     asyncio.run(scenario())
     assert routing.call_count == 2
+    post_validation_handoff.assert_called_once_with("owner/repo", 24, candidate.data)
     engine._process_single_candidate.assert_called_once()
     assert engine.invalidations.pending_count("owner/repo") == 0
 
