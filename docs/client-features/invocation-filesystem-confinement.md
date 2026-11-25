@@ -29,6 +29,12 @@ provided invocation-owned runtime roots. Every supervised backend receives a pri
 HOME and TMPDIR for CLI startup/cache state, including OpenCode no-edit reviews;
 source and Git metadata remain read-only. Shared provider configuration is copied
 into the private home rather than granting writes to the controller's home.
+OpenCode's XDG configuration, data, cache, and state paths are rebound to that
+same private home for preflight and provider execution. Effective shared
+configuration and authentication inputs are copied from absolute XDG paths
+when set, otherwise from HOME defaults. Shared native session databases are
+not copied. The OpenCode executable version probe uses disposable XDG paths,
+rather than initializing directories in the shared provider home.
 OpenCode's native session state lives beside its private repository and remains
 available across authorized retained-root continuation. It is removed with that
 workspace after all owners release it, rather than after each CLI command.

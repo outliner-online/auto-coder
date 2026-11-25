@@ -46,6 +46,10 @@ pytestmark = [pytest.mark.opencode_live, pytest.mark.timeout(120)]
 def _exercise_legacy_continuation_without_turn_supervision(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep provider-session compatibility tests independent of Issue #2352 supervision."""
     monkeypatch.setattr(OpenCodeClient, "supports_supervised_local_turn", False)
+    # Most fixtures set HOME and write configuration using the XDG defaults.
+    # Do not let CI's ambient XDG directories select a different fixture.
+    for variable in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+        monkeypatch.delenv(variable, raising=False)
 
 
 def _find_or_install_opencode() -> Optional[str]:
@@ -797,7 +801,13 @@ def test_nonroot_adversarial_review_uses_real_supervisor(tmp_path: Path, monkeyp
     _git(repo, "commit", "-m", "add review evidence")
     before = _snapshot_tree(repo)
     provider = scripted_provider([_read_tool_turn(Path("evidence.txt")), _echo_tool_result_turn()])
-    _write_home_config(home, provider_name="fakeprov", model_name="fake-model", base_url=provider.base_url)
+    shared_xdg = tmp_path / "shared-xdg"
+    _write_home_config(shared_xdg, provider_name="fakeprov", model_name="fake-model", base_url=provider.base_url)
+    shared_config = shared_xdg / ".config/opencode/opencode.json"
+    config_before = shared_config.read_bytes()
+    # Reproduce a runner that sets XDG independently of the caller's HOME.
+    for variable, relative in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"), ("XDG_CACHE_HOME", ".cache"), ("XDG_STATE_HOME", ".local/state")):
+        monkeypatch.setenv(variable, str(shared_xdg / relative))
     cfg = home / "llm_config.toml"
     cfg.write_text('[backend]\norder = ["opencode-review"]\n' '[backend_pr_adversarial_validation]\norder = ["opencode-review"]\n' '[backends.opencode-review]\nbackend_type = "opencode"\nmodel = "fakeprov/fake-model"\ntimeout = 60\n')
     monkeypatch.setenv("HOME", str(home))
@@ -814,5 +824,7 @@ def test_nonroot_adversarial_review_uses_real_supervisor(tmp_path: Path, monkeyp
         assert manager.get_last_backend_and_model() == ("opencode-review", "fakeprov/fake-model")
         assert len(provider.requests) >= 2
         assert _snapshot_tree(repo) == before
+        assert shared_config.read_bytes() == config_before
+        assert sorted(path.relative_to(shared_xdg).as_posix() for path in shared_xdg.rglob("*")) == [".config", ".config/opencode", ".config/opencode/opencode.json"]
     finally:
         reset_llm_config()
