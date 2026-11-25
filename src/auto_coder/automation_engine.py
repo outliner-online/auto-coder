@@ -4986,6 +4986,12 @@ class AutomationEngine:
                                 # refusal. Preserve the earlier disposition as
                                 # the authority for this claimed generation.
                                 validation_error = exc
+                            if self.is_draining:
+                                # Validation is already durable, but admission
+                                # has closed for the next authoritative stage.
+                                # Leave this generation (and any newer one)
+                                # unacknowledged so startup can reconcile it.
+                                return
                             try:
                                 # Validation may have persisted only a subset
                                 # before ERROR. Re-read durable decisions so the
