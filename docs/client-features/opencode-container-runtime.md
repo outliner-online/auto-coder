@@ -178,7 +178,7 @@ Testing for the OpenCode container runtime is divided into two distinct tiers:
 
 ### 1. Ordinary static and contract tests
 
-Static assertions that verify Dockerfile pinning, Compose channel mount isolation, path resolution helpers, and documentation contracts are ordinary pytest tests. They execute as part of standard PR test shards (`PR Tests` workflow) and do not require a Docker daemon or OpenCode CLI installation.
+Static assertions that verify Dockerfile pinning, Compose channel mount isolation, path resolution helpers, and documentation contracts are ordinary pytest tests. They execute as part of complete source test shards (`Test Source for Runtime` workflow) and do not require a Docker daemon or OpenCode CLI installation.
 
 Run ordinary static tests locally:
 ```bash

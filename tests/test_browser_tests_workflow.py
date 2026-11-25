@@ -12,6 +12,7 @@ exactly as CI invokes it.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -23,7 +24,7 @@ from tests.support.browser_launch import headless_page
 
 ROOT = Path(__file__).resolve().parents[1]
 BROWSER_WORKFLOW = ROOT / ".github/workflows/browser-tests.yml"
-PR_WORKFLOW = ROOT / ".github/workflows/pr-tests.yml"
+SOURCE_WORKFLOW = ROOT / ".github/workflows/test-source-for-runtime.yml"
 PREFLIGHT_SCRIPT = ROOT / "scripts" / "browser_preflight.py"
 
 
@@ -41,7 +42,7 @@ def test_browser_tests_workflow_contract():
 
     job = workflow["jobs"]["browser-tests"]
     assert job["name"] == "Browser Tests"
-    assert "needs" not in job, "Browser Tests must not depend on PR Tests completing"
+    assert "needs" not in job, "Browser Tests must not depend on the source workflow completing"
 
     browsers_path = job["env"]["PLAYWRIGHT_BROWSERS_PATH"]
     assert browsers_path == "${{ github.workspace }}/.playwright-browsers"
@@ -63,21 +64,24 @@ def test_browser_tests_workflow_contract():
         assert excluder not in test_step["run"], f"selection must be marker-based only, not {excluder!r}"
 
 
-def test_pr_tests_and_browser_tests_have_no_cross_workflow_dependency():
-    """REQ-003, REQ-006: the two workflows run independently; PR Tests no
-    longer installs a Chromium binary now that browser tests moved out."""
-    pr_workflow = _workflow(PR_WORKFLOW)
+def test_source_and_browser_tests_have_independent_browser_prerequisites():
+    """Both workflows must prepare their own browser before executing it."""
+    source_workflow = _workflow(SOURCE_WORKFLOW)
     browser_workflow = _workflow(BROWSER_WORKFLOW)
 
     assert "needs" not in browser_workflow["jobs"]["browser-tests"]
-    for job in pr_workflow["jobs"].values():
+    for job in source_workflow["jobs"].values():
         assert "browser-tests" not in str(job.get("needs", ""))
 
-    shard = pr_workflow["jobs"]["tests-shard"]
-    step_names = [step["name"] for step in shard["steps"]]
-    assert not any("Playwright" in name or "Chromium" in name for name in step_names)
-    for step in shard["steps"]:
-        assert "playwright install" not in step.get("run", "")
+    shard = source_workflow["jobs"]["complete-source-shard"]
+    assert shard["env"]["AUTO_CODER_REQUIRE_BROWSER"] == "1"
+    steps = shard["steps"]
+    install = next(i for i, step in enumerate(steps) if "playwright install chromium" in step.get("run", ""))
+    preflight = next(i for i, step in enumerate(steps) if step.get("name") == "Verify real headless Chromium")
+    execute = next(i for i, step in enumerate(steps) if step.get("name") == "Run complete required source selection")
+    assert install < preflight < execute
+    for index in (install, preflight, execute):
+        assert not steps[index].get("continue-on-error", False)
 
 
 REAL_BROWSER_MODULES = (
@@ -133,16 +137,19 @@ def test_browser_marker_is_registered_and_selects_exactly_the_real_browser_tests
 
     assert "tests/test_browser_tests_workflow.py::test_headless_page_discovers_browser_despite_per_test_home_rewrite" in collected_ids
 
-    exclude = subprocess.run(
-        [sys.executable, "-m", "pytest", "-m", "not browser", "--collect-only", "-q"],
+    source_steps = _workflow(SOURCE_WORKFLOW)["jobs"]["complete-source-shard"]["steps"]
+    source_command = shlex.split(next(step["run"] for step in source_steps if step.get("name") == "Run complete required source selection"))
+    source_selector = source_command[source_command.index("-m", source_command.index("pytest") + 1) + 1]
+    source_collection = subprocess.run(
+        [sys.executable, "-m", "pytest", *REAL_BROWSER_MODULES, "-m", source_selector, "--collect-only", "-q"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         timeout=180,
     )
-    assert exclude.returncode == 0, exclude.stdout + exclude.stderr
-    excluded_ids = {line.strip() for line in exclude.stdout.splitlines() if "::" in line}
-    assert not (excluded_ids & collected_ids), "PR Tests' '-m not browser' must not select any browser-marked test"
+    assert source_collection.returncode == 0, source_collection.stdout + source_collection.stderr
+    source_ids = {line.strip() for line in source_collection.stdout.splitlines() if "::" in line}
+    assert unfiltered_ids <= source_ids, "the unified source selection must retain every real-browser test"
 
 
 def test_browser_preflight_fails_closed_when_chromium_is_unusable(tmp_path):

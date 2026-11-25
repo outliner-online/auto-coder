@@ -1,24 +1,6 @@
 {
   "workflows": [
     {
-      "path": ".github/workflows/pr-tests.yml",
-      "families": [
-        {
-          "key": "pytest",
-          "name": "Tests with Coverage",
-          "job_pattern": "Tests with Coverage \\(\\d+/\\d+\\)",
-          "test_step_pattern": "^Run tests with coverage \\(shard ",
-          "source_paths": [
-            ".github/workflows/pr-tests.yml",
-            "scripts/run_pr_test_shard.py",
-            "tests/data/pr-test-durations.json",
-            "tests/test_pr_test_duration_weights.py"
-          ],
-          "guidance": "The ordinary PR path fixes four groups in both the workflow matrix and scripts/run_pr_test_shard.py (including its argument choices and pytest --splits value). Change those coupled entry points together if the reviewed plan changes the shard count; use the existing duration-based complete selection rather than dropping tests. Inspect pr-test-diagnostics artifacts because the test-command step can contain a timeout-only second attempt. Preserve the stable Tests with Coverage aggregate and its lint/shard failure propagation. Extend tests/test_pr_test_duration_weights.py or a focused orchestration regression, and run bash scripts/test.sh with only the affected test files."
-        }
-      ]
-    },
-    {
       "path": ".github/workflows/test-source-for-runtime.yml",
       "families": [
         {

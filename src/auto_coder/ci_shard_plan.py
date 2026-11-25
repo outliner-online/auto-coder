@@ -115,11 +115,12 @@ class ShardContext:
         origin = _object(data.get("origin"), "origin")
         if origin.get("repository") != repository:
             raise ShardPlanError("origin.repository differs from tested repository")
-        for name in ("workflow", "run_id", "run_attempt", "planning_attempt", "event_sha"):
+        for name in ("workflow", "run_id", "run_attempt", "planning_attempt", "event_sha", "event_name", "run_head_sha"):
             if origin.get(name) is not None and not isinstance(origin.get(name), str):
                 raise ShardPlanError(f"origin.{name} must be a string or null")
-        if origin.get("event_sha") is not None and not SHA_PATTERN.fullmatch(_string(origin["event_sha"], "origin.event_sha")):
-            raise ShardPlanError("invalid event_sha")
+        for name in ("event_sha", "run_head_sha"):
+            if origin.get(name) is not None and not SHA_PATTERN.fullmatch(_string(origin[name], f"origin.{name}")):
+                raise ShardPlanError(f"invalid {name}")
         return cls(repository, _string(data.get("profile_id"), "profile_id"), sha, args, harness, env, dict(origin))
 
     @classmethod

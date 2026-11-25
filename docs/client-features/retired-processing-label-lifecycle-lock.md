@@ -123,7 +123,7 @@ repository-hygiene-enforcement:
   description: "Checks the complete tracked repository state at commit and in PR CI while keeping disposable agent work untracked."
   documentation: docs/repository-hygiene.md
   behavior:
-    - "PR Tests runs the repository hygiene checker against HEAD in the existing Lint & Type Check job."
+    - "Test Source for Runtime runs the repository hygiene checker against HEAD in its Source identity and quality job."
     - "Pre-commit runs the checker against the complete staged index, including when no Python filenames are passed."
     - "Disposable work belongs under .agent-tmp/, maintained scripts under scripts/, and regression tests under tests/; root-level Python files are prohibited."
     - "Git ignore rules and local hooks supplement tracked-state CI checks; server-side enforcement depends on separately configured branch protection or repository rulesets."

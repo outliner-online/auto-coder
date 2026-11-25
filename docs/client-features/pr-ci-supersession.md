@@ -1,7 +1,7 @@
 # Pull-request CI supersession
 
-The `PR Tests`, `Browser Tests`, `OpenCode Live Tests`, `Muse Live Tests`,
-`Supervisor Integration Tests`, and `Test Source for Runtime` workflows ask
+The `Test Source for Runtime`, `Browser Tests`, `OpenCode Live Tests`,
+`Muse Live Tests`, and `Supervisor Integration Tests` workflows ask
 GitHub Actions to cancel an older active invocation when another invocation of
 the same workflow arrives for the same pull request. Workflow identity and pull
 request number form the cancellation boundary, so runs for different workflows
@@ -16,30 +16,30 @@ test evidence, and the retained run must execute its existing checks for its own
 checked-out revision. No check result or tested-source identity is copied between
 runs.
 
-## Cancellation and mandatory host-gate regression boundaries
+## Cancellation and current required checks
 
-An observed shard cancellation takes precedence over a successful child outcome,
-including the interval after the owned child has exited and before the controller
-consumes that outcome. The controller retains the attempt's output and cancellation
-diagnostic, returns nonzero, and does not retry. Live-group TERM/KILL escalation,
-cleanup confirmation, ordinary-failure handling and timeout-only retry are unchanged.
-`test_cancellation_after_successful_child_exit_is_non_success` exercises the real
-successful child/attempt and delivers SIGINT or SIGTERM at that boundary, with a
-no-cancellation success control. Both signal cases returned zero before the repair.
+Cancellation does not qualify source tests. The `Complete source tests with
+Chromium` aggregate requires source identity and quality, successful immutable
+planning, every planned shard, and the current attempt's native receipts and
+coverage. A retry of a failed or cancelled source invocation must rerun the whole
+workflow so the plan and every shard belong to the same new attempt. Selectively
+rerunning one shard cannot qualify retained evidence from an earlier attempt.
 
-The Supervisor production-definition guards also inspect the mandatory fresh-host
-job, its prerequisite steps and the host step for failure tolerance or conditions
-that can bypass verification. Negative controls cover both job/step skipping and
-`continue-on-error`. Bounded shell tests execute the extracted production host
-command with controlled external prerequisites and pytest/JUnit outcomes: image
-tag/pull failure, failing pytest, skipped or incomplete host results and missing
-JUnit must remain non-success, alongside a successful nineteen-test control.
-These isolated gate tests do not replace the unchanged required real host/container
-CI executions. No workflow timeout, profile, permission or skip policy is changed.
-This change affects CI exit handling and regression guards only; it does not change
-production processing trace emissions, structured event schemas or dashboard views.
+`Supervisor Integration Tests` retains the `Worker processes and bridge` job
+and its required aggregate. The worker job runs the maintained worker-process
+and bridge tests and binds their native results to the producing job; its
+aggregate requires that job to succeed. The current workflow does not include
+the former fresh-host provisioning gate.
+
+Supersession changes which invocation remains active. It does not change
+production processing trace emissions, structured event schemas, or dashboard
+views, and it never converts cancelled evidence into a passing check.
 
 ## Timing observations
+
+The observations below record the workflows before consolidation. Their
+historical `PR Tests` names refer to the retired workflow, not the current
+source-test topology.
 
 Queue duration below is `started_at - created_at`; execution duration is
 `completed_at - started_at`, using the Actions job timestamps. These observations

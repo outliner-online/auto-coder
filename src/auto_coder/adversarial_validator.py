@@ -167,7 +167,7 @@ class DynamicCheckExecution:
     target_selection_error: Optional[str] = None
 
 
-CANONICAL_PR_TESTS_WORKFLOW = ".github/workflows/pr-tests.yml"
+CANONICAL_PR_TESTS_WORKFLOW = ".github/workflows/test-source-for-runtime.yml"
 
 
 def validate_dynamic_check_target(check_target: str, repository_root: Path) -> Optional[str]:
@@ -4205,9 +4205,9 @@ def run_adversarial_validation(
                         diagnostic_reason=format_ci_execution_evidence(ci_status),
                     )
         if (check_target == "all" and canonical_pr_tests_succeeded(ci_status)) or (check_target != "all" and focused_ci_target_succeeded(ci_status, check_target)):
-            logger.info("Reusing successful exact-head canonical PR Tests evidence instead of rerunning the suite")
+            logger.info("Reusing successful current-head canonical source CI evidence instead of rerunning the suite")
             result.dynamic_check_requested = None
-            result.summary = f"{result.summary} Reused successful exact-head {CANONICAL_PR_TESTS_WORKFLOW} evidence."
+            result.summary = f"{result.summary} Reused successful {CANONICAL_PR_TESTS_WORKFLOW} evidence for the current PR head."
         elif check_target and result.dynamic_check_requested:
             try:
                 test_res = run_exact_head_dynamic_check(config, check_target, head_sha, execution_cwd) if execution_cwd else run_exact_head_dynamic_check(config, check_target, head_sha)
@@ -4270,7 +4270,7 @@ def run_adversarial_validation(
                     if (check_target == "all" and canonical_pr_tests_succeeded(ci_status)) or (check_target != "all" and focused_ci_target_succeeded(ci_status, check_target)):
                         logger.info("Reusing refreshed exact-head CI evidence after dynamic-target correction")
                         result.dynamic_check_requested = None
-                        result.summary = f"{result.summary} Reused successful exact-head {CANONICAL_PR_TESTS_WORKFLOW} evidence."
+                        result.summary = f"{result.summary} Reused successful {CANONICAL_PR_TESTS_WORKFLOW} evidence for the current PR head."
                     if check_target and result.dynamic_check_requested:
                         test_res = run_exact_head_dynamic_check(config, check_target, head_sha, execution_cwd) if execution_cwd else run_exact_head_dynamic_check(config, check_target, head_sha)
                     if result.dynamic_check_requested and test_res.target_selection_error:
