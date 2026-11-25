@@ -12,6 +12,7 @@ this to normal PR processing (see issue #1937 for the full contract).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -82,6 +83,68 @@ class BlockReason(str, Enum):
     RETRIES_EXHAUSTED = "throttle_retries_exhausted"
 
 
+class ReservationRefusal(str, Enum):
+    """Machine-readable reasons why an App-bound reservation was refused."""
+
+    INELIGIBLE = "ineligible"
+    BINDING_REQUIRED = "binding_required"
+    INVALID_BINDING = "invalid_binding"
+    PRINCIPAL_MISMATCH = "principal_mismatch"
+
+
+@dataclass(frozen=True)
+class EffectSenderBinding:
+    """Verified, nonsecret identity of the App principal sending an effect."""
+
+    app_role: str
+    api_origin: str
+    repository: str
+    app_id: int
+    installation_id: int
+    bot_login: str
+
+    def valid_for(self, identity: MergeOperationIdentity, effect_name: EffectName) -> bool:
+        required_role = {EffectName.APPROVAL: "reviewer", EffectName.MERGE: "controller"}.get(effect_name)
+        return (
+            isinstance(self.app_role, str)
+            and self.app_role == required_role
+            and isinstance(self.api_origin, str)
+            and self.api_origin.rstrip("/") == identity.api_origin.rstrip("/")
+            and isinstance(self.repository, str)
+            and self.repository.casefold() == identity.repository.casefold()
+            and type(self.app_id) is int
+            and self.app_id > 0
+            and type(self.installation_id) is int
+            and self.installation_id > 0
+            and isinstance(self.bot_login, str)
+            and re.fullmatch(r"[A-Za-z0-9-]+\[bot\]", self.bot_login, re.IGNORECASE) is not None
+        )
+
+    def canonical(self) -> EffectSenderBinding:
+        """Compare the same principal identically before and after persistence."""
+        return EffectSenderBinding(self.app_role, self.api_origin.rstrip("/"), self.repository.casefold(), self.app_id, self.installation_id, self.bot_login.casefold())
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "app_role": self.app_role,
+                "api_origin": self.api_origin.rstrip("/"),
+                "repository": self.repository,
+                "app_id": self.app_id,
+                "installation_id": self.installation_id,
+                "bot_login": self.bot_login,
+            },
+            sort_keys=True,
+        )
+
+    @staticmethod
+    def from_json(raw: str) -> EffectSenderBinding | None:
+        if not raw:
+            return None
+        data = json.loads(raw)
+        return EffectSenderBinding(data["app_role"], data["api_origin"], data["repository"], data["app_id"], data["installation_id"], data["bot_login"])
+
+
 @dataclass(frozen=True)
 class MergeOperationIdentity:
     """Target identity: API origin, repository, and PR number."""
@@ -146,6 +209,7 @@ class EffectRecord:
     throttle_attempts: int = 0
     throttled_attempt_ids: tuple[str, ...] = field(default_factory=tuple)
     last_error: str = ""
+    sender_binding: EffectSenderBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +237,18 @@ class ReservationResult:
     operation: MergeOperation
     attempt_id: str = ""
     generation: int = 0
+    refusal: ReservationRefusal | None = None
+
+
+@dataclass(frozen=True)
+class EffectAttemptRecord:
+    effect_name: EffectName
+    generation: int
+    attempt_id: str
+    sender_binding: EffectSenderBinding | None
+    receipt: EffectReceipt | None
+    outcome: str
+    expected_head_sha: str = ""
 
 
 class MergeOperationPersistenceError(RuntimeError):
@@ -196,25 +272,83 @@ class MergeOperationStore:
     def _connect(self) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self._db_path, timeout=30)
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("""CREATE TABLE IF NOT EXISTS merge_operations (
-            op_key TEXT PRIMARY KEY, api_origin TEXT NOT NULL, repository TEXT NOT NULL,
-            pr_number INTEGER NOT NULL, expected_head_sha TEXT NOT NULL,
-            merge_method TEXT NOT NULL, approval_credential_role TEXT NOT NULL,
-            reviewer_identity TEXT NOT NULL, generation INTEGER NOT NULL,
-            status TEXT NOT NULL, resume_reason TEXT NOT NULL,
-            not_before REAL NOT NULL, updated_at REAL NOT NULL)""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS merge_operation_effects (
-            op_key TEXT NOT NULL, effect_name TEXT NOT NULL, state TEXT NOT NULL,
-            attempt_id TEXT NOT NULL, generation INTEGER NOT NULL,
-            receipt_json TEXT NOT NULL, throttle_attempts INTEGER NOT NULL,
-            throttled_attempt_ids TEXT NOT NULL, last_error TEXT NOT NULL,
-            updated_at REAL NOT NULL, PRIMARY KEY (op_key, effect_name))""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS merge_operation_attempt_history (
-            history_id INTEGER PRIMARY KEY AUTOINCREMENT, op_key TEXT NOT NULL,
-            effect_name TEXT NOT NULL, generation INTEGER NOT NULL, attempt_id TEXT NOT NULL,
-            outcome TEXT NOT NULL, detail TEXT NOT NULL, recorded_at REAL NOT NULL)""")
-        return connection
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            # DDL is not implicitly transactional in sqlite3's legacy mode.
+            # Serialize schema inspection, upgrades and evidence backfill.
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("""CREATE TABLE IF NOT EXISTS merge_operations (
+                op_key TEXT PRIMARY KEY, api_origin TEXT NOT NULL, repository TEXT NOT NULL,
+                pr_number INTEGER NOT NULL, expected_head_sha TEXT NOT NULL,
+                merge_method TEXT NOT NULL, approval_credential_role TEXT NOT NULL,
+                reviewer_identity TEXT NOT NULL, generation INTEGER NOT NULL,
+                status TEXT NOT NULL, resume_reason TEXT NOT NULL,
+                not_before REAL NOT NULL, updated_at REAL NOT NULL)""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS merge_operation_effects (
+                op_key TEXT NOT NULL, effect_name TEXT NOT NULL, state TEXT NOT NULL,
+                attempt_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                receipt_json TEXT NOT NULL, throttle_attempts INTEGER NOT NULL,
+                throttled_attempt_ids TEXT NOT NULL, last_error TEXT NOT NULL,
+                updated_at REAL NOT NULL, PRIMARY KEY (op_key, effect_name))""")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(merge_operation_effects)")}
+            if "sender_binding_json" not in columns:
+                connection.execute("ALTER TABLE merge_operation_effects ADD COLUMN sender_binding_json TEXT NOT NULL DEFAULT ''")
+            connection.execute("""CREATE TABLE IF NOT EXISTS merge_operation_attempt_history (
+                history_id INTEGER PRIMARY KEY AUTOINCREMENT, op_key TEXT NOT NULL,
+                effect_name TEXT NOT NULL, generation INTEGER NOT NULL, attempt_id TEXT NOT NULL,
+                outcome TEXT NOT NULL, detail TEXT NOT NULL, recorded_at REAL NOT NULL)""")
+            attempt_columns = {row[1] for row in connection.execute("PRAGMA table_info(merge_operation_effect_attempts)")}
+            connection.execute("""CREATE TABLE IF NOT EXISTS merge_operation_effect_attempts (
+                op_key TEXT NOT NULL, effect_name TEXT NOT NULL, generation INTEGER NOT NULL,
+                attempt_id TEXT NOT NULL, sender_binding_json TEXT NOT NULL,
+                receipt_json TEXT NOT NULL, outcome TEXT NOT NULL, updated_at REAL NOT NULL,
+                expected_head_sha TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (op_key, effect_name, generation, attempt_id))""")
+            if attempt_columns and "expected_head_sha" not in attempt_columns:
+                connection.execute("ALTER TABLE merge_operation_effect_attempts ADD COLUMN expected_head_sha TEXT NOT NULL DEFAULT ''")
+            if "expected_head_sha" not in attempt_columns:
+                self._backfill_attempts(connection)
+            connection.commit()
+            return connection
+        except BaseException:
+            connection.rollback()
+            connection.close()
+            raise
+
+    def _backfill_attempts(self, connection: sqlite3.Connection) -> None:
+        """Retain legacy evidence without inferring a historical App sender."""
+        connection.execute("""INSERT OR IGNORE INTO merge_operation_effect_attempts
+            (op_key,effect_name,generation,attempt_id,sender_binding_json,receipt_json,outcome,updated_at,expected_head_sha)
+            SELECT e.op_key,e.effect_name,e.generation,e.attempt_id,e.sender_binding_json,
+                e.receipt_json,e.state,e.updated_at,
+                CASE WHEN e.generation=o.generation THEN o.expected_head_sha ELSE '' END
+            FROM merge_operation_effects e JOIN merge_operations o ON o.op_key=e.op_key
+            WHERE e.attempt_id != ''""")
+        connection.execute("""INSERT OR IGNORE INTO merge_operation_effect_attempts
+            (op_key,effect_name,generation,attempt_id,sender_binding_json,receipt_json,outcome,updated_at,expected_head_sha)
+            SELECT h.op_key,h.effect_name,h.generation,h.attempt_id,'','',h.outcome,h.recorded_at,
+                CASE WHEN h.generation=o.generation THEN o.expected_head_sha ELSE '' END
+            FROM merge_operation_attempt_history h JOIN merge_operations o ON o.op_key=h.op_key
+            WHERE h.attempt_id != '' AND h.history_id=(
+                SELECT MAX(latest.history_id) FROM merge_operation_attempt_history latest
+                WHERE latest.op_key=h.op_key AND latest.effect_name=h.effect_name
+                    AND latest.generation=h.generation AND latest.attempt_id=h.attempt_id)""")
+        # The short-lived pre-head-binding schema can still have authoritative
+        # current-generation heads or exact receipt targets. Unknown older heads
+        # stay unknown rather than borrowing a newer generation's target.
+        connection.execute("""UPDATE merge_operation_effect_attempts
+            SET expected_head_sha=COALESCE((SELECT expected_head_sha FROM merge_operations o
+                WHERE o.op_key=merge_operation_effect_attempts.op_key
+                    AND o.generation=merge_operation_effect_attempts.generation),'')
+            WHERE expected_head_sha=''""")
+        rows = connection.execute("SELECT op_key,effect_name,generation,attempt_id,receipt_json FROM merge_operation_effect_attempts WHERE expected_head_sha='' AND receipt_json!=''").fetchall()
+        for op_key, effect_name, generation, attempt_id, raw_receipt in rows:
+            receipt = EffectReceipt.from_json(raw_receipt)
+            if receipt is not None and receipt.target_head_sha:
+                connection.execute(
+                    "UPDATE merge_operation_effect_attempts SET expected_head_sha=? WHERE op_key=? AND effect_name=? AND generation=? AND attempt_id=?",
+                    (receipt.target_head_sha, op_key, effect_name, generation, attempt_id),
+                )
 
     # -- row <-> dataclass -------------------------------------------------
 
@@ -227,7 +361,7 @@ class MergeOperationStore:
             return None
         effects: dict[EffectName, EffectRecord] = {}
         for erow in connection.execute(
-            "SELECT effect_name, state, attempt_id, generation, receipt_json, throttle_attempts, " "throttled_attempt_ids, last_error FROM merge_operation_effects WHERE op_key=?",
+            "SELECT effect_name, state, attempt_id, generation, receipt_json, throttle_attempts, " "throttled_attempt_ids, last_error, sender_binding_json FROM merge_operation_effects WHERE op_key=?",
             (identity.key(),),
         ).fetchall():
             name = EffectName(erow[0])
@@ -240,6 +374,7 @@ class MergeOperationStore:
                 throttle_attempts=erow[5],
                 throttled_attempt_ids=tuple(json.loads(erow[6])),
                 last_error=erow[7],
+                sender_binding=EffectSenderBinding.from_json(erow[8]),
             )
         return MergeOperation(
             identity=identity,
@@ -276,7 +411,7 @@ class MergeOperationStore:
         )
         for name, effect in operation.effects.items():
             connection.execute(
-                "INSERT OR REPLACE INTO merge_operation_effects VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO merge_operation_effects " "(op_key,effect_name,state,attempt_id,generation,receipt_json,throttle_attempts,throttled_attempt_ids,last_error,updated_at,sender_binding_json) " "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     key,
                     name.value,
@@ -288,8 +423,36 @@ class MergeOperationStore:
                     json.dumps(effect.throttled_attempt_ids),
                     effect.last_error,
                     now,
+                    effect.sender_binding.to_json() if effect.sender_binding is not None else "",
                 ),
             )
+
+    def _save_attempt(
+        self,
+        connection: sqlite3.Connection,
+        op_key: str,
+        effect: EffectAttemptRecord,
+        now: float,
+    ) -> None:
+        connection.execute(
+            "INSERT INTO merge_operation_effect_attempts "
+            "(op_key,effect_name,generation,attempt_id,sender_binding_json,receipt_json,outcome,updated_at,expected_head_sha) "
+            "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(op_key,effect_name,generation,attempt_id) DO UPDATE SET "
+            "receipt_json=CASE WHEN merge_operation_effect_attempts.receipt_json='' THEN excluded.receipt_json ELSE merge_operation_effect_attempts.receipt_json END, "
+            "outcome=CASE WHEN merge_operation_effect_attempts.receipt_json='' THEN excluded.outcome ELSE merge_operation_effect_attempts.outcome END, "
+            "updated_at=excluded.updated_at",
+            (
+                op_key,
+                effect.effect_name.value,
+                effect.generation,
+                effect.attempt_id,
+                effect.sender_binding.to_json() if effect.sender_binding is not None else "",
+                effect.receipt.to_json() if effect.receipt is not None else "",
+                effect.outcome,
+                now,
+                effect.expected_head_sha,
+            ),
+        )
 
     def _append_history(
         self,
@@ -306,12 +469,17 @@ class MergeOperationStore:
             "INSERT INTO merge_operation_attempt_history " "(op_key, effect_name, generation, attempt_id, outcome, detail, recorded_at) VALUES (?,?,?,?,?,?,?)",
             (op_key, effect_name.value, generation, attempt_id, outcome, detail, now),
         )
+        connection.execute(
+            "UPDATE merge_operation_effect_attempts SET outcome=?, updated_at=? " "WHERE op_key=? AND effect_name=? AND generation=? AND attempt_id=? AND receipt_json=''",
+            (outcome, now, op_key, effect_name.value, generation, attempt_id),
+        )
 
     # -- public API ---------------------------------------------------------
 
     def get(self, identity: MergeOperationIdentity) -> MergeOperation | None:
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN")
                 return self._load_operation(connection, identity)
         except Exception as exc:
             logger.error("Could not read merge operation {}: {}", identity.key(), exc)
@@ -320,11 +488,43 @@ class MergeOperationStore:
     def all_operations(self) -> list[MergeOperation]:
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN")
                 rows = connection.execute("SELECT api_origin, repository, pr_number FROM merge_operations").fetchall()
                 return [op for row in rows if (op := self._load_operation(connection, MergeOperationIdentity(row[0], row[1], row[2]))) is not None]
         except Exception as exc:
             logger.error("Could not list merge operations: {}", exc)
             raise MergeOperationPersistenceError("Merge operations could not be read") from exc
+
+    def _load_attempt(
+        self,
+        connection: sqlite3.Connection,
+        identity: MergeOperationIdentity,
+        effect_name: EffectName,
+        generation: int,
+        attempt_id: str,
+    ) -> EffectAttemptRecord | None:
+        row = connection.execute(
+            "SELECT sender_binding_json, receipt_json, outcome, expected_head_sha FROM merge_operation_effect_attempts " "WHERE op_key=? AND effect_name=? AND generation=? AND attempt_id=?",
+            (identity.key(), effect_name.value, generation, attempt_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return EffectAttemptRecord(effect_name, generation, attempt_id, EffectSenderBinding.from_json(row[0]), EffectReceipt.from_json(row[1]), row[2], row[3])
+
+    def get_attempt(
+        self,
+        identity: MergeOperationIdentity,
+        effect_name: EffectName,
+        generation: int,
+        attempt_id: str,
+    ) -> EffectAttemptRecord | None:
+        """Read durable evidence for an exact historical or current attempt."""
+        try:
+            with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN")
+                return self._load_attempt(connection, identity, effect_name, generation, attempt_id)
+        except Exception as exc:
+            raise MergeOperationPersistenceError("Merge operation attempt could not be read") from exc
 
     def get_or_create(
         self,
@@ -349,6 +549,7 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 existing = self._load_operation(connection, identity)
                 if existing is None:
                     effects = {
@@ -415,7 +616,26 @@ class MergeOperationStore:
             logger.error("Could not persist merge operation {}: {}", identity.key(), exc)
             raise MergeOperationPersistenceError("Merge operation could not be persisted") from exc
 
-    def reserve_attempt(self, identity: MergeOperationIdentity, effect_name: EffectName, *, now: float | None = None) -> ReservationResult:
+    def reserve_app_attempt(
+        self,
+        identity: MergeOperationIdentity,
+        effect_name: EffectName,
+        sender_binding: EffectSenderBinding | None,
+        *,
+        now: float | None = None,
+    ) -> ReservationResult:
+        """Reserve an App attempt, atomically persisting its verified sender."""
+        return self.reserve_attempt(identity, effect_name, now=now, sender_binding=sender_binding, require_sender_binding=True)
+
+    def reserve_attempt(
+        self,
+        identity: MergeOperationIdentity,
+        effect_name: EffectName,
+        *,
+        now: float | None = None,
+        sender_binding: EffectSenderBinding | None = None,
+        require_sender_binding: bool = False,
+    ) -> ReservationResult:
         """Acquire exclusive execution rights for one effect before its mutation call.
 
         Refused when the effect is already running (another entry point/
@@ -426,15 +646,27 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                # Serialize the eligibility read with both the binding and
+                # reservation writes, including across controller processes.
+                connection.execute("BEGIN IMMEDIATE")
                 operation = self._load_operation(connection, identity)
                 if operation is None:
                     raise MergeOperationPersistenceError(f"No merge operation exists for {identity.key()}; call get_or_create first")
                 effect = operation.effect(effect_name)
+                if require_sender_binding and sender_binding is None:
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.BINDING_REQUIRED)
+                if sender_binding is not None and not sender_binding.valid_for(identity, effect_name):
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.INVALID_BINDING)
+                if sender_binding is not None:
+                    sender_binding = sender_binding.canonical()
+                if effect.sender_binding is not None and (sender_binding is None or sender_binding != effect.sender_binding.canonical()):
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.PRINCIPAL_MISMATCH)
                 if operation.status in _TERMINAL_OPERATION_STATUSES or operation.status is OperationStatus.OPERATIONALLY_BLOCKED:
-                    return ReservationResult(False, operation)
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.INELIGIBLE)
                 if effect.state not in _RETRYABLE_EFFECT_STATES:
-                    return ReservationResult(False, operation)
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.INELIGIBLE)
                 attempt_id = uuid.uuid4().hex
+                authoritative_binding = effect.sender_binding or sender_binding
                 updated_effect = EffectRecord(
                     effect_name,
                     EffectState.RUNNING,
@@ -444,6 +676,7 @@ class MergeOperationStore:
                     throttle_attempts=effect.throttle_attempts,
                     throttled_attempt_ids=effect.throttled_attempt_ids,
                     last_error=effect.last_error,
+                    sender_binding=authoritative_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -460,6 +693,12 @@ class MergeOperationStore:
                     effects=new_effects,
                 )
                 self._save_operation(connection, operation, current_time)
+                self._save_attempt(
+                    connection,
+                    identity.key(),
+                    EffectAttemptRecord(effect_name, operation.generation, attempt_id, authoritative_binding, None, "reserved", operation.expected_head_sha),
+                    current_time,
+                )
                 self._append_history(connection, identity.key(), effect_name, operation.generation, attempt_id, "reserved", "", current_time)
                 return ReservationResult(True, operation, attempt_id, operation.generation)
         except MergeOperationPersistenceError:
@@ -470,13 +709,29 @@ class MergeOperationStore:
 
     def _owns_attempt(self, operation: MergeOperation, effect_name: EffectName, attempt_id: str, generation: int) -> bool:
         effect = operation.effect(effect_name)
-        return effect.attempt_id == attempt_id and effect.generation == generation
+        return bool(attempt_id) and operation.generation == generation and effect.attempt_id == attempt_id and effect.generation == generation
 
     def _both_effects_settled(self, operation: MergeOperation) -> bool:
         approval = operation.effect(EffectName.APPROVAL)
         merge = operation.effect(EffectName.MERGE)
         approval_done = approval.state in (EffectState.NOT_NEEDED, EffectState.CONFIRMED_COMPLETE)
         return approval_done and merge.state is EffectState.CONFIRMED_COMPLETE
+
+    @staticmethod
+    def _valid_receipt(effect_name: EffectName, attempt: EffectAttemptRecord | None, receipt: EffectReceipt | None) -> bool:
+        if attempt is None or not isinstance(receipt, EffectReceipt) or not isinstance(receipt.confirmation_source, ConfirmationSource):
+            return False
+        if receipt.target_head_sha and receipt.target_head_sha != attempt.expected_head_sha:
+            return False
+        if receipt.confirmation_source is ConfirmationSource.STATE_OBSERVATION or attempt.sender_binding is not None:
+            if not attempt.expected_head_sha or receipt.target_head_sha != attempt.expected_head_sha:
+                return False
+            if effect_name is EffectName.APPROVAL:
+                return bool(receipt.review_id and receipt.reviewer_identity)
+            return bool(receipt.merge_commit_sha)
+        # The existing personal response contract permits compact evidence;
+        # correlation still comes from the reserved attempt and generation.
+        return True
 
     def _finish_attempt(
         self,
@@ -502,13 +757,27 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 operation = self._load_operation(connection, identity)
                 if operation is None:
                     raise MergeOperationPersistenceError(f"No merge operation exists for {identity.key()}")
+                attempt = self._load_attempt(connection, identity, effect_name, generation, attempt_id)
+                if new_state is EffectState.CONFIRMED_COMPLETE and not self._valid_receipt(effect_name, attempt, receipt):
+                    return False
                 if not self._owns_attempt(operation, effect_name, attempt_id, generation):
-                    self._append_history(connection, identity.key(), effect_name, generation, attempt_id, f"stale_{outcome_label}", detail, current_time)
+                    if attempt is not None:
+                        self._save_attempt(
+                            connection,
+                            identity.key(),
+                            EffectAttemptRecord(effect_name, generation, attempt_id, attempt.sender_binding, receipt, f"stale_{outcome_label}", attempt.expected_head_sha),
+                            current_time,
+                        )
+                        self._append_history(connection, identity.key(), effect_name, generation, attempt_id, f"stale_{outcome_label}", detail, current_time)
                     return False
                 prior_effect = operation.effect(effect_name)
+                if prior_effect.state is EffectState.CONFIRMED_COMPLETE:
+                    # A delayed failure cannot undo positive correlated evidence.
+                    return new_state is EffectState.CONFIRMED_COMPLETE
                 updated_effect = EffectRecord(
                     effect_name,
                     new_state,
@@ -518,6 +787,7 @@ class MergeOperationStore:
                     throttle_attempts=prior_effect.throttle_attempts,
                     throttled_attempt_ids=prior_effect.throttled_attempt_ids,
                     last_error=detail if new_state is EffectState.DELIVERY_UNKNOWN else prior_effect.last_error,
+                    sender_binding=prior_effect.sender_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -537,6 +807,12 @@ class MergeOperationStore:
                     effects=new_effects,
                 )
                 self._save_operation(connection, operation, current_time)
+                self._save_attempt(
+                    connection,
+                    identity.key(),
+                    EffectAttemptRecord(effect_name, generation, attempt_id, prior_effect.sender_binding, updated_effect.receipt, outcome_label, operation.expected_head_sha),
+                    current_time,
+                )
                 self._append_history(connection, identity.key(), effect_name, generation, attempt_id, outcome_label, detail, current_time)
                 return True
         except MergeOperationPersistenceError:
@@ -603,6 +879,7 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 operation = self._load_operation(connection, identity)
                 if operation is None:
                     raise MergeOperationPersistenceError(f"No merge operation exists for {identity.key()}")
@@ -610,6 +887,8 @@ class MergeOperationStore:
                     self._append_history(connection, identity.key(), effect_name, generation, attempt_id, "stale_deferred", detail, current_time)
                     return None
                 prior_effect = operation.effect(effect_name)
+                if prior_effect.state in (EffectState.CONFIRMED_COMPLETE, EffectState.NOT_NEEDED):
+                    return None
                 attempts = prior_effect.throttle_attempts
                 throttled_ids = prior_effect.throttled_attempt_ids
                 blocked = False
@@ -633,6 +912,7 @@ class MergeOperationStore:
                     throttle_attempts=attempts,
                     throttled_attempt_ids=throttled_ids,
                     last_error=detail,
+                    sender_binding=prior_effect.sender_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -671,6 +951,7 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 operation = self._load_operation(connection, identity)
                 if operation is None:
                     raise MergeOperationPersistenceError(f"No merge operation exists for {identity.key()}")
@@ -678,6 +959,8 @@ class MergeOperationStore:
                     self._append_history(connection, identity.key(), effect_name, generation, attempt_id, "stale_blocked", detail, current_time)
                     return False
                 prior_effect = operation.effect(effect_name)
+                if prior_effect.state in (EffectState.CONFIRMED_COMPLETE, EffectState.NOT_NEEDED):
+                    return False
                 updated_effect = EffectRecord(
                     effect_name,
                     EffectState.NOT_ATTEMPTED,
@@ -687,6 +970,7 @@ class MergeOperationStore:
                     throttle_attempts=prior_effect.throttle_attempts,
                     throttled_attempt_ids=prior_effect.throttled_attempt_ids,
                     last_error=detail,
+                    sender_binding=prior_effect.sender_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -716,6 +1000,7 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 operation = self._load_operation(connection, identity)
                 if operation is None:
                     return None
@@ -731,6 +1016,7 @@ class MergeOperationStore:
                     throttle_attempts=0,
                     throttled_attempt_ids=(),
                     last_error="",
+                    sender_binding=prior_effect.sender_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -760,6 +1046,7 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 op_keys = {row[0] for row in connection.execute("SELECT op_key FROM merge_operation_effects WHERE state=?", (EffectState.RUNNING.value,)).fetchall()}
                 affected: list[MergeOperation] = []
                 for row in connection.execute("SELECT api_origin, repository, pr_number FROM merge_operations").fetchall():
@@ -783,6 +1070,7 @@ class MergeOperationStore:
                                 throttle_attempts=effect.throttle_attempts,
                                 throttled_attempt_ids=effect.throttled_attempt_ids,
                                 last_error="interrupted before a terminal outcome was recorded",
+                                sender_binding=effect.sender_binding,
                             )
                             self._append_history(connection, identity.key(), name, effect.generation, effect.attempt_id, "reopen_delivery_unknown", "", current_time)
                     operation = MergeOperation(
@@ -809,6 +1097,7 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 operation = self._load_operation(connection, identity)
                 if operation is None:
                     return
@@ -856,6 +1145,7 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN")
                 rows = connection.execute(
                     "SELECT api_origin, repository, pr_number FROM merge_operations WHERE status=? AND not_before <= ?",
                     (OperationStatus.WAITING.value, current_time),
@@ -875,6 +1165,7 @@ class MergeOperationStore:
         """
         try:
             with _LOCK, self._connect() as connection:
+                connection.execute("BEGIN")
                 rows = connection.execute(
                     "SELECT api_origin, repository, pr_number, not_before FROM merge_operations WHERE status=? AND not_before > 0",
                     (OperationStatus.WAITING.value,),
