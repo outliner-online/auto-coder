@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import IO, Callable, Optional, Protocol, Sequence
 
-from .local_execution_boundary import EvidenceStatus, LocalExecutionBoundary
+from .local_execution_boundary import EvidenceStatus, LocalExecutionBoundary, uses_direct_process_supervision
 
 
 class WriterState(str, Enum):
@@ -264,7 +264,7 @@ class InvocationProcessSupervisor:
             return self._unavailable(request, "launch does not match its invocation boundary")
         if self.state(request.invocation_id) is not WriterState.NOT_STARTED:
             return self._unavailable(request, "invocation identity has already been used")
-        direct_mode = request.backend_type.lower() == "codex"
+        direct_mode = uses_direct_process_supervision(request.backend_type, editable=request.effective_mode != "no-edit")
         try:
             if direct_mode:
                 if os.geteuid() == 0:
@@ -274,7 +274,7 @@ class InvocationProcessSupervisor:
                         return self._unavailable(request, "invocation identity has already been reserved")
                     self._direct_invocations.add(request.invocation_id)
                 # Policy anchor only: never evidence of process containment.
-                group = Path(tempfile.mkdtemp(prefix="codex-policy-"))
+                group = Path(tempfile.mkdtemp(prefix=f"{request.backend_type.lower()}-policy-"))
             else:
                 group = self.owner.prepare(request.invocation_id)
         except (CgroupV2Unavailable, OSError) as exc:
@@ -396,6 +396,9 @@ class InvocationProcessSupervisor:
                 return any(monitor.root_returncode is None for monitor in monitors)
             return process.poll() is None
 
+        # OpenCode's Bun runtime performs many short syscalls during startup.
+        # Keep traced read-only reviews responsive without changing the timeout budget.
+        poll_interval = 0.001 if direct_mode and request.backend_type.lower() == "opencode" else 0.01
         while provider_running():
             if request.cancellation is not None and request.cancellation.is_set():
                 outcome = InvocationOutcome.CANCELLED
@@ -403,7 +406,7 @@ class InvocationProcessSupervisor:
             if request.timeout_seconds is not None and time.monotonic() - start >= request.timeout_seconds:
                 outcome = InvocationOutcome.TIMED_OUT
                 break
-            time.sleep(0.01)
+            time.sleep(poll_interval)
         else:
             monitored_returncode = next((monitor.root_returncode for monitor in monitors if monitor.root_returncode is not None), None)
             if monitored_returncode is not None:
@@ -466,7 +469,7 @@ class InvocationProcessSupervisor:
                 if thread is not None:
                     thread.join(timeout=self.settlement_timeout)
         if direct_mode:
-            detail = "\n".join(filter(None, (detail, "Codex direct-process completion policy; descendant termination is unproven")))
+            detail = "\n".join(filter(None, (detail, f"{request.backend_type} direct-process completion policy; descendant termination is unproven")))
         detail = "\n".join(part for part in (detail, *dict.fromkeys(policy_denials)) if part)
         return SupervisedInvocationResult(
             request.invocation_id,

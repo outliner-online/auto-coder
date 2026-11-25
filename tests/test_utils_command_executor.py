@@ -27,7 +27,7 @@ def test_prepare_invocation_runtime_creates_empty_codex_home(tmp_path):
         "HOME": str(original_home),
     }
     context = SimpleNamespace(
-        boundary=SimpleNamespace(backend_type="codex", binding=SimpleNamespace(invocation_id="fresh-call")),
+        boundary=SimpleNamespace(backend_type="codex", editable=False, binding=SimpleNamespace(invocation_id="fresh-call")),
         supervisor=SimpleNamespace(owner=None),
     )
 
@@ -48,7 +48,7 @@ def test_opencode_runtime_preserves_native_state_until_private_workspace_disposa
     config.parent.mkdir(parents=True)
     config.write_text('{"permission":"deny"}')
     context = SimpleNamespace(
-        boundary=SimpleNamespace(backend_type="opencode", binding=SimpleNamespace(invocation_id="retained-call", workspace=workspace)),
+        boundary=SimpleNamespace(backend_type="opencode", editable=False, binding=SimpleNamespace(invocation_id="retained-call", workspace=workspace)),
         supervisor=SimpleNamespace(owner=None),
     )
     first_env = {"HOME": str(shared_home)}
@@ -69,6 +69,50 @@ def test_opencode_runtime_preserves_native_state_until_private_workspace_disposa
     assert (next_runtime / "home" / ".config" / "opencode" / "opencode.json").read_text() == '{"permission":"deny"}'
     assert config.read_text() == '{"permission":"changed externally"}'
     assert not (shared_home / ".local").exists()
+
+
+def test_opencode_runtime_rebinds_xdg_and_preserves_effective_inputs(tmp_path):
+    workspace = tmp_path / "private-call" / "repository"
+    workspace.mkdir(parents=True)
+    shared_home = tmp_path / "shared-home"
+    shared_home.mkdir()
+    shared_paths = {key: tmp_path / key for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")}
+    for path in shared_paths.values():
+        path.mkdir()
+    config = shared_paths["XDG_CONFIG_HOME"] / "opencode" / "opencode.json"
+    config.parent.mkdir()
+    config.write_text('{"share":"disabled"}')
+    auth = shared_paths["XDG_DATA_HOME"] / "opencode" / "auth.json"
+    auth.parent.mkdir()
+    auth.write_text('{"fixture":"credential"}')
+    (auth.parent / "session.db").write_bytes(b"unrelated session")
+    context = SimpleNamespace(
+        boundary=SimpleNamespace(backend_type="opencode", editable=False, binding=SimpleNamespace(invocation_id="xdg-call", workspace=workspace)),
+        supervisor=SimpleNamespace(owner=None),
+    )
+    original_env = {"HOME": str(shared_home), **{key: str(value) for key, value in shared_paths.items()}}
+    first_env = original_env.copy()
+    runtime = utils._prepare_invocation_runtime(context, first_env)
+    home = runtime / "home"
+    for key, relative in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"), ("XDG_CACHE_HOME", ".cache"), ("XDG_STATE_HOME", ".local/state")):
+        assert first_env[key] == str(home / relative)
+    assert (home / ".config/opencode/opencode.json").read_text() == config.read_text()
+    assert (home / ".local/share/opencode/auth.json").read_text() == auth.read_text()
+    session = home / ".local/share/opencode/session.db"
+    assert not session.exists()
+    session.write_bytes(b"private session")
+    config.write_text('{"share":"manual"}')
+
+    # Repeated preparation (preflight then launch, or a new retained turn)
+    # must not re-import shared state or change the effective native paths.
+    next_env = original_env.copy()
+    assert utils._prepare_invocation_runtime(context, next_env) == runtime
+    assert next_env == first_env
+    assert utils._prepare_invocation_runtime(context, next_env) == runtime
+    assert (home / ".config/opencode/opencode.json").read_text() == '{"share":"disabled"}'
+    assert session.read_bytes() == b"private session"
+    assert (auth.parent / "session.db").read_bytes() == b"unrelated session"
+    assert config.read_text() == '{"share":"manual"}'
 
 
 @pytest.mark.parametrize(

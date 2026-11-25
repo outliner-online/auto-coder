@@ -2,9 +2,11 @@
 
 Local Codex auditing, implementation, and retained-session continuation use direct
 CLI process completion instead of mandatory all-descendant termination proof.
-This is a permanent Codex-only policy, not a PR-specific exception or a fallback
-selected after confinement fails. OpenCode and other backend completion criteria
-are unchanged. Cloud Codex is not this local adapter.
+This is a permanent policy, not a PR-specific exception or a fallback selected
+after confinement fails. Non-root OpenCode no-edit turns now use the same
+direct-process completion policy; editable and root-controlled OpenCode turns
+retain cgroup supervision. Other backend criteria are unchanged. Cloud Codex is
+not this local adapter.
 
 The launcher requires a non-root controller, the invocation's private repository
 and private HOME/runtime paths, and successful Landlock filesystem-policy
@@ -26,8 +28,8 @@ For Codex, result handoff, retained-root reuse, and lease release use the direct
 completion fact. They still require their other existing conditions, including
 backend success for successful results, matching invocation/turn/workspace,
 completed observation, and a one-use lifecycle decision for continuation.
-No-edit evidence never authorizes editable publication. OpenCode still requires
-positive writer settlement. Strong audit still runs and must actually produce
+No-edit evidence never authorizes editable publication. Editable OpenCode and
+root-controlled OpenCode reviews still require positive writer settlement. Strong audit still runs and must actually produce
 valid current-head/contract evidence; ordinary validation PASS is not a substitute.
 CI and the semantic review requirements are unchanged.
 

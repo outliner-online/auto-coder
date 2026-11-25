@@ -55,6 +55,17 @@ def _chown_tree(root: Path, uid: int, gid: int) -> None:
             os.chown(Path(current) / name, uid, gid, follow_symlinks=False)
 
 
+def bind_opencode_xdg_paths(environment: Dict[str, str], home: Path) -> None:
+    """Keep OpenCode's XDG paths under the supplied private home."""
+    for variable, relative_root in (
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CACHE_HOME", ".cache"),
+        ("XDG_STATE_HOME", ".local/state"),
+    ):
+        environment[variable] = str(home / relative_root)
+
+
 def _prepare_invocation_runtime(context: _SupervisedCommandContext, environment: Dict[str, str]) -> Path:
     """Create private provider state beside the configured production runtime."""
     binding = context.boundary.binding
@@ -79,20 +90,33 @@ def _prepare_invocation_runtime(context: _SupervisedCommandContext, environment:
             destination = home / ".codex" / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
-    for relative in (Path(".config/opencode"), Path(".local/share/opencode/auth.json")):
+    opencode_inputs = (
+        ("XDG_CONFIG_HOME", Path(".config"), Path("opencode")),
+        ("XDG_DATA_HOME", Path(".local/share"), Path("opencode/auth.json")),
+    )
+    for variable, relative_root, relative_input in opencode_inputs:
         if initialized:
             continue
-        source = original_home / relative
-        destination = home / relative
+        # OpenCode honors absolute XDG paths before HOME defaults.
+        configured_root = Path(environment.get(variable, ""))
+        source_root = configured_root if retained_provider_state and configured_root.is_absolute() else original_home / relative_root
+        source = source_root / relative_input
+        destination = home / relative_root / relative_input
         if source.is_dir():
             shutil.copytree(source, destination)
         elif source.is_file():
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
+    if retained_provider_state:
+        # Both the policy preflight and the supervised CLI must resolve the
+        # same invocation-owned paths, including across retained session turns.
+        bind_opencode_xdg_paths(environment, home)
     owner = getattr(context.supervisor, "owner", None)
     uid = getattr(owner, "worker_uid", None)
     gid = getattr(owner, "worker_gid", None)
-    if context.boundary.backend_type.lower() != "codex" and uid is not None and gid is not None:
+    from .local_execution_boundary import uses_direct_process_supervision
+
+    if not uses_direct_process_supervision(context.boundary.backend_type, editable=context.boundary.editable) and uid is not None and gid is not None:
         _chown_tree(runtime, uid, gid)
     environment["HOME"] = str(home)
     environment["CODEX_HOME"] = str(home / ".codex")
@@ -920,7 +944,9 @@ class CommandExecutor:
             owner = getattr(supervised.supervisor, "owner", None)
             worker_uid = getattr(owner, "worker_uid", None)
             worker_gid = getattr(owner, "worker_gid", None)
-            direct_mode = boundary.backend_type.lower() == "codex"
+            from .local_execution_boundary import uses_direct_process_supervision
+
+            direct_mode = uses_direct_process_supervision(boundary.backend_type, editable=boundary.editable)
             if direct_mode:
                 worker_uid, worker_gid = os.geteuid(), os.getegid()
             private_runtime: Optional[Path] = None

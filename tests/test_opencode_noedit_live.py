@@ -46,6 +46,10 @@ pytestmark = [pytest.mark.opencode_live, pytest.mark.timeout(120)]
 def _exercise_legacy_continuation_without_turn_supervision(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep provider-session compatibility tests independent of Issue #2352 supervision."""
     monkeypatch.setattr(OpenCodeClient, "supports_supervised_local_turn", False)
+    # Most fixtures set HOME and write configuration using the XDG defaults.
+    # Do not let CI's ambient XDG directories select a different fixture.
+    for variable in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+        monkeypatch.delenv(variable, raising=False)
 
 
 def _find_or_install_opencode() -> Optional[str]:
@@ -782,3 +786,45 @@ def test_ac005_incompatible_case_fails_explicitly_without_stale_content_or_recre
     assert manager._last_continue_session_resumed is False
     # No worktree was recreated to satisfy the continuation.
     assert subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True).stdout == worktree_listing_before
+
+
+def test_nonroot_adversarial_review_uses_real_supervisor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, opencode_cli: str, scripted_provider, _use_real_commands) -> None:
+    """Exercise the production review route, real CLI, and actual non-root launcher."""
+    from src.auto_coder.cli_helpers import resolve_adversarial_validation_availability
+    from src.auto_coder.llm_backend_config import reset_llm_config
+
+    repo = _repository(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    (repo / "evidence.txt").write_text("SENTINEL_SUPERVISED_REVIEW_41\n")
+    _git(repo, "add", "evidence.txt")
+    _git(repo, "commit", "-m", "add review evidence")
+    before = _snapshot_tree(repo)
+    provider = scripted_provider([_read_tool_turn(Path("evidence.txt")), _echo_tool_result_turn()])
+    shared_xdg = tmp_path / "shared-xdg"
+    _write_home_config(shared_xdg, provider_name="fakeprov", model_name="fake-model", base_url=provider.base_url)
+    shared_config = shared_xdg / ".config/opencode/opencode.json"
+    config_before = shared_config.read_bytes()
+    # Reproduce a runner that sets XDG independently of the caller's HOME.
+    for variable, relative in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"), ("XDG_CACHE_HOME", ".cache"), ("XDG_STATE_HOME", ".local/state")):
+        monkeypatch.setenv(variable, str(shared_xdg / relative))
+    cfg = home / "llm_config.toml"
+    cfg.write_text('[backend]\norder = ["opencode-review"]\n' '[backend_pr_adversarial_validation]\norder = ["opencode-review"]\n' '[backends.opencode-review]\nbackend_type = "opencode"\nmodel = "fakeprov/fake-model"\ntimeout = 60\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AUTO_CODER_CONFIG_PATH", str(cfg))
+    monkeypatch.setenv("AUTOCODER_OPENCODE_CLI", opencode_cli)
+    monkeypatch.setattr(OpenCodeClient, "supports_supervised_local_turn", True)
+    monkeypatch.chdir(repo)
+    reset_llm_config()
+    try:
+        manager = resolve_adversarial_validation_availability("pr", execution_cwd=str(repo)).backend_manager
+        assert manager is not None
+        answer = manager._run_llm_cli("Read evidence.txt without modifying it.", is_noedit=True)
+        assert "SENTINEL_SUPERVISED_REVIEW_41" in answer
+        assert manager.get_last_backend_and_model() == ("opencode-review", "fakeprov/fake-model")
+        assert len(provider.requests) >= 2
+        assert _snapshot_tree(repo) == before
+        assert shared_config.read_bytes() == config_before
+        assert sorted(path.relative_to(shared_xdg).as_posix() for path in shared_xdg.rglob("*")) == [".config", ".config/opencode", ".config/opencode/opencode.json"]
+    finally:
+        reset_llm_config()

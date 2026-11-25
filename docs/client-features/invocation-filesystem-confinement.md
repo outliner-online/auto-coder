@@ -6,7 +6,11 @@ For Codex, references below to mandatory cgroup/root-controller setup and
 all-descendant settlement are superseded by non-root launch and direct-process
 completion with descendant termination explicitly unproven. Filesystem/no-edit,
 invocation identity, and independent continuation authorization remain required.
-OpenCode and other backends retain their existing completion policy.
+Non-root OpenCode no-edit turns also use direct-process completion without a
+writable cgroup or worker identity switch. Their existing no-edit agent,
+filesystem policy, and result validation remain mandatory. Editable and
+root-controlled OpenCode turns and other backends retain their existing
+completion policies.
 
 The invocation process supervisor always installs `LandlockFilesystemPolicy` before
 it releases a provider executable; an explicit policy set that does not establish
@@ -25,6 +29,12 @@ provided invocation-owned runtime roots. Every supervised backend receives a pri
 HOME and TMPDIR for CLI startup/cache state, including OpenCode no-edit reviews;
 source and Git metadata remain read-only. Shared provider configuration is copied
 into the private home rather than granting writes to the controller's home.
+OpenCode's XDG configuration, data, cache, and state paths are rebound to that
+same private home for preflight and provider execution. Effective shared
+configuration and authentication inputs are copied from absolute XDG paths
+when set, otherwise from HOME defaults. Shared native session databases are
+not copied. The OpenCode executable version probe uses disposable XDG paths,
+rather than initializing directories in the shared provider home.
 OpenCode's native session state lives beside its private repository and remains
 available across authorized retained-root continuation. It is removed with that
 workspace after all owners release it, rather than after each CLI command.
