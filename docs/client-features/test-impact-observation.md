@@ -2,9 +2,10 @@
 
 Issue #2794 adds a **manual-only, advisory** diagnostic. It does not select,
 skip, retry or reorder tests, reduce mandatory CI wall time, change PR comments,
-or authorize merging, publication or repair. Ordinary `PR Tests`, `scripts/test.sh`
-and local `pytest` commands do not enable coverage contexts or load the impact
-observer. Neither this diagnostic nor its job is a required check.
+or authorize merging, publication or repair. `Test Source for Runtime`, `scripts/test.sh`
+and local `pytest` commands do not enable impact coverage contexts or load the
+impact observer. The source workflow's combined line-coverage report is separate
+from this manual diagnostic. Neither this diagnostic nor its job is a required check.
 
 ## Manual invocation
 

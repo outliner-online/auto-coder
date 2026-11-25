@@ -889,7 +889,10 @@ pr:
     can prove that an identified suite or target executed successfully, but it
     never proves semantic Requirement coverage and never hides a demonstrated
     violation. The canonical repository suite identity is the verified workflow
-    path `.github/workflows/pr-tests.yml`, not a display name. A dynamic target
+    path `.github/workflows/test-source-for-runtime.yml`, not a display name.
+    For PR runs, the current head identifies the observed run while the suite
+    executes GitHub's merge candidate for that head and base; do not describe
+    this as execution of the standalone head checkout. A dynamic target
     must be exactly `all`, or one repository-relative existing `.py` file or
     directory inside `tests/`; an optional pytest `::` selector is allowed only
     after a `.py` file and every selector component must be non-empty. Never use

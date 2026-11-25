@@ -58,13 +58,13 @@ def test_native_teardown_error(teardown_error):
 """
 
 
-def _source_project(tmp_path: Path, source: str) -> tuple[Path, Path, ShardContext]:
+def _source_project(tmp_path: Path, source: str, *, pytest_args: tuple[str, ...] = ("-m", "not opencode_live")) -> tuple[Path, Path, ShardContext]:
     project, context_path, previous = _project(tmp_path, source=source)
     context = ShardContext(
         previous.repository,
         "source-required-v1",
         previous.checkout_sha,
-        ("-m", "not opencode_live"),
+        pytest_args,
         previous.harness_files,
         (),
         {
@@ -73,14 +73,17 @@ def _source_project(tmp_path: Path, source: str) -> tuple[Path, Path, ShardConte
             "run_id": "7",
             "run_attempt": "1",
             "planning_attempt": "source-plan-7-1",
-            "event_sha": "f" * 40,
+            "event_sha": previous.checkout_sha,
+            "event_name": "pull_request",
+            "run_head_sha": "f" * 40,
         },
     )
     context_path.write_text(json.dumps(context.json()), encoding="utf-8")
     return project, context_path, context
 
 
-def _apply_receipt(project: Path, plan_path: Path, shard: int, receipt: Path, *, attempt: str = "1") -> subprocess.CompletedProcess[str]:
+def _apply_receipt(project: Path, plan_path: Path, shard: int, receipt: Path, *, attempt: str = "1", event_name: str = "pull_request", env_patch: dict[str, str] | None = None, pytest_args: tuple[str, ...] | None = None) -> subprocess.CompletedProcess[str]:
+    plan, _raw = read_plan(plan_path)
     return _run(
         project,
         "-m",
@@ -92,9 +95,8 @@ def _apply_receipt(project: Path, plan_path: Path, shard: int, receipt: Path, *,
         f"--ci-plan={plan_path}",
         f"--ci-shard={shard}",
         f"--source-ci-receipt={receipt}",
-        "-m",
-        "not opencode_live",
-        env_patch={"GITHUB_WORKFLOW": "Test Source for Runtime", "GITHUB_JOB": "complete-source-shard", "GITHUB_RUN_ID": "7", "GITHUB_RUN_ATTEMPT": attempt, "GITHUB_SHA": "f" * 40},
+        *(plan.context.pytest_args if pytest_args is None else pytest_args),
+        env_patch={"GITHUB_WORKFLOW": "Test Source for Runtime", "GITHUB_JOB": "complete-source-shard", "GITHUB_RUN_ID": "7", "GITHUB_RUN_ATTEMPT": attempt, "GITHUB_SHA": plan.context.checkout_sha, "GITHUB_EVENT_NAME": event_name, **(env_patch or {})},
     )
 
 
@@ -113,12 +115,25 @@ class _AggregateEvidence:
     def request(self, method: str, path: str, payload: dict[str, object] | None = None) -> GitDataResponse:
         assert method == "GET" and payload is None
         if path == "actions/runs/7/attempts/1":
-            return GitDataResponse(200, {"id": 7, "run_attempt": 1, "head_sha": self.plan.context.checkout_sha, "path": WORKFLOW_PATH, "status": "in_progress", "run_started_at": _iso(0)})
+            return GitDataResponse(
+                200,
+                {
+                    "id": 7,
+                    "run_attempt": 1,
+                    "head_sha": self.plan.context.origin["run_head_sha"],
+                    "event": self.plan.context.origin["event_name"],
+                    "path": WORKFLOW_PATH,
+                    "status": "in_progress",
+                    "run_started_at": _iso(0),
+                },
+            )
         if path == "actions/runs/7/attempts/1/jobs?per_page=100":
             jobs: list[dict[str, object]] = [{"name": PLAN_JOB_NAME, "run_id": 7, "run_attempt": 1, "id": 100, "status": "completed", "conclusion": "success", "started_at": _iso(1), "completed_at": _iso(5), "steps": []}]
             steps = [{"name": name, "conclusion": "success"} for name in ("Prepare Python-only management test fixture", "Install Chromium", "Verify real headless Chromium", "Run complete required source selection")]
             for shard in range(1, len(self.plan.shards) + 1):
-                jobs.append({"name": f"Complete source tests ({shard}/{len(self.plan.shards)})", "run_id": 7, "run_attempt": 1, "id": 100 + shard, "status": "completed", "conclusion": "success", "started_at": _iso(0), "completed_at": _iso(172_800), "steps": steps})
+                receipt_path = self.artifacts / _artifact_name(7, 1, shard) / "receipt.json"
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                jobs.append({"name": f"Complete source tests ({shard}/{len(self.plan.shards)})", "run_id": 7, "run_attempt": 1, "id": 100 + shard, "status": "completed", "conclusion": "success", "started_at": receipt["started_at"], "completed_at": receipt["completed_at"], "steps": steps})
             return GitDataResponse(200, {"total_count": len(jobs), "jobs": jobs})
         if path.startswith("actions/runs/7/attempts/1/jobs?per_page=100&page="):
             return GitDataResponse(200, {"total_count": len(self.plan.shards) + 1, "jobs": []})
@@ -135,6 +150,114 @@ def _run_aggregate(monkeypatch: pytest.MonkeyPatch, plan_path: Path, artifacts: 
     monkeypatch.setattr(check_source_test_shards, "GitHubGitDataClient", lambda _token, _repository: evidence)
     monkeypatch.setattr(sys, "argv", ["check_source_test_shards.py", "--repository", evidence.plan.context.repository, "--run-id", "7", "--run-attempt", "1", "--source-sha", evidence.plan.context.checkout_sha, "--plan", str(plan_path), "--artifacts", str(artifacts)])
     check_source_test_shards.main()
+
+
+def _create_source_context(project: Path, output: Path, source_sha: str, event_sha: str, run_head_sha: str, event_name: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        project,
+        str(Path(__file__).resolve().parents[1] / "scripts/source_ci_runtime.py"),
+        "--log-dir",
+        str(output.parent / "context-logs"),
+        "context",
+        "--repository",
+        "owner/repo",
+        "--source-sha",
+        source_sha,
+        "--event-sha",
+        event_sha,
+        "--run-head-sha",
+        run_head_sha,
+        "--event-name",
+        event_name,
+        "--run-id",
+        "7",
+        "--run-attempt",
+        "1",
+        "--output",
+        str(output),
+    )
+
+
+@pytest.mark.parametrize("event_name", ["pull_request", "push", "workflow_dispatch"])
+def test_actual_context_cli_records_tested_event_and_actions_head_separately(event_name: str, tmp_path: Path) -> None:
+    project, _context_path, previous = _project(tmp_path, source="def test_one(): assert True\n")
+    output = tmp_path / "source-context.json"
+    head = "f" * 40 if event_name == "pull_request" else previous.checkout_sha
+
+    result = _create_source_context(project, output, previous.checkout_sha, previous.checkout_sha, head, event_name)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed = ShardContext.read(output)
+    assert observed.checkout_sha == observed.origin["event_sha"] == previous.checkout_sha
+    assert observed.origin["run_head_sha"] == head
+    assert observed.origin["event_name"] == event_name
+    assert observed.pytest_args == ("-m", "not opencode_live", "--cov=src/auto_coder", "--cov-report=")
+
+
+@pytest.mark.parametrize("defect", ["foreign_checkout", "foreign_event", "invalid_head", "push_foreign_head", "dispatch_foreign_head"])
+def test_actual_context_cli_refuses_misbound_source_identity_before_writing(defect: str, tmp_path: Path) -> None:
+    project, _context_path, previous = _project(tmp_path, source="def test_one(): assert True\n")
+    output = tmp_path / "refused-context.json"
+    source = event = previous.checkout_sha
+    head = "f" * 40
+    event_name = "pull_request"
+    if defect == "foreign_checkout":
+        source = event = head
+    elif defect == "foreign_event":
+        event = head
+    elif defect == "invalid_head":
+        head = "not-a-commit"
+    elif defect == "push_foreign_head":
+        event_name = "push"
+    elif defect == "dispatch_foreign_head":
+        event_name = "workflow_dispatch"
+
+    result = _create_source_context(project, output, source, event, head, event_name)
+
+    assert result.returncode != 0
+    assert not output.exists()
+
+
+def test_coverage_instrumentation_is_bound_to_plan_and_native_receipts(tmp_path: Path) -> None:
+    from coverage import Coverage
+
+    pytest_args = ("-m", "not opencode_live", "--cov=tests", "--cov-report=")
+    project, context_path, _context = _source_project(tmp_path, "def test_one(): assert True\n", pytest_args=pytest_args)
+    plan_path = tmp_path / "instrumented-plan.json"
+    instrumentation = {"PYTEST_PLUGINS": "pytest_cov.plugin"}
+    collected = _run(
+        project,
+        str(Path(__file__).resolve().parents[1] / "scripts/plan_ci_shards.py"),
+        "--context",
+        str(context_path),
+        "--output",
+        str(plan_path),
+        "--log-dir",
+        str(tmp_path / "plan-logs"),
+        "--duration-policy",
+        "source-required-v1",
+        "--",
+        *pytest_args,
+        env_patch={**instrumentation, "COVERAGE_FILE": str(tmp_path / "collection.coverage")},
+    )
+    assert collected.returncode == 0, collected.stdout + collected.stderr
+    coverage_file = tmp_path / "shard.coverage"
+    receipt = tmp_path / "instrumented-receipt.json"
+
+    applied = _apply_receipt(project, plan_path, 1, receipt, env_patch={**instrumentation, "COVERAGE_FILE": str(coverage_file)})
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    plan, _raw = read_plan(plan_path)
+    validate_receipt(json.loads(receipt.read_text(encoding="utf-8")), plan, 1, 7, 1)
+    assert coverage_file.is_file()
+    coverage = Coverage(data_file=str(coverage_file))
+    coverage.load()
+    assert any(path.endswith("tests/test_sample.py") and coverage.get_data().lines(path) for path in coverage.get_data().measured_files())
+    uninstrumented = tmp_path / "uninstrumented-receipt.json"
+    rejected = _apply_receipt(project, plan_path, 1, uninstrumented, env_patch=instrumentation, pytest_args=("-m", "not opencode_live"))
+    assert rejected.returncode != 0
+    assert "pytest selector/configuration mismatch" in rejected.stdout + rejected.stderr
+    assert not uninstrumented.exists()
 
 
 def test_actual_source_plan_and_all_native_shard_receipts_cover_exact_full_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,6 +321,9 @@ def test_wrong_producing_attempt_and_receipt_overwrite_are_native_failures(tmp_p
     wrong = _apply_receipt(project, plan_path, 1, tmp_path / "wrong.json", attempt="2")
     assert wrong.returncode != 0
     assert "actual producing Actions identity" in wrong.stderr
+    wrong_event = _apply_receipt(project, plan_path, 1, tmp_path / "wrong-event.json", event_name="push")
+    assert wrong_event.returncode != 0
+    assert "actual producing Actions identity" in wrong_event.stderr
     receipt = tmp_path / "preexisting.json"
     receipt.write_text("user data", encoding="utf-8")
     overwritten = _apply_receipt(project, plan_path, 1, receipt)

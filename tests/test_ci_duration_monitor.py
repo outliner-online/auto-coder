@@ -504,6 +504,9 @@ class MonitorTests(unittest.TestCase):
     def test_configured_repository_paths_and_template_exist(self) -> None:
         root = Path(monitor.__file__).resolve().parents[1]
         workflows = monitor.read_config(root / ".github" / "ci-duration-monitor.json")
+        self.assertNotIn(".github/workflows/pr-tests.yml", [workflow.path for workflow in workflows])
+        source = next(workflow for workflow in workflows if workflow.path == ".github/workflows/test-source-for-runtime.yml")
+        self.assertEqual([family.key for family in source.families], ["complete-source"])
         for workflow in workflows:
             self.assertTrue((root / workflow.path).is_file(), workflow.path)
             for family in workflow.families:

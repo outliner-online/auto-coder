@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parents[1]
@@ -66,18 +68,50 @@ raise SystemExit(0)
     return [json.loads(line) for line in effects.read_text(encoding="utf-8").splitlines()]
 
 
-def test_pr_workflow_has_one_unconditional_normal_profile() -> None:
-    text = (ROOT / ".github/workflows/pr-tests.yml").read_text(encoding="utf-8")
+def test_source_workflow_has_one_unconditional_complete_profile() -> None:
+    assert not (ROOT / ".github/workflows/pr-tests.yml").exists()
+    text = (ROOT / ".github/workflows/test-source-for-runtime.yml").read_text(encoding="utf-8")
     workflow = yaml.safe_load(text)
 
-    assert set(workflow["jobs"]) == {"lint", "tests-shard", "tests"}
-    shard = workflow["jobs"]["tests-shard"]
-    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4]}}
-    assert "if" not in shard and "needs" not in shard
-    assert workflow["jobs"]["tests"]["needs"] == ["lint", "tests-shard"]
-    assert workflow["jobs"]["tests"]["if"] == "always()"
-    assert "continue-on-error" not in text
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"source-quality", "source-plan", "complete-source-shard", "complete-source-tests"}
+    for name in ("source-quality", "source-plan", "complete-source-shard"):
+        assert "if" not in jobs[name]
+        assert jobs[name].get("continue-on-error") is not True
+    shard = jobs["complete-source-shard"]
+    assert shard["strategy"] == {"fail-fast": False, "matrix": "${{ fromJSON(needs.source-plan.outputs.matrix) }}"}
+    assert shard["needs"] == ["source-plan"]
+    assert set(jobs["complete-source-tests"]["needs"]) == {"source-quality", "source-plan", "complete-source-shard"}
+    assert jobs["complete-source-tests"]["if"] == "always()"
     assert "ci-maintenance" not in text
+
+
+@pytest.mark.parametrize("dependency", ["source-quality", "source-plan", "complete-source-shard"])
+@pytest.mark.parametrize("outcome", ["success", "failure", "skipped", "cancelled"])
+def test_source_aggregate_rejects_every_unsuccessful_prerequisite(dependency: str, outcome: str, _use_real_commands) -> None:
+    """Evaluate the production reject condition and execute its actual shell body."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/test-source-for-runtime.yml").read_text(encoding="utf-8"))
+    aggregate = workflow["jobs"]["complete-source-tests"]
+    reject = next(step for step in aggregate["steps"] if step.get("name", "").startswith("Reject an unsuccessful"))
+    condition = reject["if"]
+    for name in ("source-quality", "source-plan", "complete-source-shard"):
+        result = outcome if name == dependency else "success"
+        condition = condition.replace(f"needs.{name}.result", shlex.quote(result))
+    assert "needs." not in condition
+    assert reject.get("continue-on-error") is not True
+
+    # Actions' string inequality and disjunction have the same result in this
+    # Bash conditional. Read both from the workflow so a missing prerequisite
+    # or a failure-swallowing command changes the observed process status.
+    result = subprocess.run(
+        ["/bin/bash", "-Eeuo", "pipefail", "-c", f"if [[ {condition} ]]; then\n{reject['run']}\nfi"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == (0 if outcome == "success" else 1), result.stdout + result.stderr
 
 
 def test_publish_beta_always_enters_tested_build_path() -> None:

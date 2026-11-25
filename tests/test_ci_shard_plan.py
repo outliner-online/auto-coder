@@ -702,7 +702,7 @@ def test_source_workflow_opt_in_is_bounded_to_complete_source() -> None:
     assert "--ci-shard=${{ matrix.shard }}" in source
     assert "-m 'not opencode_live'" in source
     assert "--source-ci-receipt=" in source
-    for path in (ROOT / ".github/workflows/pr-tests.yml", ROOT / ".github/workflows/supervisor-integration-tests.yml"):
+    for path in (ROOT / ".github/workflows/supervisor-integration-tests.yml", ROOT / ".github/workflows/opencode-live-tests.yml"):
         assert "--duration-policy source-required-v1" not in path.read_text()
 
 

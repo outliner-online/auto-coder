@@ -357,7 +357,7 @@ def test_workflow_is_manual_only_complete_and_not_a_required_check() -> None:
     assert any("uv run python -m scripts.summarize_test_impact" in step.get("run", "") for step in steps)
     assert "--cov-context=test" in (ROOT / "scripts/run_test_impact_observation.py").read_text(encoding="utf-8")
     assert PROFILE_SELECTOR in (ROOT / "scripts/run_test_impact_observation.py").read_text(encoding="utf-8")
-    assert "--cov-context" not in (ROOT / ".github/workflows/pr-tests.yml").read_text(encoding="utf-8")
+    assert "--cov-context" not in (ROOT / ".github/workflows/test-source-for-runtime.yml").read_text(encoding="utf-8")
     assert "ci_impact_plugin" not in (ROOT / "tests/conftest.py").read_text(encoding="utf-8")
 
 

@@ -2472,9 +2472,12 @@ class CIRepairSubmission:
 class CloudReviewRepairResult(list[str]):
     """Actions plus fresh delivery confirmation or an explicit processing wait."""
 
-    def __init__(self, values: Sequence[str] = (), delivered: bool = False, deferred: bool = False, retry_not_before: Optional[float] = None, route_disposition: str = "CLOUD", local_phase: str = "", wait_reason: str = "", diagnostic_reason: str = "") -> None:
+    def __init__(
+        self, values: Sequence[str] = (), delivered: bool = False, deferred: bool = False, retry_not_before: Optional[float] = None, route_disposition: str = "CLOUD", local_phase: str = "", wait_reason: str = "", diagnostic_reason: str = "", acknowledged_no_actionable_feedback: bool = False
+    ) -> None:
         super().__init__(values)
         self.diagnostic_reason = diagnostic_reason
+        self.acknowledged_no_actionable_feedback = acknowledged_no_actionable_feedback
         self.wait_reason = wait_reason
         self.delivered = delivered
         self.deferred = deferred
@@ -6344,6 +6347,7 @@ def _coordinate_pr_review(
     forced_same_head_revalidation = False
     saved_review_revalidation = False
     gate_retained_resume = False
+    acknowledged_repair_threads: Tuple[ReviewThread, ...] = ()
     reviewer_login = ""
     claimed_review_threads: Sequence[Any] = ()
 
@@ -6487,6 +6491,11 @@ def _coordinate_pr_review(
                         repair_kwargs["config"] = config
                     repair_result = _delegate_cloud_review_thread_repair(repo_name, pr_data, **repair_kwargs)
                     actions.extend(repair_result)
+                    if revalidating_older_head_threads and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.acknowledged_no_actionable_feedback:
+                        # A completed ordinary correction must not starve an
+                        # authentic finding's first review on the current head.
+                        # These ordinary roots retain their merge/closure gates.
+                        acknowledged_repair_threads = repair_threads
                     if repair_result.deferred and processing_status is not None:
                         processing_status.error = None
                         processing_status.outcome = PRProcessingOutcome.DEFERRED
@@ -6503,13 +6512,26 @@ def _coordinate_pr_review(
                     if repair_result.local_phase in {"completed_no_change", "awaiting_validation"} and adv_enabled:
                         _verify_pending_local_correction(github_client, repo_name, pr_data, config, actions, processing_status, retry_failed=force_adversarial_validation)
                         return actions
-            if not force_admission_eligible:
+            if not force_admission_eligible and not acknowledged_repair_threads:
                 return actions
-            # REQ-001/REQ-009: an explicit --force run still reaches a fresh
-            # current-head validation attempt; the remaining unresolved
-            # threads above are not eligible for independent rereview and
-            # remain a merge blocker (enforced again at the merge boundary).
-            actions.append(f"Continuing to forced adversarial validation for PR #{pr_number} despite unresolved review threads (explicit --force); merge remains blocked while they are unresolved")
+            if acknowledged_repair_threads:
+                actions.append(f"Continuing to current-head adversarial validation for PR #{pr_number} after acknowledged cloud review repairs; ordinary unresolved threads remain merge blockers")
+                _record_pr_stage(
+                    pr_number,
+                    "pr.review-thread-gate",
+                    f"pr#{pr_number} review-thread gate",
+                    Outcome.DEFERRED,
+                    {
+                        "effect": "acknowledged-review-reassessment",
+                        "examined_head": head_sha_for_gate,
+                        "blocking_thread_ids": [thread.id for thread in acknowledged_repair_threads],
+                        "revalidation_thread_ids": [thread.thread_id for thread in claimed_thread_state.claimed if thread.revalidation_after_head_change],
+                    },
+                )
+            else:
+                # Explicit force and saved-result admission retain their existing
+                # authority; unresolved roots are checked again before merge.
+                actions.append(f"Continuing to forced adversarial validation for PR #{pr_number} despite unresolved review threads (explicit --force); merge remains blocked while they are unresolved")
 
         claimed_review_threads = claimed_thread_state.claimed
         if claimed_review_threads:
@@ -6707,6 +6729,8 @@ def _coordinate_pr_review(
                 if post_codex_thread_state.has_blocking_unresolved and thread_gate_enabled:
                     if force_adversarial_validation:
                         actions.append(f"Continuing to forced adversarial validation for PR #{pr_number} despite unresolved review threads observed after Codex review completion (explicit --force); merge remains blocked while they are unresolved")
+                    elif acknowledged_repair_threads and post_codex_thread_state.blocking_unresolved == acknowledged_repair_threads:
+                        actions.append(f"Continuing to current-head adversarial validation for PR #{pr_number} after Codex review confirmed unchanged acknowledged repairs; ordinary unresolved threads remain merge blockers")
                     else:
                         actions.append(f"Codex review completed for PR #{pr_number} with unresolved review threads; adversarial validation not started")
                         return actions
@@ -11004,7 +11028,19 @@ def _delegate_cloud_review_thread_repair(
         # an existing confirmed/pending delivery identity for this diagnostic.
         has_unclassified_reply = bool(diagnostic_candidates - delivered - indeterminate - remote_delivered)
         reason = "unclassified_same_author_reply" if has_unclassified_reply else "actionable_feedback_already_delivered"
-        return CloudReviewRepairResult([f"{provider_label} review repair was already requested for PR #{pr_number} for all current actionable feedback"], deferred=True, diagnostic_reason=reason)
+        acknowledged_no_actionable_feedback = (
+            bool(implementer_login)
+            and acknowledged
+            and not findings
+            and all(not thread.is_resolved and not thread.comments_truncated and addressed_through_by_thread[thread.id] == len(thread.comments) - 1 for thread in unresolved_threads)
+            and not any(identity.startswith(prefix) for identity in indeterminate)
+        )
+        return CloudReviewRepairResult(
+            [f"{provider_label} review repair was already requested for PR #{pr_number} for all current actionable feedback"],
+            deferred=True,
+            diagnostic_reason=reason,
+            acknowledged_no_actionable_feedback=acknowledged_no_actionable_feedback,
+        )
 
     blocked = [(thread, comment, identity) for thread, comment, identity in pending if identity in indeterminate]
     pending = [(thread, comment, identity) for thread, comment, identity in pending if identity not in indeterminate]

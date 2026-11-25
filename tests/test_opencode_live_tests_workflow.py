@@ -23,7 +23,7 @@ from scripts.prepare_opencode_image import prepare_image
 
 ROOT = Path(__file__).resolve().parents[1]
 OPENCODE_LIVE_WORKFLOW = ROOT / ".github/workflows/opencode-live-tests.yml"
-PR_WORKFLOW = ROOT / ".github/workflows/pr-tests.yml"
+SOURCE_WORKFLOW = ROOT / ".github/workflows/test-source-for-runtime.yml"
 PREPARE_SCRIPT = ROOT / "scripts/prepare_opencode_image.py"
 
 MIGRATED_CONTAINER_SCENARIOS = {
@@ -132,26 +132,27 @@ def test_live_step_preserves_exact_selection_and_native_failure(tmp_path, bounde
         assert "native-live-failure-oracle" in result.stdout
 
 
-def test_ordinary_pr_tests_workflow_budgets_preserved():
-    """REQ-007, AS-006: Ordinary PR Tests configuration and supervisor budgets remain intact."""
-    pr_workflow = _workflow(PR_WORKFLOW)
-    assert pr_workflow["name"] == "PR Tests"
-    shard = pr_workflow["jobs"]["tests-shard"]
-    assert shard["strategy"] == {"fail-fast": False, "matrix": {"group": [1, 2, 3, 4]}}
-
-    test_step = next(s for s in shard["steps"] if s["name"].startswith("Run tests with coverage"))
-    assert test_step["timeout-minutes"] == 24
-    assert "--attempt-timeout 480" in test_step["run"]
-    assert "--termination-grace 10" in test_step["run"]
-    assert "--max-attempts 2" in test_step["run"]
-    assert "scripts/run_pr_test_shard.py" in test_step["run"]
+def test_complete_source_selection_excludes_only_opencode_live():
+    """The unified source gate keeps OpenCode live work in its dedicated workflow."""
+    workflow = _workflow(SOURCE_WORKFLOW)
+    assert workflow["name"] == "Test Source for Runtime"
+    shard = workflow["jobs"]["complete-source-shard"]
+    assert shard["strategy"]["fail-fast"] is False
+    test_step = next(s for s in shard["steps"] if s.get("name") == "Run complete required source selection")
+    command = shlex.split(test_step["run"])
+    selector_index = command.index("-m", command.index("pytest") + 1)
+    assert command[selector_index + 1] == "not opencode_live"
+    assert not {"-k", "--keyword", "--deselect", "--lf", "--last-failed"}.intersection(arg.split("=", 1)[0] for arg in command)
+    assert "--source-ci-receipt=" in test_step["run"]
+    assert not test_step.get("continue-on-error", False)
+    assert not any("prepare_opencode_image.py" in s.get("run", "") for s in shard["steps"])
 
 
 def test_selection_conserves_coverage_across_boundary():
     """AS-001, REQ-001, REQ-002, REQ-003: Collect ordinary vs live selections on checked-out suite."""
-    # 1. Collect ordinary PR test selection (not browser and not opencode_live)
+    # Collect the same non-live profile as the complete source gate.
     ord_collect = subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/test_opencode_container_runtime.py", "-m", "not browser and not opencode_live", "--collect-only", "-q"],
+        [sys.executable, "-m", "pytest", "tests/test_opencode_container_runtime.py", "-m", "not opencode_live", "--collect-only", "-q"],
         cwd=ROOT,
         capture_output=True,
         text=True,
