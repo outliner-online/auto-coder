@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Optional, cast
+from unittest.mock import DEFAULT, Mock
 
 from .github_controller_auth import ControllerIdentity
 from .llm_backend_config import resolve_repo_override_path
@@ -192,7 +193,14 @@ def resolve_controller_author_set(
 
 
 def _explicit_method(client: object, name: str) -> bool:
-    return callable(getattr(type(client), name, None)) or name in getattr(client, "__dict__", {})
+    if callable(getattr(type(client), name, None)) or name in getattr(client, "__dict__", {}):
+        return True
+    # A bare MagicMock manufactures every requested attribute.  Treat only a
+    # deliberately configured child method as an injected client capability.
+    if isinstance(client, Mock):
+        child = client._mock_children.get(name)
+        return isinstance(child, Mock) and child._mock_return_value is not DEFAULT
+    return False
 
 
 def controller_author_set_for_client(client: object, repo_name: str, *, home: Optional[Path] = None) -> ControllerAuthorSet:
