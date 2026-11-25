@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 import time
@@ -7,11 +8,13 @@ from multiprocessing import Event, Process
 from pathlib import Path
 from threading import Event as ThreadEvent
 from threading import Thread
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from loguru import logger
 
+from auto_coder.automation_config import AutomationConfig
+from auto_coder.automation_engine import AutomationEngine
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.issue_job_finalizer import IssueJobFinalizer
 from auto_coder.issue_job_workspace import IssueJobSource, IssueJobWorkspaceProducer
@@ -49,6 +52,77 @@ def _record_settled_observation(store, record, workspace: Path, executor: str) -
         readiness=MuseContinuationReadiness.CONTROLLER_READY,
     )
     assert persist_muse_observation(store, record.job_id, executor, observation)
+
+
+def test_producer_reclamation_is_provider_neutral_and_failure_is_hourly(tmp_path: Path, monkeypatch, _use_real_commands) -> None:
+    """The production producer owns cleanup independently of Jules listing."""
+    store, finalized, _ = _published(tmp_path, 2892)
+    live_source_root = tmp_path / "live-source"
+    live_source_root.mkdir()
+    source, _ = repository(live_source_root)
+    live_claim = claim(store, 2893)
+    live_workspace, _, _ = IssueJobWorkspaceProducer(store, tmp_path / "workspaces")._prepare(
+        live_claim,
+        IssueJobSource("owner/repo", source, "main", "issue-2893"),
+    )
+
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    engine._next_local_job_workspace_reclamation = 0.0
+    monkeypatch.setattr(engine, "_check_and_handle_closed_branch", lambda *_: True)
+    monkeypatch.setattr(engine, "_claim_jules_session_list_refresh", lambda: False)
+    monkeypatch.setattr("auto_coder.automation_engine.check_for_updates_and_restart", lambda: update_checks.append("update"))
+    monkeypatch.setattr("auto_coder.speculative_jules_lifecycle.consume_due_speculative_work", lambda *_: None)
+
+    store_reads = 0
+
+    def temporarily_unavailable_store():
+        nonlocal store_reads
+        store_reads += 1
+        if store_reads == 1:
+            raise OSError("temporary local job store failure")
+        return store
+
+    monkeypatch.setattr(engine, "_get_local_job_store", temporarily_unavailable_store)
+
+    real_reclaim = reclaim_finalized_workspaces
+    cleanup_calls = []
+
+    def scoped_reclaim(local_store):
+        cleanup_calls.append(local_store)
+        return real_reclaim(local_store, retention_seconds=0, issue_root=tmp_path / "workspaces")
+
+    monkeypatch.setattr("auto_coder.local_job_workspace_cleanup.reclaim_finalized_workspaces", scoped_reclaim)
+    update_checks = []
+    sleeps = 0
+
+    async def sleep_or_wake(_seconds: float) -> bool:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            # An early PR wake must not immediately retry the failed cleanup.
+            return True
+        if sleeps == 2:
+            # Advance to the next normal maintenance opportunity.
+            engine._next_local_job_workspace_reclamation = 0.0
+            return False
+        raise KeyboardInterrupt("producer test complete")
+
+    monkeypatch.setattr(engine, "_sleep_or_wake", sleep_or_wake)
+
+    errors = []
+    sink = logger.add(lambda message: errors.append(str(message)), level="ERROR")
+    try:
+        with pytest.raises(KeyboardInterrupt, match="producer test complete"):
+            asyncio.run(engine._producer_loop("owner/repo"))
+    finally:
+        logger.remove(sink)
+
+    assert store_reads == 2
+    assert cleanup_calls == [store]
+    assert len(update_checks) == 3
+    assert any("Local job workspace reclamation failed" in message and "temporary local job store failure" in message for message in errors)
+    assert not finalized.workspace.parent.exists()
+    assert live_workspace.parent.is_dir()
 
 
 def test_issue_producer_binds_external_ownership_evidence(tmp_path: Path, _use_real_commands) -> None:

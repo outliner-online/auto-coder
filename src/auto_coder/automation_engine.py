@@ -246,6 +246,7 @@ def _reconciliation_request_error(error: BaseException) -> GitHubRequestError | 
 
 
 JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS = 60 * 60
+LOCAL_JOB_WORKSPACE_RECLAMATION_INTERVAL_SECONDS = 60 * 60
 MAINTENANCE_INTERVAL_SECONDS = 60
 CAPACITY_STATE_CHECK_INTERVAL_SECONDS = 1
 REFILL_RETRY_INTERVAL_SECONDS = 60
@@ -1093,6 +1094,10 @@ class AutomationEngine:
         # a cycle advances this deadline before any HTTP work begins, so a
         # failed listing cannot cause a hot retry on the next loop iteration.
         self._next_jules_session_list_refresh = time.monotonic() + JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS
+        # Local workspace reclamation has its own provider-neutral cadence.
+        # Claiming advances the deadline before store access so a broken store
+        # cannot turn the producer into a cleanup retry hot loop.
+        self._next_local_job_workspace_reclamation = time.monotonic() + LOCAL_JOB_WORKSPACE_RECLAMATION_INTERVAL_SECONDS
 
         # Note: Report directories are created per repository,
         # so we do not create one here (created in _save_report)
@@ -1312,6 +1317,15 @@ class AutomationEngine:
             return False
 
         self._next_jules_session_list_refresh = now + JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS
+        return True
+
+    def _claim_local_job_workspace_reclamation(self) -> bool:
+        """Claim the hourly provider-neutral local workspace cleanup cycle."""
+        now = time.monotonic()
+        if now < self._next_local_job_workspace_reclamation:
+            return False
+
+        self._next_local_job_workspace_reclamation = now + LOCAL_JOB_WORKSPACE_RECLAMATION_INTERVAL_SECONDS
         return True
 
     def notify_pr_merged_or_closed(self) -> None:
@@ -3688,17 +3702,27 @@ class AutomationEngine:
                 if self.is_draining:
                     return
 
+                if self._claim_local_job_workspace_reclamation():
+                    from .local_job_workspace_cleanup import reclaim_finalized_workspaces
+
+                    try:
+                        await self._run_local_critical(
+                            "local job workspace reclamation",
+                            reclaim_finalized_workspaces,
+                            self._get_local_job_store(),
+                        )
+                    except Exception as exc:
+                        # The claimed deadline intentionally remains advanced:
+                        # report the failed opportunity, then let unrelated
+                        # producer maintenance run and retry on the next cycle.
+                        logger.opt(exception=True).error("Local job workspace reclamation failed: {}", exc)
+
+                    if self.is_draining:
+                        return
+
                 if not skip_jules_sessions and self._claim_jules_session_list_refresh():
                     # All list-dependent maintenance shares this cycle's fresh listing.
                     invalidate_jules_sessions_cache()
-
-                    from .local_job_workspace_cleanup import reclaim_finalized_workspaces
-
-                    await self._run_local_critical(
-                        "local job workspace reclamation",
-                        reclaim_finalized_workspaces,
-                        self._get_local_job_store(),
-                    )
 
                     # Resume sessions
                     heartbeat("producer:jules-sessions", f"iteration {iteration}")
