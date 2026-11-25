@@ -476,6 +476,9 @@ class JulesClient(CloudTaskClientBase):
             logger.info(f"🤖 POST {url}")
             logger.info("=" * 60)
 
+            from .controller_identity_history import assert_active_controller_authority
+
+            assert_active_controller_authority()
             response = self.session.post(url, json=payload, timeout=self.timeout)
 
             logger.info("=" * 60)

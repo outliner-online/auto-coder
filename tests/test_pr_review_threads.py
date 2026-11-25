@@ -4,6 +4,7 @@ import pytest
 
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.github_app_reviewer import ReviewPublicationResult
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.pr_processor import (
     PRActionList,
     _get_review_thread_gate_state,
@@ -287,6 +288,8 @@ def test_handle_pr_merge_blocks_on_unresolved_threads(mock_merge_pr, mock_has_un
     pr_data = {"number": 123, "head": {"ref": "feature-123", "sha": "head-123"}, "labels": []}
 
     client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+    client.get_pr_comments_strict.return_value = []
     client.get_pr_review_threads_strict.return_value = []
     actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
 
@@ -340,6 +343,8 @@ def test_handle_pr_merge_proceeds_when_all_threads_resolved(mock_merge_pr, mock_
     pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-123", "sha": "123abc456"}}
 
     client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+    client.get_pr_comments_strict.return_value = []
     client.get_pull_request.return_value = {"head": {"sha": "123abc456"}}
     client.get_pr_review_threads_strict.return_value = []
     actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})

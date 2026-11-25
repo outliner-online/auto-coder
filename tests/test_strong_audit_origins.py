@@ -20,6 +20,7 @@ from auto_coder.automation_engine import AutomationEngine
 from auto_coder.durable_repair_allowance import RepairAllowanceLedger
 from auto_coder.entity_invalidation import EntityIdentity
 from auto_coder.github_app_reviewer import ReviewPublicationResult
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.llm_backend_config import active_repo_context
 from auto_coder.pr_processor import _two_tier_gate_inputs
 from auto_coder.pr_review_execution import ReviewExecutionResult
@@ -87,6 +88,7 @@ class OriginScenario:
         self.issue = {"number": 99, "state": "open", "title": "Contract", "updated_at": "2026-11-01T00:00:00Z", "body": "## Requirements\nREQ-001: Preserve the gate.", "labels": []}
         self.github = GitHubClient("test-token")
         monkeypatch.setattr(GitHubClient, "_instance", self.github)
+        monkeypatch.setattr(self.github, "get_authenticated_controller_identity", lambda _repo=None: ControllerIdentity("auto-coder-bot", account_id=20))
         monkeypatch.setattr(self.github, "_read_issue_resource", lambda _repo, _number, relation="", **kw: ([] if relation != "parent" else None) if relation else dict(self.issue))
         for method in ("get_pull_request", "get_pull_request_metadata_strict"):
             monkeypatch.setattr(self.github, method, lambda *a, **kw: dict(self.pr))

@@ -571,7 +571,10 @@ class GitHubRequestGovernor:
 
     def observe(self, outcome: GitHubRequestOutcome) -> None:
         """Durably record completion and throttle evidence before another admission."""
-        if outcome.provenance is not RequestProvenance.NETWORK or outcome.delivery is DeliveryCertainty.DEFINITELY_NOT_SENT:
+        if outcome.provenance is not RequestProvenance.NETWORK:
+            return
+        if outcome.delivery is DeliveryCertainty.DEFINITELY_NOT_SENT:
+            self._release_unsent_reservation(outcome)
             return
         origin = normalize_api_origin(outcome.context.api_origin)
         with self._lock:
@@ -617,6 +620,36 @@ class GitHubRequestGovernor:
                 self._diagnostic(origin, outcome.context.attempt_id, "deferred", "governor_transaction_contention", now + ADMISSION_POLL_CEILING_SECONDS, now)
             except Exception as exc:
                 self._fail_closed(f"outcome persistence failed: {exc}", origin)
+            self._wake_waiters()
+
+    def _release_unsent_reservation(self, outcome: GitHubRequestOutcome) -> None:
+        """Release only this owner's admission refused by a final wire guard.
+
+        A request refused before admission has no reservation and is a no-op.
+        A reserved but unsent request consumes neither rate budget nor mutation
+        spacing, and must not strand the sole in-flight slot.
+        """
+        origin = normalize_api_origin(outcome.context.api_origin)
+        with self._lock:
+            if self._unavailable_reason is not None or self._connection is None:
+                return
+            try:
+                now = self._now()
+                with self._transaction():
+                    released = self._connection.execute(
+                        "DELETE FROM reservations WHERE origin=? AND attempt_id=? AND owner_id=? AND resolved=0 AND recovered=0",
+                        (origin, outcome.context.attempt_id, self._incarnation_id),
+                    ).rowcount
+                    self._checkpoint(now)
+                self._pending_outcomes.pop(outcome.context.attempt_id, None)
+                if released:
+                    self._diagnostic(origin, outcome.context.attempt_id, "released", "definitely_not_sent", now, now, incarnation=self._incarnation_id)
+            except GovernorTransactionContention:
+                self._pending_outcomes[outcome.context.attempt_id] = outcome
+                now = self._now()
+                self._diagnostic(origin, outcome.context.attempt_id, "deferred", "governor_transaction_contention", now + ADMISSION_POLL_CEILING_SECONDS, now)
+            except Exception as exc:
+                self._fail_closed(f"unsent reservation release failed: {exc}", origin)
             self._wake_waiters()
 
     def admit_blocking(self, context: GitHubRequestContext) -> bool:

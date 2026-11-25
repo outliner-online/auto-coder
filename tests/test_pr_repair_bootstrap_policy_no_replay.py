@@ -22,6 +22,7 @@ from auto_coder.automation_config import AutomationConfig
 from auto_coder.ci_repair_authority import CIRepairAuthority
 from auto_coder.claude_usage_checker import ClaudeStrictUsageObservation
 from auto_coder.cloud_manager import CloudManager, CloudTaskBinding
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.issue_processor import (
     _process_issue_claude_routine_mode,
     _process_issue_codex_cloud_mode,
@@ -65,6 +66,14 @@ def cloud_home(tmp_path, monkeypatch):
     monkeypatch.setattr("auto_coder.cloud_manager.Path.home", lambda: tmp_path)
     monkeypatch.setattr("auto_coder.cloud_run.Path.home", lambda: tmp_path)
     return tmp_path
+
+
+def _feedback_github_client() -> MagicMock:
+    """Supply authoritative identity and a complete empty receipt conversation."""
+    client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
+    client.get_pr_comments_strict.return_value = []
+    return client
 
 
 def _minimal_prompts_yaml(directory, *, short_sentinel: str, boundary_sentinel: str, parent_sentinel: str):
@@ -310,7 +319,7 @@ def test_codex_cloud_initial_dispatch_then_every_repair_origin_omits_replayed_po
         "head": {"ref": "codex/issue-1865", "sha": "head-1"},
         "base": {"ref": "main"},
     }
-    github_client = MagicMock()
+    github_client = _feedback_github_client()
     github_client.get_pr_comments.return_value = []
     github_client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(
         head_ref="codex/issue-1865",
@@ -363,7 +372,7 @@ def test_codex_cloud_initial_dispatch_then_every_repair_origin_omits_replayed_po
 
     # --- Adversarial-validation corrective feedback -----------------------------
     finding = "### Auto-Coder adversarial finding\n\nConcrete counterexample about empty input"
-    review_client = MagicMock()
+    review_client = _feedback_github_client()
     review_client.get_pr_comments.return_value = []
     review_client.get_pr_review_threads_strict.return_value = [ReviewThread(id="PRRT_adv", comments=[ReviewThreadComment(database_id=2, body=finding)])]
     with (
@@ -386,7 +395,7 @@ def test_jules_initial_dispatch_then_review_repair_omits_replayed_policies(cloud
     tmp_path = cloud_home
     issue = {"number": 1902, "title": "Fix null pointer", "body": "Body", "labels": [], "state": "open", "user": {"login": "reporter"}}
     session_id = "jules-session-bootstrap"
-    github_client = MagicMock()
+    github_client = _feedback_github_client()
 
     with (
         patch("auto_coder.issue_processor.get_commit_log", return_value="commit context"),
@@ -625,7 +634,7 @@ def test_restart_with_new_effective_policy_config_does_not_refresh_existing_sess
             "base": {"ref": "main"},
         }
         thread = ReviewThread(id="PRRT_restart", comments=[ReviewThreadComment(database_id=1, body="Newer repair detail", author_login="reviewer")])
-        github_client = MagicMock()
+        github_client = _feedback_github_client()
         github_client.get_pr_comments.return_value = []
         github_client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(
             head_ref="codex/issue-1910",
@@ -673,7 +682,7 @@ def test_pre_upgrade_session_without_process_local_prompt_history_is_still_a_con
         "base": {"ref": "main"},
     }
     thread = ReviewThread(id="PRRT_legacy", comments=[ReviewThreadComment(database_id=1, body="Legacy session repair detail", author_login="reviewer")])
-    github_client = MagicMock()
+    github_client = _feedback_github_client()
     github_client.get_pr_comments.return_value = []
     github_client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata("codex/issue-1920", "head-1", "main")
     with (
@@ -700,7 +709,7 @@ def test_second_repair_round_on_a_new_head_still_omits_replayed_policies(tmp_pat
         "base": {"ref": "main"},
     }
     pr_data_round_2 = dict(pr_data_round_1, head={"ref": "codex/issue-2", "sha": "head-round-2"})
-    github_client = MagicMock()
+    github_client = _feedback_github_client()
     github_client.get_pr_comments.return_value = []
     github_client.get_pull_request_repair_metadata_strict.side_effect = [
         PullRequestRepairMetadata("codex/issue-2", "head-round-1", "main"),
@@ -759,7 +768,7 @@ def test_rejected_followup_delivery_remains_retryable_not_terminal(tmp_path):
         "base": {"ref": "main"},
     }
     thread = ReviewThread(id="PRRT_x", comments=[ReviewThreadComment(database_id=1, body="finding")])
-    github_client = MagicMock()
+    github_client = _feedback_github_client()
     github_client.get_pr_comments.return_value = []
     github_client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata("codex/issue-3", "head-1", "main")
 

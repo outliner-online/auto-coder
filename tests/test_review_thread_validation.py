@@ -83,6 +83,22 @@ def _closure_client(claimed=None):
     return client
 
 
+def _observe_legacy_marker_effects(client):
+    """Make the legacy marker fixture confirm accepted native mutations."""
+    threads = client.get_pr_review_threads_strict.return_value
+
+    def unresolve(thread_id):
+        next(thread for thread in threads if thread.id == thread_id).is_resolved = False
+
+    def reply(_repo, _pr, root_id, body):
+        target = next(thread for thread in threads if thread.comments[0].database_id == root_id)
+        reply_id = max(comment.database_id or 0 for thread in threads for comment in thread.comments) + 1
+        target.comments.append(_comment(client.get_authenticated_user_login.return_value, body, database_id=reply_id))
+
+    client.unresolve_review_thread.side_effect = unresolve
+    client.reply_to_review_thread.side_effect = reply
+
+
 class TestClassifyReviewThreads:
     def test_schema_shaped_two_tier_status_is_substantive(self):
         root = _comment(CODEX_LOGIN, "finding", database_id=1)
@@ -1083,6 +1099,7 @@ class TestRetryPendingStaleReviewThreadRollbacks:
         registry = StaleReviewThreadRegistry(path=tmp_path / "stale.json")
         registry.record_rollback_transition("owner/repo", 42, "thread-1", 101)
         client = MagicMock()
+        client.get_authenticated_user_login.return_value = "auto-coder[bot]"
         client.get_pr_review_threads_strict.return_value = threads
 
         still_blocked = retry_pending_stale_review_thread_rollbacks(client, "owner/repo", 42, registry=registry)
@@ -1219,6 +1236,8 @@ class TestRetryPendingStaleReviewThreadRollbacks:
             )
         ]
 
+        _observe_legacy_marker_effects(client)
+
         still_blocked = retry_pending_stale_review_thread_rollbacks(client, "owner/repo", 42, registry=registry)
 
         assert still_blocked == []
@@ -1242,6 +1261,8 @@ class TestRetryPendingStaleReviewThreadRollbacks:
                 ],
             )
         ]
+
+        _observe_legacy_marker_effects(client)
 
         still_blocked = retry_pending_stale_review_thread_rollbacks(client, "owner/repo", 42, registry=registry)
 
@@ -1280,6 +1301,7 @@ class TestRetryPendingStaleReviewThreadRollbacks:
     def test_no_pending_blockers_is_a_no_op(self, tmp_path):
         registry = StaleReviewThreadRegistry(path=tmp_path / "stale.json")
         client = MagicMock()
+        client.get_authenticated_user_login.return_value = "auto-coder[bot]"
         client.get_pr_review_threads_strict.return_value = []
 
         still_blocked = retry_pending_stale_review_thread_rollbacks(client, "owner/repo", 42, registry=registry)
@@ -1389,6 +1411,8 @@ class TestRetryPendingStaleReviewThreadRollbacks:
             )
         ]
 
+        _observe_legacy_marker_effects(client)
+
         still_blocked = retry_pending_stale_review_thread_rollbacks(client, "owner/repo", 42, registry=registry)
 
         assert still_blocked == []
@@ -1476,6 +1500,8 @@ class TestRetryPendingStaleReviewThreadRollbacks:
             )
         ]
 
+        _observe_legacy_marker_effects(client)
+
         still_blocked = retry_pending_stale_review_thread_rollbacks(client, "owner/repo", 42, registry=registry)
 
         assert still_blocked == []
@@ -1504,6 +1530,8 @@ class TestRetryPendingStaleReviewThreadRollbacks:
                 ],
             )
         ]
+
+        _observe_legacy_marker_effects(client)
 
         still_blocked = retry_pending_stale_review_thread_rollbacks(client, "owner/repo", 42, registry=registry)
 
@@ -1553,6 +1581,8 @@ class TestRetryPendingStaleReviewThreadRollbacks:
                 ],
             )
         ]
+
+        _observe_legacy_marker_effects(client)
 
         still_blocked = retry_pending_stale_review_thread_rollbacks(client, "owner/repo", 42, registry=registry)
 

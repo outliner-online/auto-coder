@@ -260,6 +260,7 @@ class Flow:
         client.resolve_review_thread.side_effect = lambda thread: self._set_thread_resolved(thread, self.resolve_on_approve)
         client.unresolve_review_thread.side_effect = lambda thread: self._set_thread_resolved(thread, False)
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
         client.get_pr_reviews_strict.return_value = []
         client.get_pull_request_head_sha_strict.side_effect = lambda *_a, **_k: self.live_head or self.head
         client.get_pull_request.side_effect = lambda *_a, **_k: {"head": {"sha": self.live_head or self.head}, "base": {"sha": self.current_base}}

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.dispatch_claim_store import DispatchClaimStore, DispatchIdentity, DispatchOutcome
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.pr_processor import _handle_pr_merge
 from auto_coder.util.github_action import GitHubActionsStatusResult, WorkflowDispatchResult
 from tests.ci_observation_fakes import authoritative_ci_status
@@ -31,6 +32,7 @@ class _StrictMetadataGithubClient:
         self._head_shas = list(head_shas)
         self._strict_calls = 0
         self._fallback = MagicMock()
+        self._fallback.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
         self._fallback.get_pr_review_threads_strict.return_value = []
 
     def get_pull_request_metadata_strict(self, repo_name, pr_number):
@@ -53,6 +55,7 @@ class _StrictMetadataGithubClient:
 class TestWorkflowTrigger(unittest.TestCase):
     def setUp(self):
         self.github_client = MagicMock()
+        self.github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
         self.github_client.get_pr_review_threads_strict.return_value = []
         self.config = AutomationConfig()
         self.repo_name = "owner/repo"

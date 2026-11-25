@@ -12,23 +12,27 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event
 from typing import Callable
+from urllib.parse import unquote
 
 import httpx
 import pytest
 
 from auto_coder.adversarial_validator import ReviewThreadDisposition
 from auto_coder.canonical_pr_blocker_ledger import BlockerAdmissionPayload, BlockerAlias, BlockerDisposition, CanonicalPRBlockerLedger, CorrectionScope, QualifiedRequirement
+from auto_coder.controller_identity_history import controller_author_set_for_client
 from auto_coder.review_feedback_marker import REVIEW_ADDRESSED_MARKER
-from auto_coder.review_thread_closure_receipt import ClosureReceipt, ClosureReceiptError, closure_receipt_lock, observe_closure_receipt, put_receipt
+from auto_coder.review_thread_closure_receipt import ClosureReceipt, ClosureReceiptError, closure_receipt_lock, format_receipt, observe_closure_receipt, put_receipt
 from auto_coder.review_thread_validation import (
     STALE_BLOCKER_CLEARED_MARKER,
     STALE_BLOCKER_MARKER,
     StaleReviewThreadRegistry,
     StaleReviewThreadResolutionError,
+    _find_github_stale_blockers,
     classify_review_threads,
     reopen_review_threads_after_publication_failure,
     resolve_addressed_review_threads,
     retry_pending_stale_review_thread_rollbacks,
+    substantive_discussion_digest,
 )
 from auto_coder.util import gh_cache
 from auto_coder.util.gh_cache import GitHubClient
@@ -77,6 +81,8 @@ class ReviewThreadTransport:
     """A persistent external boundary, independent of controller reconstruction."""
 
     comments: list[RemoteComment] = field(default_factory=_initial_comments)
+    controller_login: str = CONTROLLER_LOGIN
+    controller_account_id: int = 701
     head: str = HEAD
     resolved: bool = False
     posts: list[str] = field(default_factory=list)
@@ -108,7 +114,21 @@ class ReviewThreadTransport:
         return self
 
     def get_authenticated(self):
-        return {"login": CONTROLLER_LOGIN, "id": 701}
+        return {"login": self.controller_login, "id": self.controller_account_id}
+
+    def __call__(self, path, *, verb, headers):
+        assert verb == "GET" and headers["Cache-Control"] == "no-cache"
+        if path == "/user":
+            return self.get_authenticated()
+        assert path.startswith("/users/")
+        return self.get_by_username(unquote(path[len("/users/") :]))
+
+    def get_by_username(self, login):
+        if login.casefold() == CONTROLLER_LOGIN.casefold():
+            return {"login": CONTROLLER_LOGIN, "id": 701}
+        if login.casefold() == self.controller_login.casefold():
+            return self.get_authenticated()
+        raise RuntimeError("Configured historical account lookup is unavailable")
 
     def append_comment(self, body, *, login=CONTROLLER_LOGIN, author_id=701):
         comment = RemoteComment(max(item.database_id for item in self.comments) + 1, body, login, author_id)
@@ -121,7 +141,7 @@ class ReviewThreadTransport:
             self.before_create()
         self.posts.append(body)
         self.effects.append("reply")
-        comment = self.append_comment(body)
+        comment = self.append_comment(body, login=self.controller_login, author_id=self.controller_account_id)
         if self.lose_posts:
             self.lose_posts -= 1
             raise RuntimeError("Reply accepted; response lost")
@@ -133,7 +153,6 @@ class ReviewThreadTransport:
         if self.reject_patches:
             raise RuntimeError("Comment update refused before send")
         target = next(comment for comment in self.comments if comment.database_id == comment_id)
-        assert target.login == CONTROLLER_LOGIN
         target.body = body
         target.updated += 1
         self.effects.append("patch")
@@ -225,7 +244,7 @@ class ReceiptScenario:
             client.get_pr_review_threads_strict(REPOSITORY, PR_NUMBER),
             {REVIEWER_ID},
             snapshot=snapshot,
-            authenticated_controller_login=client.get_authenticated_user_login(),
+            authenticated_controller_login=controller_author_set_for_client(client, REPOSITORY),
         )
         assert classification.blocking_unresolved_count == 0
         return classification.claimed
@@ -265,6 +284,7 @@ def receipt_scenario(monkeypatch, tmp_path):
     monkeypatch.setattr(gh_cache, "_caching_request", transport.caching_request)
     monkeypatch.setattr(gh_cache, "_strict_request", transport.strict_request)
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     ledger = CanonicalPRBlockerLedger(db_path=tmp_path / "ledger.db")
     snapshot = ledger.initialize_namespace(API_ORIGIN, REPOSITORY, PR_NUMBER)
     blocker, _snapshot = ledger.admit_blocker(
@@ -1017,3 +1037,230 @@ def test_active_legacy_and_new_receipt_are_both_retired_after_rollback(receipt_s
 
     assert retry_pending_stale_review_thread_rollbacks(scenario.client(), REPOSITORY, PR_NUMBER, registry=scenario.registry()) == []
     assert scenario.transport.effects == effects_after_cleanup
+
+
+def _migrate_controller(scenario: ReceiptScenario, *, declare_history: bool = True, empty_history: bool = False) -> None:
+    configuration = scenario.path / ".auto-coder" / "owner" / "repo" / "config.toml"
+    configuration.parent.mkdir(parents=True, exist_ok=True)
+    body = "[github-app-auto-coder-controller]\napp_id = 123\n"
+    if declare_history:
+        logins = "[]" if empty_history else f'["{CONTROLLER_LOGIN}"]'
+        body += f"[github-controller-identity-history]\nprior_logins = {logins}\n"
+    configuration.write_text(body, encoding="utf-8")
+    scenario.transport.controller_login = "next-controller[bot]"
+    scenario.transport.controller_account_id = 801
+
+
+def test_prior_controller_pending_receipt_settles_original_reply_and_projection(receipt_scenario):
+    scenario = receipt_scenario
+    before_digest = scenario.claimed()[0].discussion_evidence_digest
+    assert scenario.close().resolved_thread_ids == (THREAD_ID,)
+    original = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID).receipt
+    assert original is not None
+    remote = next(comment for comment in scenario.transport.comments if comment.database_id == original.comment_id)
+    remote.body = format_receipt(replace(original, phase="PENDING"))
+    _migrate_controller(scenario)
+    effects_before = list(scenario.transport.effects)
+
+    assert retry_pending_stale_review_thread_rollbacks(scenario.client(), REPOSITORY, PR_NUMBER, registry=scenario.registry()) == []
+
+    observed = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID)
+    assert observed.receipt == original
+    assert observed.publisher_login == CONTROLLER_LOGIN
+    assert observed.publisher_account_id == 701
+    assert observed.author_set is not None
+    assert substantive_discussion_digest(observed.thread, observed.author_set) == before_digest
+    assert scenario.transport.effects == effects_before + ["patch"]
+    assert len(scenario.transport.posts) == 1
+    assert remote.login == CONTROLLER_LOGIN and remote.author_id == 701
+
+
+def test_prior_controller_receipt_permission_denial_retains_exact_pending_operation(receipt_scenario):
+    scenario = receipt_scenario
+    assert scenario.close().resolved_thread_ids == (THREAD_ID,)
+    original = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID).receipt
+    assert original is not None
+    pending = replace(original, phase="ROLLBACK_REQUIRED")
+    remote = next(comment for comment in scenario.transport.comments if comment.database_id == original.comment_id)
+    remote.body = format_receipt(pending)
+    _migrate_controller(scenario)
+    scenario.transport.reject_patches = True
+
+    assert retry_pending_stale_review_thread_rollbacks(scenario.client(), REPOSITORY, PR_NUMBER, registry=scenario.registry()) == [THREAD_ID]
+    assert observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID).receipt == pending
+    assert len(scenario.transport.posts) == 1
+    assert scenario.transport.effects.count("unresolve") == 1
+    assert scenario.registry().marker_cleanup_pending_for_pr(REPOSITORY, PR_NUMBER) == {THREAD_ID: ROOT_ID}
+
+    scenario.transport.reject_patches = False
+    assert retry_pending_stale_review_thread_rollbacks(scenario.client(), REPOSITORY, PR_NUMBER, registry=scenario.registry()) == []
+    recovered = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID)
+    assert recovered.receipt == replace(original, phase="ROLLED_BACK")
+    assert recovered.publisher_account_id == 701
+    assert scenario.transport.effects.count("unresolve") == 1
+    assert len(scenario.transport.posts) == 1
+
+
+@pytest.mark.parametrize("phase", ["PENDING", "RESOLVED", "ROLLED_BACK"])
+@pytest.mark.parametrize("changed_field", ["operation_key", "validated_head_sha"])
+def test_historical_reply_cannot_be_rebound_even_with_edit_permission(receipt_scenario, phase, changed_field):
+    scenario = receipt_scenario
+    assert scenario.close().resolved_thread_ids == (THREAD_ID,)
+    original = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID).receipt
+    assert original is not None
+    original = replace(original, phase=phase)
+    remote = next(comment for comment in scenario.transport.comments if comment.database_id == original.comment_id)
+    remote.body = format_receipt(original)
+    scenario.transport.resolved = phase == "RESOLVED"
+    _migrate_controller(scenario)
+    client = scenario.client()
+    observed = observe_closure_receipt(client, REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID)
+    effects_before = list(scenario.transport.effects)
+    desired = replace(original, **{changed_field: NEXT_HEAD if changed_field == "validated_head_sha" else "different-operation"})
+
+    with closure_receipt_lock(REPOSITORY, PR_NUMBER), pytest.raises(ClosureReceiptError, match="historical controller receipt cannot be rebound"):
+        put_receipt(client, observed, desired)
+
+    assert observe_closure_receipt(client, REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID).receipt == original
+    assert scenario.transport.effects == effects_before
+    assert len(scenario.transport.posts) == 1
+
+
+@pytest.mark.parametrize("candidate", ["relevant", "different-repository", "different-pr", "different-thread", "quoted", "malformed"])
+def test_unknown_history_blocks_only_exact_relevant_receipt_candidates(receipt_scenario, candidate):
+    scenario = receipt_scenario
+    historical = ClosureReceipt(repository=REPOSITORY, pr_number=PR_NUMBER, thread_id=THREAD_ID, root_comment_database_id=ROOT_ID, operation_key="old-operation", validated_head_sha=HEAD)
+    if candidate == "different-repository":
+        historical = replace(historical, repository="owner/other")
+    elif candidate == "different-pr":
+        historical = replace(historical, pr_number=PR_NUMBER + 1)
+    elif candidate == "different-thread":
+        historical = replace(historical, thread_id="another-thread")
+    body = format_receipt(historical)
+    if candidate == "quoted":
+        body = "A review discusses this example:\n" + body
+    elif candidate == "malformed":
+        body = body.splitlines()[0] + "\nThis ordinary message has no receipt envelope."
+    scenario.transport.append_comment(body)
+    _migrate_controller(scenario, declare_history=False)
+    client = scenario.client()
+
+    if candidate == "relevant":
+        with pytest.raises(ClosureReceiptError, match="historical closure receipt authorship"):
+            observe_closure_receipt(client, REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID)
+    else:
+        assert observe_closure_receipt(client, REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID).receipt is None
+    assert scenario.transport.posts == []
+    assert scenario.transport.patches == []
+    assert scenario.transport.effects == []
+
+
+def test_current_and_prior_owned_receipts_remain_ambiguous(receipt_scenario):
+    scenario = receipt_scenario
+    assert scenario.close().resolved_thread_ids == (THREAD_ID,)
+    original = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID).receipt
+    assert original is not None
+    _migrate_controller(scenario)
+    scenario.transport.append_comment(format_receipt(original), login=scenario.transport.controller_login, author_id=scenario.transport.controller_account_id)
+    effects_before = list(scenario.transport.effects)
+
+    with pytest.raises(ClosureReceiptError, match="Multiple owned closure receipts"):
+        observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID)
+
+    assert scenario.transport.effects == effects_before
+    assert len(scenario.transport.posts) == 1
+
+
+def test_prior_controller_stale_blocker_is_reconciled_and_cleared_by_active_controller(receipt_scenario):
+    scenario = receipt_scenario
+    scenario.transport.resolved = True
+    historical = scenario.transport.append_comment(f"{STALE_BLOCKER_MARKER}\n<!-- resolved-against-head: {HEAD} -->")
+    original_body = historical.body
+    scenario.transport.head = NEXT_HEAD
+    _migrate_controller(scenario)
+    client = scenario.client()
+
+    pending, incomplete, _threads = _find_github_stale_blockers(client, REPOSITORY, PR_NUMBER)
+    assert pending == {THREAD_ID: ROOT_ID} and incomplete == []
+    assert retry_pending_stale_review_thread_rollbacks(client, REPOSITORY, PR_NUMBER, registry=scenario.registry()) == []
+
+    assert historical.body == original_body and historical.author_id == 701
+    cleared = [comment for comment in scenario.transport.comments if comment.body == STALE_BLOCKER_CLEARED_MARKER]
+    assert len(cleared) == 1
+    assert cleared[0].author_id == 801
+    assert scenario.transport.effects == ["unresolve", "reply"]
+    assert _find_github_stale_blockers(client, REPOSITORY, PR_NUMBER)[:2] == ({}, [])
+
+
+def test_fresh_app_without_history_can_close_when_no_historical_candidate_exists(receipt_scenario):
+    scenario = receipt_scenario
+    _migrate_controller(scenario, declare_history=False)
+
+    assert scenario.close().resolved_thread_ids == (THREAD_ID,)
+    observed = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID)
+    assert observed.publisher_account_id == 801
+    assert len(scenario.transport.posts) == 1
+
+
+def test_complete_empty_history_keeps_copied_receipt_as_discussion(receipt_scenario):
+    scenario = receipt_scenario
+    historical = ClosureReceipt(repository=REPOSITORY, pr_number=PR_NUMBER, thread_id=THREAD_ID, root_comment_database_id=ROOT_ID, operation_key="copied-operation", validated_head_sha=HEAD)
+    copied = scenario.transport.append_comment(format_receipt(historical))
+    original_body = copied.body
+    _migrate_controller(scenario, empty_history=True)
+
+    assert scenario.close().resolved_thread_ids == (THREAD_ID,)
+    assert copied.body == original_body
+    assert len(scenario.transport.posts) == 1
+    assert all(comment_id != copied.database_id for comment_id, _body in scenario.transport.patches)
+
+
+@pytest.mark.parametrize("namespace", ["repository", "api_origin"])
+def test_semantic_projection_rejects_wrong_namespace_attributed_receipt(receipt_scenario, namespace):
+    scenario = receipt_scenario
+    historical = ClosureReceipt(repository=REPOSITORY, pr_number=PR_NUMBER, thread_id=THREAD_ID, root_comment_database_id=ROOT_ID, operation_key="historical-operation", validated_head_sha=HEAD)
+    historical = replace(historical, **{namespace: "owner/other" if namespace == "repository" else "https://github.example"})
+    scenario.transport.append_comment(format_receipt(historical))
+    _migrate_controller(scenario)
+    client = scenario.client()
+    thread = client.get_pr_review_threads_strict(REPOSITORY, PR_NUMBER)[0]
+
+    with pytest.raises(ClosureReceiptError, match="different API/repository/PR namespace"):
+        substantive_discussion_digest(thread, controller_author_set_for_client(client, REPOSITORY))
+
+    assert scenario.transport.effects == []
+
+
+def test_prior_controller_association_does_not_grant_review_root_authority(receipt_scenario):
+    scenario = receipt_scenario
+    scenario.transport.comments[0].login = CONTROLLER_LOGIN
+    scenario.transport.comments[0].author_id = 701
+    _migrate_controller(scenario)
+    client = scenario.client()
+
+    classified = classify_review_threads(client.get_pr_review_threads_strict(REPOSITORY, PR_NUMBER), {REVIEWER_ID}, authenticated_controller_login=controller_author_set_for_client(client, REPOSITORY))
+
+    assert classified.claimed == ()
+    assert classified.blocking_unresolved_count == 1
+    assert scenario.transport.effects == []
+
+
+def test_unavailable_identity_before_publication_rollback_retains_obligation(receipt_scenario):
+    scenario = receipt_scenario
+    claimed = scenario.claimed()
+    assert scenario.close(claimed=claimed).resolved_thread_ids == (THREAD_ID,)
+    before = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID).receipt
+    effects_before = list(scenario.transport.effects)
+    scenario.transport.controller_account_id = 0
+
+    assert reopen_review_threads_after_publication_failure(scenario.client(), REPOSITORY, PR_NUMBER, claimed, (THREAD_ID,), registry=scenario.registry()) == []
+    assert scenario.registry().rollback_transitions_for_pr(REPOSITORY, PR_NUMBER) == {THREAD_ID: ROOT_ID}
+    assert scenario.transport.effects == effects_before
+
+    scenario.transport.controller_account_id = 701
+    assert retry_pending_stale_review_thread_rollbacks(scenario.client(), REPOSITORY, PR_NUMBER, registry=scenario.registry()) == []
+    observed = observe_closure_receipt(scenario.client(), REPOSITORY, PR_NUMBER, THREAD_ID, ROOT_ID)
+    assert before is not None
+    assert observed.receipt == replace(before, phase="ROLLED_BACK")
+    assert scenario.transport.effects.count("unresolve") == 1
+    assert len(scenario.transport.posts) == 1

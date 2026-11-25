@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Protocol
 
+from .controller_identity_history import ControllerIdentityHistoryError, assert_active_controller_authority
 from .pr_review_cycle import ClosureCertification, Finding, StrongAuditRound
 from .runtime_locks import ensure_lock_directory, lock_path
 
@@ -339,6 +340,8 @@ class ReviewEffectRepository:
                 raise PermissionError("only the reservation owner may record its external outcome")
             if current.status in {CONFIRMED, RETIRED}:
                 return current
+            if outcome.status == CONFIRMED:
+                assert_active_controller_authority()
             raw.update(status=outcome.status, receipt=outcome.receipt, reason=outcome.reason, updated_at=time.time())
             self._write(state)
             return self._from_raw(raw)
@@ -360,6 +363,15 @@ class ReviewEffectExecutor:
         is_current: Callable[[], bool],
     ) -> EffectOperation:
         operation = self.repository.reserve(payload, purpose, destination, self.owner_token)
+
+        def record_outcome(outcome: EffectAttempt) -> EffectOperation:
+            try:
+                return self.repository.record(operation.operation_id, self.owner_token, outcome)
+            except ControllerIdentityHistoryError as exc:
+                # Keep an accepted native receipt available for reconciliation,
+                # without settling it under a changed authority snapshot.
+                return self.repository.record(operation.operation_id, self.owner_token, EffectAttempt(UNCERTAIN, receipt=outcome.receipt, reason=str(exc)))
+
         with self.repository.execution_lock(operation.operation_id) as acquired:
             if not acquired:
                 return self.repository.get(operation.operation_id) or operation
@@ -371,7 +383,7 @@ class ReviewEffectExecutor:
             try:
                 if operation.status == UNCERTAIN:
                     outcome = transport.reconcile(operation)
-                    operation = self.repository.record(operation.operation_id, self.owner_token, outcome)
+                    operation = record_outcome(outcome)
                     if outcome.status != REJECTED:
                         return operation
                     # Positive absence permits replay, but authority may have
@@ -382,4 +394,4 @@ class ReviewEffectExecutor:
                 outcome = transport.send(operation)
             except Exception:
                 outcome = EffectAttempt(UNCERTAIN, reason="external transport failed before confirmation")
-            return self.repository.record(operation.operation_id, self.owner_token, outcome)
+            return record_outcome(outcome)

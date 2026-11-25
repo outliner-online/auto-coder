@@ -866,10 +866,13 @@ class TestPRMergeChecksInProgress:
 
         from src.auto_coder.automation_config import AutomationConfig, ProcessedPRResult, PRProcessingOutcome
         from src.auto_coder.entity_invalidation import DurableInvalidationQueue
+        from src.auto_coder.github_controller_auth import ControllerIdentity
         from src.auto_coder.pr_processor import _handle_pr_merge
 
         mock_unsafe.return_value = MagicMock(metadata_error=None, closed=False, authoritative_pr_data=None, actions=[])
         mock_gh = MagicMock()
+        mock_gh.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
+        mock_gh.get_pr_review_threads_strict.return_value = []
 
         db_path = tmp_path / "invalidation.sqlite3"
         queue = DurableInvalidationQueue(db_path)

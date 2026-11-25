@@ -71,6 +71,7 @@ from .claude_followup_waits import ClaudeFollowupHoldActive, get_claude_followup
 from .codex_cloud_task import canonical_codex_cloud_task_url, extract_codex_cloud_task_id, is_valid_codex_cloud_task_id
 from .codex_pr_attribution import AttributionDisposition, CodexPrAttributionRepository, resolve_codex_pr_origin, task_ids_from_text
 from .conflict_resolver import ConflictPublicationDisposition, _get_merge_conflict_info, resolve_merge_conflicts_with_llm, resolve_pr_merge_conflicts
+from .controller_identity_history import ControllerAttribution, ControllerAuthorSet, ControllerIdentityHistoryError, assert_active_controller_authority, controller_author_set_for_client, controller_authority_scope
 from .deferred_pr_validation import DeferredPRValidation, DeferredPRValidationStateError, DeferredPRValidationStore, deferred_validation_policy_identity
 from .dispatch_claim_store import DispatchIdentity, DispatchOutcome, get_dispatch_claim_store
 from .editable_review import ReviewChangesProduced, assert_review_workspace_unchanged, bind_editable_review, capture_review_workspace, publish_review_changes, resume_pending_review_publication
@@ -183,7 +184,7 @@ from .review_capture.pr_adversarial_audit import (
     record_reused,
 )
 from .review_feedback_marker import is_adjudication_feedback, reply_claims_review_addressed, reply_requests_review_correction
-from .review_thread_closure_receipt import ClosureReceipt, closure_receipt_lock, observe_closure_receipt, put_receipt
+from .review_thread_closure_receipt import CLOSURE_RECEIPT_PREFIX, ClosureReceipt, closure_receipt_lock, observe_closure_receipt, put_receipt
 from .review_thread_validation import (
     ClaimedReviewThread,
     StaleReviewThreadRegistry,
@@ -751,9 +752,7 @@ def _assert_ordinary_discussion_current(github_client: Any, repo_name: str, pr_n
     if not addressed:
         return
     threads = github_client.get_pr_review_threads_strict(repo_name, pr_number)
-    login = github_client.get_authenticated_user_login()
-    if not login:
-        raise ValueError("controller identity is unavailable")
+    login = controller_author_set_for_client(github_client, repo_name)
     by_id = {thread.id: thread for thread in threads}
     if len(by_id) != len(threads):
         raise ValueError("duplicate review-thread identity")
@@ -1436,9 +1435,7 @@ def _saved_correction_discussion_changes(github_client: Any, repo_name: str, pr_
     if len({thread.id for thread in threads}) != len(threads):
         raise ValueError("duplicate review-thread identity")
     reviewer = resolve_reviewer_app_identity(repo_name)
-    login = github_client.get_authenticated_user_login()
-    if not isinstance(login, str) or not login.strip():
-        raise ValueError("controller identity is unavailable")
+    login = controller_author_set_for_client(github_client, repo_name)
     prior = {item.thread_id: item.discussion_evidence_digest for item in result.thread_dispositions}
     selected = []
     for thread in threads:
@@ -1745,7 +1742,7 @@ class _GitHubClosureThreadTransport:
         if len(matches) != 1:
             return False
         try:
-            login = self.client.get_authenticated_user_login()
+            login = controller_author_set_for_client(self.client, self.payload.repository)
             actual = substantive_discussion_digest(matches[0], login)
             if expected and actual == expected:
                 return True
@@ -1771,6 +1768,13 @@ class _GitHubClosureThreadTransport:
             return False
 
     def reconcile(self, operation: EffectOperation) -> EffectAttempt:
+        try:
+            with controller_authority_scope(self.client, self.payload.repository):
+                return self._reconcile(operation)
+        except ControllerIdentityHistoryError as exc:
+            return EffectAttempt(UNCERTAIN, reason=str(exc))
+
+    def _reconcile(self, operation: EffectOperation) -> EffectAttempt:
         threads = self.client.get_pr_review_threads_strict(self.payload.repository, self.payload.pr_number)
         matches = [thread for thread in threads if thread.id == self.thread.id and thread.comments and thread.comments[0].database_id == self.thread.comments[0].database_id and thread.comments[0].body == self.thread.comments[0].body]
         if len(matches) != 1:
@@ -1787,8 +1791,9 @@ class _GitHubClosureThreadTransport:
                 receipt = observation.receipt
                 if receipt is None:
                     return EffectAttempt(CONFIRMED, self.thread.id)
-                if receipt.validated_head_sha != self.payload.target_head:
-                    return EffectAttempt(UNCERTAIN, reason="Resolved receipt belongs to another head")
+                prior_author = observation.author_set is not None and observation.author_set.classify(observation.publisher_account_id, observation.publisher_login, relevant=True) is ControllerAttribution.PRIOR
+                if receipt.validated_head_sha != self.payload.target_head or (prior_author and receipt.operation_key != self._receipt_key(root_id)):
+                    return EffectAttempt(UNCERTAIN, reason="Resolved receipt belongs to another head or historical operation")
                 if receipt.phase == "PENDING" and receipt.operation_key == self._receipt_key(root_id) and self.authorize():
                     observation = put_receipt(self.client, observation, replace(receipt, phase="RESOLVED"))
                     receipt = observation.receipt
@@ -1798,6 +1803,13 @@ class _GitHubClosureThreadTransport:
         return EffectAttempt(REJECTED, reason="Exact finding thread remains unresolved")
 
     def send(self, operation: EffectOperation) -> EffectAttempt:
+        try:
+            with controller_authority_scope(self.client, self.payload.repository):
+                return self._send(operation)
+        except ControllerIdentityHistoryError as exc:
+            return EffectAttempt(UNCERTAIN, reason=str(exc))
+
+    def _send(self, operation: EffectOperation) -> EffectAttempt:
         observed = self.reconcile(operation)
         if observed.status != REJECTED:
             return observed
@@ -1847,6 +1859,7 @@ class _GitHubClosureThreadTransport:
                 registry.record_rollback_transition(self.payload.repository, self.payload.pr_number, self.thread.id, root_id, receipt_operation_key=receipt.operation_key)
                 self.client.unresolve_review_thread(self.thread.id)
                 put_receipt(self.client, observation, replace(receipt, phase="ROLLED_BACK"))
+                assert_active_controller_authority()
                 registry.clear(self.payload.repository, self.thread.id)
                 return EffectAttempt(REJECTED, reason="Closure authority changed during resolution; thread reopened")
             put_receipt(self.client, observation, replace(receipt, phase="RESOLVED"))
@@ -1884,8 +1897,13 @@ def _consume_closure_thread_resolutions(payload: AcceptedReviewPayload, strong: 
             continue
         thread = matches[0]
         transport = _GitHubClosureThreadTransport(client, payload, thread, finding, authorize)
-        operation = executor.apply(payload, "finding-thread-resolution", f"github-thread:{thread.id}", transport, authorize)
-        observed = transport.reconcile(operation) if operation.status == CONFIRMED else None
+        try:
+            with controller_authority_scope(client, payload.repository):
+                operation = executor.apply(payload, "finding-thread-resolution", f"github-thread:{thread.id}", transport, authorize)
+                observed = transport.reconcile(operation) if operation.status == CONFIRMED else None
+        except ControllerIdentityHistoryError as exc:
+            unfinished.append({"thread_id": thread.id, "phase": "controller-authority", "reason": str(exc)})
+            continue
         if operation.status == CONFIRMED and observed is not None and observed.status == CONFIRMED:
             confirmed += 1
         else:
@@ -2655,6 +2673,34 @@ def _retire_closed_cloud_checkpoint(repository: str, pr_number: int) -> None:
         NoCommitRecovery(path).end_series(pr_number, "closed")
 
 
+_controller_feedback_state_path: ContextVar[Optional[Path]] = ContextVar("controller_feedback_state_path", default=None)
+
+
+@contextmanager
+def _controller_review_feedback_scope(github_client: Any, repo_name: str):
+    """Pin the controller declaration while retaining accepted provider evidence."""
+    with controller_authority_scope(github_client, repo_name):
+        token = _controller_feedback_state_path.set(_cloud_review_repair_state_path(repo_name))
+        try:
+            yield
+        finally:
+            _controller_feedback_state_path.reset(token)
+
+
+def _observe_feedback_send_acceptance(accepted: bool, identities: tuple[str, ...]) -> bool:
+    """Retain acceptance before authority-sensitive settlement can fail."""
+    state_path = _controller_feedback_state_path.get()
+    if accepted and state_path is not None and identities:
+        try:
+            _record_observed_review_feedback(state_path, set(identities))
+        except OSError as exc:
+            # The pre-send reservation remains uncertain even when durable
+            # acceptance storage is unavailable. Never permit a blind replay.
+            logger.warning("Could not retain observed feedback acceptance: {}", exc)
+        assert_active_controller_authority()
+    return accepted
+
+
 class _NativeFollowupAuthority(TypedDict, total=False):
     final_authority_check: Callable[[], bool]
     strong_source: Optional[str]
@@ -2685,11 +2731,11 @@ def _send_followup_with_quota_admission(
         authority["strong_source"], authority["strong_revision"] = strong_source, strong_revision
 
     if repair_target is None or checkpoint:
-        return _send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target, **authority)
+        return _observe_feedback_send_acceptance(_send_followup_with_quota_admission_impl(client, repository, task_id, message, identities, repair_target=repair_target, **authority), identities)
     if recovery_provider not in SUPPORTED_PROVIDERS:
         with _new_pr_correction_request(repository, repair_target.pr_number):
             native_identities = identities if not recovery_provider else ()
-            return _send_followup_with_quota_admission_impl(
+            accepted = _send_followup_with_quota_admission_impl(
                 client,
                 repository,
                 task_id,
@@ -2698,6 +2744,7 @@ def _send_followup_with_quota_admission(
                 repair_target=repair_target,
                 **authority,
             )
+            return _observe_feedback_send_acceptance(accepted, identities)
     from .pr_no_commit_recovery import NoCommitRecovery, pr_correction_lock
 
     path = _cloud_review_repair_state_path(repository)
@@ -2713,6 +2760,7 @@ def _send_followup_with_quota_admission(
             repair_target=repair_target,
             **authority,
         )
+        _observe_feedback_send_acceptance(accepted, identities)
         if accepted:
             try:
                 recovery.record_acceptance(recovery_provider, task_id, repair_target, identities, message, time.time())
@@ -2784,7 +2832,7 @@ class ClaimedReviewThreadGateState:
     blocking_unresolved: Tuple[ReviewThread, ...] = ()
     has_blocking_unresolved: bool = False
     lookup_error: Optional[str] = None
-    authenticated_controller_login: str = ""
+    authenticated_controller_login: str | ControllerAuthorSet = ""
 
 
 def _enforce_unresolved_provenance_gate(
@@ -2897,10 +2945,10 @@ def _get_claimed_review_thread_state(
     eligible_author_ids = _resolve_eligible_review_thread_ids(repo_name)
     try:
         try:
-            authenticated_controller_login = client.get_authenticated_user_login()
-            if not isinstance(authenticated_controller_login, str) or not authenticated_controller_login.strip():
-                authenticated_controller_login = ""
-        except Exception as exc:
+            authenticated_controller_login: str | ControllerAuthorSet = controller_author_set_for_client(client, repo_name)
+        except ControllerIdentityHistoryError as exc:
+            if any((comment.body or "").lstrip().startswith(CLOSURE_RECEIPT_PREFIX) for thread in threads for comment in thread.comments):
+                raise
             logger.warning(f"Could not authenticate discussion-housekeeping ownership for PR #{pr_number}: {exc}")
             authenticated_controller_login = ""
         classification = classify_review_threads(
@@ -3184,10 +3232,10 @@ def _include_pending_local_repair_threads(
     pending = set(generation.covered_blocker_ids) - settled
     threads = github_client.get_pr_review_threads_strict(repo_name, pr_number)
     try:
-        authenticated_controller_login = github_client.get_authenticated_user_login()
-        if not isinstance(authenticated_controller_login, str) or not authenticated_controller_login.strip():
-            authenticated_controller_login = ""
-    except Exception as exc:
+        authenticated_controller_login: str | ControllerAuthorSet = controller_author_set_for_client(github_client, repo_name)
+    except ControllerIdentityHistoryError as exc:
+        if any((comment.body or "").lstrip().startswith(CLOSURE_RECEIPT_PREFIX) for thread in threads for comment in thread.comments):
+            raise
         logger.warning(f"Could not authenticate local-repair housekeeping ownership for PR #{pr_number}: {exc}")
         authenticated_controller_login = ""
     existing = {thread.thread_id: thread for thread in claimed}
@@ -10809,6 +10857,19 @@ def _load_pending_review_feedback(state_path: Path) -> set[str]:
     return set(values)
 
 
+def _load_observed_review_feedback(state_path: Path) -> set[str]:
+    """Read accepted effects that have not settled under a valid authority snapshot."""
+    if not state_path.exists():
+        return set()
+    loaded = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError("delivery state is not a JSON object")
+    values = loaded.get("observed_feedback", [])
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        raise ValueError("observed_feedback is not a string list")
+    return set(values)
+
+
 def _load_review_validation_generations(state_path: Path) -> dict[str, str]:
     """Return immutable validation-to-remediation-generation associations."""
     if not state_path.exists():
@@ -10848,14 +10909,19 @@ def _record_review_feedback_state(
     validation_snapshots: Optional[dict[str, dict[str, str]]] = None,
     *,
     remove_pending: Optional[set[str]] = None,
+    observed_additions: Optional[set[str]] = None,
 ) -> None:
-    """Merge confirmed receipts and explicit pending additions/releases atomically."""
+    """Merge receipts and reservations without settling under changed authority."""
     from .pr_no_commit_recovery import review_repair_state_lock
 
     with review_repair_state_lock(state_path):
         # A caller's snapshot can predate another PR's confirmed POST. Receipt
         # identities are monotonic; a stale write cannot erase or re-pend them.
-        delivered = delivered | _load_delivered_review_feedback(state_path)
+        previous_delivered = _load_delivered_review_feedback(state_path)
+        if delivered - previous_delivered:
+            assert_active_controller_authority()
+        delivered = delivered | previous_delivered
+        observed = (_load_observed_review_feedback(state_path) | (observed_additions or set())) - delivered
         # Unseen reservations belong to other in-flight writers. Only confirmed
         # receipts or an explicit release by the owning sender may clear an ID.
         pending = (pending_additions | _load_pending_review_feedback(state_path)) - delivered - (remove_pending or set())
@@ -10869,6 +10935,7 @@ def _record_review_feedback_state(
                     "no_commit_series": previous_document.get("no_commit_series", {}),
                     "delivered_feedback": sorted(delivered),
                     "pending_feedback": sorted(pending),
+                    "observed_feedback": sorted(observed),
                     "validation_generations": validation_generations if validation_generations is not None else _load_review_validation_generations(state_path),
                     "validation_snapshots": validation_snapshots if validation_snapshots is not None else _load_review_validation_snapshots(state_path),
                 },
@@ -10877,6 +10944,8 @@ def _record_review_feedback_state(
             ),
             encoding="utf-8",
         )
+        if delivered - previous_delivered:
+            assert_active_controller_authority()
         os.replace(temporary, state_path)
 
 
@@ -10898,6 +10967,11 @@ def _record_review_validation_snapshot(state_path: Path, validation_report: str,
         )
 
 
+def _record_observed_review_feedback(state_path: Path, feedback: set[str]) -> None:
+    """Retain the original provider acceptance without reporting settlement."""
+    _record_review_feedback_state(state_path, set(), feedback, observed_additions=feedback)
+
+
 def _record_delivered_review_feedback(state_path: Path, feedback: set[str]) -> None:
     """Atomically persist confirmed feedback deliveries."""
     _record_review_feedback_state(state_path, feedback, set())
@@ -10909,27 +10983,78 @@ def _cloud_review_feedback_markers(feedback: Sequence[str]) -> str:
 
 
 def _load_pr_delivered_review_feedback(github_client: Optional[Any], repo_name: str, pr_number: int, feedback: Sequence[str]) -> set[str]:
-    """Return feedback identities with a durable delivery receipt on the PR."""
-    if github_client is None or not feedback:
+    """Recover only exact, unquoted requested receipts from a complete fresh scan."""
+    if not feedback:
         return set()
-    comments = github_client.get_pr_comments(repo_name, pr_number)
-    receipt_comments = [comment for comment in comments if isinstance(comment, dict) and CLOUD_REVIEW_FEEDBACK_MARKER_PREFIX in str(comment.get("body", ""))]
-    if not receipt_comments:
+    if github_client is None:
+        raise ValueError("authoritative PR conversation reader is unavailable")
+    from .controller_identity_history import ControllerAttribution, controller_author_set_for_client
+
+    strict_reader = getattr(github_client, "get_pr_comments_strict", None)
+    if not callable(strict_reader):
+        raise ValueError("authoritative PR conversation reader is unavailable")
+    comments = strict_reader(repo_name, pr_number)
+    if not isinstance(comments, list) or any(not isinstance(comment, dict) or not isinstance(comment.get("body"), str) for comment in comments):
+        raise ValueError("authoritative PR conversation scan is invalid or incomplete")
+    requested = {hashlib.sha256(identity.encode("utf-8")).hexdigest(): identity for identity in feedback}
+    marker = re.compile(rf"<!-- {re.escape(CLOUD_REVIEW_FEEDBACK_MARKER_PREFIX)}([0-9a-f]{{64}}) -->")
+    candidates: list[tuple[dict, set[str]]] = []
+    for comment in comments:
+        # Native publications start with their marker block; prose, quotations
+        # and fenced examples cannot manufacture an operational receipt.
+        body = comment["body"].strip("\r\n")
+        lines = body.splitlines()
+        if lines and re.fullmatch(r"<!-- auto-coder-adversarial-validation-codex-feedback:v[0-9]+:[^ \t\r\n]+ -->", lines[0]):
+            lines = lines[1:]
+        if not lines or not marker.fullmatch(lines[0]):
+            continue
+        digests: set[str] = set()
+        for line in lines:
+            matched = marker.fullmatch(line)
+            if matched is None:
+                break
+            digests.add(matched.group(1))
+        relevant = digests.intersection(requested)
+        if relevant:
+            candidates.append((comment, relevant))
+    if not candidates:
+        assert_active_controller_authority()
         return set()
-    trusted_login = github_client.get_authenticated_user_login()
-    if not isinstance(trusted_login, str) or not trusted_login.strip():
-        raise ValueError("authenticated GitHub receipt author is unavailable")
-    trusted_login = trusted_login.strip().lower()
-    bodies = "\n".join(comment.get("body", "") for comment in receipt_comments if isinstance(comment.get("user"), dict) and str(comment["user"].get("login", "")).strip().lower() == trusted_login)
-    return {identity for identity in feedback if f"<!-- {CLOUD_REVIEW_FEEDBACK_MARKER_PREFIX}{hashlib.sha256(identity.encode('utf-8')).hexdigest()} -->" in bodies}
+    author_set = controller_author_set_for_client(github_client, repo_name)
+    delivered: set[str] = set()
+    for comment, digests in candidates:
+        user = comment.get("user")
+        if not isinstance(user, dict) or not isinstance(user.get("login"), str):
+            raise ValueError("GitHub receipt author evidence is malformed")
+        attribution = author_set.classify(user.get("id"), user["login"], relevant=True)
+        if attribution is ControllerAttribution.UNATTRIBUTED_RELEVANT:
+            raise ValueError("historical GitHub receipt author association is unavailable")
+        if attribution in (ControllerAttribution.CURRENT, ControllerAttribution.PRIOR):
+            delivered.update(requested[digest] for digest in digests)
+    assert_active_controller_authority()
+    return delivered
 
 
 def _record_pr_delivered_review_feedback(github_client: Optional[Any], repo_name: str, pr_number: int, feedback: Sequence[str], message: str) -> bool:
     """Persist confirmed delivery receipts in GitHub independently of local state."""
     if github_client is None or not feedback:
         return False
-    github_client.add_comment_to_pr(repo_name, pr_number, f"{_cloud_review_feedback_markers(feedback)}\n{message}")
+    with controller_authority_scope(github_client, repo_name):
+        assert_active_controller_authority()
+        github_client.add_comment_to_pr(repo_name, pr_number, f"{_cloud_review_feedback_markers(feedback)}\n{message}")
+        assert_active_controller_authority()
     return True
+
+
+def _consume_review_feedback_rejection(client: Any, provider: str, task_id: str, identities: tuple[str, ...]) -> bool:
+    """Release a reservation only from an explicit native no-send observation."""
+    reader = getattr(client, "consume_followup_rejection", None)
+    if provider != "codex-cloud" or not callable(reader):
+        return False
+    try:
+        return reader(task_id, identities) is True
+    except Exception:
+        return False
 
 
 def _reconcile_codex_review_feedback(client: Any, provider: str, task_id: str, feedback: Sequence[str], *, uncertain: Optional[set[str]] = None) -> set[str]:
@@ -11490,14 +11615,33 @@ def _delegate_cloud_review_thread_repair(
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {resolution.reason}"], deferred=_draft_pr_repair_authority.get() is not None)
     provider, task_id, client = resolution.origin.provider, resolution.origin.task_id, resolution.origin.client
     selected_origin = resolution.origin
-    provider_label = {"codex-cloud": "Codex Cloud", "jules": "Jules", "claude-routine": "Claude Routine"}.get(provider, provider)
-
     from .cloud_task_client_base import CloudTaskClientBase
-    from .pr_no_commit_recovery import SUPPORTED_PROVIDERS
 
     if getattr(type(client), "send_followup", None) is CloudTaskClientBase.send_followup:
         return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: cloud provider '{provider}' does not support follow-up delivery"])
 
+    try:
+        with _controller_review_feedback_scope(github_client, repo_name):
+            return _deliver_cloud_review_thread_feedback(repo_name, pr_data, github_client, unresolved_threads, selected_origin, allow_current_head_reassessment)
+    except ControllerIdentityHistoryError as exc:
+        logger.warning("Controller authority unavailable for review feedback on PR #{}: {}", pr_number, exc)
+        return CloudReviewRepairResult([f"Review repair remains unresolved for PR #{pr_number}: {exc}"], deferred=True, wait_reason=WAIT_INDETERMINATE, diagnostic_reason="controller_authority_unavailable")
+
+
+def _deliver_cloud_review_thread_feedback(
+    repo_name: str,
+    pr_data: dict,
+    github_client: Any,
+    unresolved_threads: Tuple[ReviewThread, ...],
+    selected_origin: CloudTaskOrigin,
+    allow_current_head_reassessment: bool,
+) -> CloudReviewRepairResult:
+    """Observe, dispatch and settle one ordinary feedback authority snapshot."""
+    from .pr_no_commit_recovery import SUPPORTED_PROVIDERS
+
+    pr_number = int(pr_data["number"])
+    provider, task_id, client = selected_origin.provider, selected_origin.task_id, selected_origin.client
+    provider_label = {"codex-cloud": "Codex Cloud", "jules": "Jules", "claude-routine": "Claude Routine"}.get(provider, provider)
     state_path = _cloud_review_repair_state_path(repo_name)
     prefix = f"{repo_name}#{pr_number}:{provider}:{task_id}:"
     implementer_login = (get_pr_author_login(pr_data) or "").lower()
@@ -11558,6 +11702,7 @@ def _delegate_cloud_review_thread_repair(
             delivered.update(remote_delivered & all_finding_identities)
             native_uncertain: set[str] = set()
             reconciled = _reconcile_codex_review_feedback(client, provider, task_id, [identity for _thread, _comment, identity in findings if identity not in delivered], uncertain=native_uncertain)
+            reconciled.update(_load_observed_review_feedback(state_path) & all_finding_identities)
             if reconciled:
                 delivered.update(reconciled)
                 _record_delivered_review_feedback(state_path, delivered)
@@ -11568,7 +11713,7 @@ def _delegate_cloud_review_thread_repair(
                 # Later native key loss must not turn it into unsent feedback.
                 _record_review_feedback_state(state_path, delivered, native_uncertain - delivered)
             indeterminate = (retained_pending | native_uncertain) - delivered
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
             logger.warning(f"Could not read cloud review repair state: {exc}")
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: prior delivery state could not be read: {exc}"])
         pending = [(thread, comment, identity) for thread, comment, identity in findings if identity not in delivered]
@@ -11741,6 +11886,10 @@ def _delegate_cloud_review_thread_repair(
             deferred=True,
             retry_not_before=retry_at,
         )
+    except ControllerIdentityHistoryError:
+        # Accepted effects have already been retained separately from success.
+        # Keep the original reservation for reconciliation under valid authority.
+        raise
     except Exception as exc:
         logger.warning(f"Cloud review repair delegation failed for PR #{pr_number}: {exc}")
         with _cloud_review_delivery_lock:
@@ -11801,6 +11950,7 @@ def _delegate_cloud_review_thread_repair(
             [f"Review repair follow-up was accepted for PR #{pr_number}, but durable delivery confirmation failed; duplicate delivery is suppressed"],
         )
 
+    assert_active_controller_authority()
     get_trace_logger().log(
         "Cloud Review Repair",
         f"Assigned unresolved review threads to {provider} task '{task_id}' for PR #{pr_number}",
@@ -12598,10 +12748,34 @@ def _send_adversarial_validation_feedback_to_cloud_task(
     if getattr(type(client), "send_followup", None) is CloudTaskClientBase.send_followup:
         return CloudReviewRepairResult([f"Adversarial feedback was not delivered for PR #{pr_number}: cloud provider '{provider}' does not support follow-up delivery"], wait_reason=WAIT_ROUTE_UNAVAILABLE)
 
-    state_path = _cloud_review_repair_state_path(repo_name)
-    prefix = f"{repo_name}#{pr_number}:{provider}:{task_id}:"
     if github_client is None:
         return [f"Cannot identify actionable adversarial feedback for PR #{pr_number}; delivery was not attempted"]
+    try:
+        with _controller_review_feedback_scope(github_client, repo_name):
+            return _deliver_adversarial_cloud_feedback(repo_name, pr_data, head_sha, source_validation_report, github_client, actionable_feedback, canonical_blocker_ids, canonical_roots, canonical_owner_roots, selected_origin, feedback_marker)
+    except ControllerIdentityHistoryError as exc:
+        logger.warning("Controller authority unavailable for adversarial feedback on PR #{}: {}", pr_number, exc)
+        return CloudReviewRepairResult([f"Adversarial feedback remains unresolved for PR #{pr_number}: {exc}"], deferred=True, wait_reason=WAIT_INDETERMINATE, diagnostic_reason="controller_authority_unavailable")
+
+
+def _deliver_adversarial_cloud_feedback(
+    repo_name: str,
+    pr_data: dict,
+    head_sha: str,
+    source_validation_report: str,
+    github_client: Any,
+    actionable_feedback: Sequence[str],
+    canonical_blocker_ids: Sequence[str],
+    canonical_roots: Optional[Set[int]],
+    canonical_owner_roots: Dict[str, Set[int]],
+    selected_origin: CloudTaskOrigin,
+    feedback_marker: str,
+) -> List[str]:
+    """Observe, dispatch and settle one adversarial feedback authority snapshot."""
+    pr_number = int(pr_data["number"])
+    provider, task_id, client = selected_origin.provider, selected_origin.task_id, selected_origin.client
+    state_path = _cloud_review_repair_state_path(repo_name)
+    prefix = f"{repo_name}#{pr_number}:{provider}:{task_id}:"
     try:
         review_threads = github_client.get_pr_review_threads_strict(repo_name, pr_number)
     except Exception as exc:
@@ -12683,6 +12857,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
                 task_id,
                 sorted(reconciliation_candidates),
             )
+            reconciled.update(_load_observed_review_feedback(state_path) & set(all_identities))
             if reconciled:
                 delivered.update(reconciled)
                 reconciled_receipts = set(reconciled)
@@ -12719,6 +12894,9 @@ def _send_adversarial_validation_feedback_to_cloud_task(
         if not pending_feedback:
             _checkpoint_cloud_review_repair(repo_name, pr_data, github_client, selected_origin)
             return CloudReviewRepairResult([f"Skipped duplicate adversarial feedback to {provider} for PR #{pr_number}: all actionable feedback was already delivered"], delivered=True)
+        pending_generations = {generation_identity for _body, _finding_identity, generation_identity in pending_feedback}
+        if pending_generations.intersection(_load_pending_review_feedback(state_path) - delivered):
+            return CloudReviewRepairResult([f"Adversarial feedback for PR #{pr_number} has an unresolved prior delivery; duplicate delivery was suppressed"], deferred=True, wait_reason=WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")
         failed_correction = any(finding_identity in delivered for _body, finding_identity, _generation_identity in pending_feedback)
 
         target = resolve_existing_pr_repair_target(repo_name, pr_data)
@@ -12799,7 +12977,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
             validation_report=delivery_report,
         )
         prompt = build_existing_pr_repair_prompt(target, details, bundle=repair_bundle)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError, TypeError) as exc:
         return [f"Could not check prior {provider} actionable feedback for PR #{pr_number}: {exc}"]
 
     work_identity = hashlib.sha256("\n".join(sorted(generation_identity for _body, _finding_identity, generation_identity in pending_feedback)).encode()).hexdigest()
@@ -12812,26 +12990,37 @@ def _send_adversarial_validation_feedback_to_cloud_task(
 
     try:
         identities = tuple(sorted(generation_identity for _body, _finding_identity, generation_identity in pending_feedback))
+        _record_review_feedback_state(state_path, delivered, set(identities))
         attribution_error = _revalidate_cloud_origin(repo_name, pr_number, selected_origin, github_client=github_client)
         if attribution_error:
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=set(identities))
             return [f"Adversarial feedback was not delivered for PR #{pr_number}: {attribution_error}"]
         accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, identities, repair_target=target, recovery_provider=provider)
     except ClaudeFollowupHoldActive as exc:
+        _record_review_feedback_state(state_path, delivered, set(), remove_pending=set(identities))
         deferred_actions = PRActionList([f"DEFERRED Claude adversarial feedback for PR #{pr_number} until {exc.retry_not_before}"])
         deferred_actions.quota_deferred = True
         deferred_actions.retry_not_before = exc.retry_not_before
         return deferred_actions
     except ClaudeFollowupUsageLimitError as exc:
+        if exc.delivery_certainty is DeliveryCertainty.NOT_SENT:
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=set(identities))
         retry_at = _retain_claude_quota_deferral(exc, pr_number, task_id, "adversarial-feedback", work_identity)
         deferred_actions = PRActionList([f"DEFERRED Claude adversarial feedback for PR #{pr_number} until {retry_at}"])
         deferred_actions.quota_deferred = True
         deferred_actions.retry_not_before = retry_at
         return deferred_actions
+    except ControllerIdentityHistoryError:
+        raise
     except Exception as e:
+        if _consume_review_feedback_rejection(client, provider, task_id, identities):
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=set(identities))
         logger.error(f"Error sending adversarial feedback to {provider} for PR #{pr_number}: {e}")
         return CloudReviewRepairResult([f"Adversarial feedback was not delivered to {provider} for PR #{pr_number}: {e}"], wait_reason=WAIT_ROUTE_UNAVAILABLE)
 
     if not accepted:
+        if _consume_review_feedback_rejection(client, provider, task_id, identities):
+            _record_review_feedback_state(state_path, delivered, set(), remove_pending=set(identities))
         return CloudReviewRepairResult([f"{provider} task '{task_id}' could not receive adversarial feedback for PR #{pr_number}"], wait_reason=WAIT_ROUTE_UNAVAILABLE)
 
     get_claude_followup_wait_store().retire(repo_name, task_id, "adversarial-feedback", work_identity)
@@ -12857,6 +13046,7 @@ def _send_adversarial_validation_feedback_to_cloud_task(
     except (OSError, ValueError) as exc:
         logger.error(f"Failed to persist shared Codex Cloud feedback delivery for PR #{pr_number}: {exc}")
 
+    assert_active_controller_authority()
     get_trace_logger().log(
         "Cloud Task Adversarial Feedback",
         f"Sent NEEDS_FIX report to {provider} task '{task_id}' for PR #{pr_number}",
@@ -12874,7 +13064,9 @@ def _send_adversarial_validation_feedback_to_cloud_task(
             ]
         )
         try:
+            assert_active_controller_authority()
             github_client.add_comment_to_pr(repo_name, pr_number, comment_body)
+            assert_active_controller_authority()
             remote_receipt = True
             actions.append(f"Recorded {provider} adversarial feedback delivery on PR #{pr_number}")
         except Exception as e:

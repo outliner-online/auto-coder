@@ -568,6 +568,11 @@ class CodexWhamClient:
         url = f"{self.base_url}/tasks"
         logger.info(f"Sending WHAM follow-up to task '{task_id}' continuing from turn '{turn_id}'")
 
+        from .controller_identity_history import assert_active_controller_authority
+
+        # All preparation may read state; check the pinned controller only at
+        # the final provider boundary, immediately before the actual request.
+        assert_active_controller_authority()
         try:
             response = httpx.post(url, headers=headers, json=payload, timeout=self.timeout)
             status = response.status_code

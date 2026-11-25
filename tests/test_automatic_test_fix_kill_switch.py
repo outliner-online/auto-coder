@@ -31,6 +31,7 @@ from auto_coder.automation_config import AutomationConfig, EmptyPRResult, PRProc
 from auto_coder.automation_engine import AutomationEngine
 from auto_coder.ci_repair_authority import CIRepairAuthority
 from auto_coder.fix_to_pass_tests_runner import fix_to_pass_tests
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.llm_backend_config import (
     get_automatic_test_fix_from_config,
     get_feature_switch_from_config,
@@ -43,6 +44,15 @@ from auto_coder.pr_processor import (
 from auto_coder.util.gh_cache import GitHubClient
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+
+
+def _controller_client():
+    """Provide complete controller evidence before exercising the repair switch."""
+    client = MagicMock(spec=GitHubClient)
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
+    client.get_pr_review_threads_strict.return_value = []
+    client.get_pr_comments_strict.return_value = []
+    return client
 
 
 @pytest.fixture(autouse=True)
@@ -224,7 +234,7 @@ class TestAS001LocalTestFailureWithRepairDisabled:
     ):
         head_sha = "a" * 40
         pr_data = _pr_data(100, head_sha, ref="issue-42")
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         # CI check fails
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[1])
@@ -299,7 +309,7 @@ class TestAS002GitHubActionsFailureWithRepairDisabled:
     ):
         head_sha = "b" * 40
         pr_data = _pr_data(101, head_sha, ref="issue-43")
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         # CI check fails
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[2])
@@ -359,7 +369,7 @@ class TestAS003RepeatedDisabledProcessingBudget:
     ):
         head_sha = "c" * 40
         pr_data = _pr_data(102, head_sha, ref="issue-44")
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[3])
         mock_detailed = MagicMock()
@@ -419,7 +429,7 @@ class TestAS004TestsMayStillRun:
     ):
         head_sha = "d" * 40
         pr_data = _pr_data(103, head_sha, ref="issue-45")
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[4])
         mock_detailed = MagicMock()
@@ -475,7 +485,7 @@ class TestAS005WorkspaceNotDestructivelyCleaned:
     ):
         head_sha = "e" * 40
         pr_data = _pr_data(104, head_sha, ref="issue-46")
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[5])
         mock_detailed = MagicMock()
@@ -517,7 +527,7 @@ class TestAS005WorkspaceNotDestructivelyCleaned:
     ):
         head_sha = "e" * 40
         pr_data = _pr_data(105, head_sha, ref="issue-47")
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[6])
         mock_detailed = MagicMock()
@@ -568,7 +578,7 @@ class TestAS006OtherPRAutomationRemainsIndependent:
     ):
         head_sha = "f" * 40
         pr_data = _pr_data(106, head_sha, mergeable=False)
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         config = AutomationConfig(automatic_test_fix=False)
         object.__setattr__(config, "ENABLE_MERGEABILITY_REMEDIATION", True)
@@ -594,7 +604,7 @@ class TestAS006OtherPRAutomationRemainsIndependent:
     ):
         head_sha = "0" * 40
         pr_data = _pr_data(107, head_sha)
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[7])
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -669,7 +679,7 @@ class TestAS007ReEnableAfterDisabledFailures:
     ):
         head_sha = "2" * 40
         pr_data = _pr_data(109, head_sha, ref="issue-49")
-        client = MagicMock(spec=GitHubClient)
+        client = _controller_client()
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[9])
         mock_detailed = MagicMock()

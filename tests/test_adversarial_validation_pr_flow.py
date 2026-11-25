@@ -29,6 +29,7 @@ from auto_coder.codex_cloud_client import CodexCloudClient
 from auto_coder.codex_wham_client import CodexWhamClient, FollowUpDeliveryOutcome, FollowUpDeliveryResult, WhamTurn
 from auto_coder.github_app_reviewer import ReviewPublicationResult
 from auto_coder.github_ci_observer import accept_and_fence_ci_delivery, fence_active_ci_observations, observe_ci
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.pr_processor import (
     AdversarialValidationEligibility,
     ClaimedReviewThreadGateState,
@@ -59,6 +60,21 @@ from tests.test_accepted_finding_bridge import _simulated_review_source
 from tests.test_review_thread_closure_receipt import BASE, HEAD, PR_NUMBER, REPOSITORY, THREAD_ID
 from tests.test_review_thread_closure_receipt import receipt_scenario as receipt_scenario
 from tests.test_review_thread_validation import _closure_client
+
+
+def controller_github_mock() -> MagicMock:
+    """Expose the legacy controller identity for production authority checks."""
+    client = MagicMock()
+    client.get_authenticated_user_login.return_value = "controller"
+    return client
+
+
+def controller_github_client() -> GitHubClient:
+    """Keep real native readers while supplying the controlled credential identity."""
+    client = GitHubClient("test-token")
+    client.get_authenticated_user_login = MagicMock(return_value="controller")
+    client.get_authenticated_controller_identity = lambda *_: ControllerIdentity(client.get_authenticated_user_login(), account_id=2 if client.get_authenticated_user_login() == "implementer" else 20)
+    return client
 
 
 @pytest.fixture(autouse=True)
@@ -323,7 +339,7 @@ def test_real_thread_closure_reuses_reply_after_pr_publication_failure(receipt_s
 
 class TestCodexReviewState:
     def test_completed_summary_is_authoritative_without_reaction(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [codex_review_summary("✅ **Completed**")]
 
@@ -334,7 +350,7 @@ class TestCodexReviewState:
         assert state.lookup_error is None
 
     def test_summary_without_completed_status_is_still_running(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [codex_review_summary("👀 **In progress**")]
 
@@ -345,7 +361,7 @@ class TestCodexReviewState:
         assert state.lookup_error is None
 
     def test_marker_from_non_codex_author_is_ignored(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         comment = codex_review_summary("✅ **Completed**")
         comment["user"] = {"login": "someone-else"}
@@ -356,8 +372,9 @@ class TestCodexReviewState:
         assert state.present is False
         assert state.completed is False
 
+    @patch("auto_coder.util.gh_cache._strict_request", side_effect=RuntimeError("comment API unavailable"))
     @patch("auto_coder.util.gh_cache.get_ghapi_client")
-    def test_real_client_comment_api_failure_is_not_treated_as_codex_absence(self, mock_get_api):
+    def test_real_client_comment_api_failure_is_not_treated_as_codex_absence(self, mock_get_api, _strict_request):
         mock_api = Mock()
         mock_api.issues.list_comments.side_effect = RuntimeError("comment API unavailable")
         mock_api.side_effect = RuntimeError("comment API unavailable")
@@ -375,7 +392,7 @@ class TestCodexReviewState:
 
 class TestAdversarialValidationEligibility:
     def test_issue_less_pr_mentioning_another_pr_is_not_eligible(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         pr_data = {"number": 100, "body": "Maintenance update; see PR #42 for background"}
 
@@ -391,7 +408,7 @@ class TestAdversarialValidationEligibility:
         [None, {"number": 42, "pull_request": {"url": "https://api.github.test/pulls/42"}}],
     )
     def test_nonexistent_or_pull_request_candidate_is_not_an_oracle(self, candidate):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_issue.return_value = candidate
         pr_data = {"number": 100, "body": "Fixes #42"}
@@ -404,7 +421,7 @@ class TestAdversarialValidationEligibility:
         client.get_issue.assert_called_once_with("owner/repo", 42)
 
     def test_verified_linked_issue_makes_validation_applicable(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_issue.return_value = {"number": 42, "title": "Behavioral contract"}
         pr_data = {"number": 100, "body": "Fixes #42"}
@@ -416,7 +433,7 @@ class TestAdversarialValidationEligibility:
         assert eligibility.lookup_error is None
 
     def test_title_inferred_issue_uses_same_verified_oracle_resolution(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_issue.return_value = {"number": 42, "title": "Behavioral contract", "body": "Required behavior"}
         pr_data = {"number": 100, "title": "Implement issue #42", "body": "Implementation details"}
@@ -508,7 +525,7 @@ class TestAdversarialValidationPRComment:
         assert comment.count("Codex CLI event details omitted") == 2
 
     def test_finds_native_review_from_dedicated_reviewer_app_for_exact_sha(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         result = AdversarialValidationResult(result="PASS", summary="Verified")
         rendered_body = format_adversarial_validation_comment(result, "abc123")
@@ -520,7 +537,7 @@ class TestAdversarialValidationPRComment:
         assert body == rendered_body
 
     def test_finds_native_review_from_dedicated_reviewer_app_with_slug_login(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         result = AdversarialValidationResult(result="PASS", summary="Verified")
         rendered_body = format_adversarial_validation_comment(result, "abc123")
@@ -532,7 +549,7 @@ class TestAdversarialValidationPRComment:
         assert body == rendered_body
 
     def test_latest_native_review_for_same_sha_is_authoritative(self):
-        client = MagicMock()
+        client = controller_github_mock()
         first = format_adversarial_validation_comment(AdversarialValidationResult(result="INCONCLUSIVE"), "abc123")
         latest = format_adversarial_validation_comment(AdversarialValidationResult(result="PASS"), "abc123")
         client.get_pr_reviews_strict.return_value = [
@@ -546,7 +563,7 @@ class TestAdversarialValidationPRComment:
         assert body == latest
 
     def test_newer_started_attempt_remains_authoritative_when_older_finishes_late(self):
-        client = MagicMock()
+        client = controller_github_mock()
         newer_result = AdversarialValidationResult(result="PASS", attempt_id="b" * 32, attempt_sequence=12)
         older_result = AdversarialValidationResult(result="ERROR", attempt_id="a" * 32, attempt_sequence=11)
         newer = format_adversarial_validation_comment(newer_result, "abc123")
@@ -562,12 +579,14 @@ class TestAdversarialValidationPRComment:
         assert body == newer
 
     def test_lookalike_review_from_another_author_is_not_authoritative(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         result = AdversarialValidationResult(result="PASS", summary="Verified")
         rendered_body = format_adversarial_validation_comment(result, "abc123")
         client.get_pr_reviews_strict.return_value = [{"id": 1, "body": rendered_body, "user": {"login": "someone-else[bot]"}}]
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
 
         body, error = _find_authoritative_adversarial_review(client, "owner/repo", 100, "abc123")
 
@@ -575,7 +594,7 @@ class TestAdversarialValidationPRComment:
         assert body is None
 
     def test_native_review_lookup_fails_closed_on_reviews_api_error(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_reviews_strict.side_effect = RuntimeError("API unavailable")
 
@@ -585,7 +604,7 @@ class TestAdversarialValidationPRComment:
         assert error == "API unavailable"
 
     def test_native_review_lookup_fails_closed_on_identity_resolution_error(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         with patch("auto_coder.pr_processor.resolve_reviewer_app_identity", side_effect=RuntimeError("no reviewer credentials")):
             body, error = _find_authoritative_adversarial_review(client, "owner/repo", 100, "abc123")
@@ -596,7 +615,7 @@ class TestAdversarialValidationPRComment:
 
     @pytest.mark.parametrize("status", ["PASS", "NEEDS_FIX", "BLOCKED", "INCONCLUSIVE", "ERROR"])
     def test_reads_published_status_for_exact_head_sha(self, status):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {
@@ -618,7 +637,7 @@ class TestAdversarialValidationPRComment:
         assert error is None
 
     def test_legacy_unversioned_result_does_not_suppress_revalidation(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {
@@ -644,7 +663,7 @@ class TestAdversarialValidationPRComment:
         assert error is None
 
     def test_prior_status_lookup_failure_is_fail_closed(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments_strict.side_effect = RuntimeError("API unavailable")
 
@@ -659,7 +678,7 @@ class TestAdversarialValidationPRComment:
         assert error == "API unavailable"
 
     def test_reads_published_status_from_native_review_over_legacy_comment(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_reviews_strict.return_value = [
             {
@@ -697,8 +716,10 @@ class TestAdversarialValidationCodexFeedback:
     def test_failed_corrective_generations_are_redelivered_once_across_restarts_and_providers(self, tmp_path, provider):
         """GitHub review input traverses production routing and durable delivery."""
         finding = "### Auto-Coder material test-oracle gap\n\nThe focused production-boundary regression still fails"
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [ReviewThread(id="PRRT_persisted_gap", comments=[ReviewThreadComment(database_id=1692, body=finding)])]
         backend = MagicMock()
         backend.send_followup.return_value = True
@@ -770,8 +791,10 @@ class TestAdversarialValidationCodexFeedback:
     def test_codex_completed_turn_redelivers_failed_correction_once_after_restart(self, tmp_path):
         """Provider-shaped WHAM turns establish the durable remediation generation."""
         finding = "### Auto-Coder material test-oracle gap\n\nGap identity: `TOG-0833f8b910ca`\n\nThe production test oracle remains incomplete"
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [ReviewThread(id="PRRT_kwDOPZA8nM6hW2-_", comments=[ReviewThreadComment(database_id=2031, body=finding)])]
         config = MagicMock(quota_selection_strategy="surplus")
         config.get_backend_config.return_value = None
@@ -840,8 +863,10 @@ class TestAdversarialValidationCodexFeedback:
 
     def test_rejected_failed_correction_retains_first_observed_generation_when_later_turn_appears(self, tmp_path):
         finding = "### Auto-Coder adversarial finding\n\nThe rejected correction remains actionable"
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [ReviewThread(id="PRRT_rejected", comments=[ReviewThreadComment(database_id=2032, body=finding)])]
         config = MagicMock(quota_selection_strategy="surplus")
         config.get_backend_config.return_value = None
@@ -903,8 +928,10 @@ class TestAdversarialValidationCodexFeedback:
             ReviewThread(id="PRRT_F", comments=[ReviewThreadComment(database_id=2101, body=finding_f)]),
             ReviewThread(id="PRRT_H", comments=[ReviewThreadComment(database_id=2102, body=finding_h)]),
         ]
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = threads
         config = MagicMock(quota_selection_strategy="surplus")
         config.get_backend_config.return_value = None
@@ -941,8 +968,10 @@ class TestAdversarialValidationCodexFeedback:
 
     def test_jules_binding_routes_through_provider_followup_without_codex_probe(self, tmp_path):
         finding = "### Auto-Coder adversarial finding\n\nConcrete Jules defect"
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [ReviewThread(id="PRRT_jules", comments=[ReviewThreadComment(database_id=1677, body=finding)])]
         jules = MagicMock()
         jules.send_followup.return_value = True
@@ -963,7 +992,7 @@ class TestAdversarialValidationCodexFeedback:
         assert "Sent adversarial NEEDS_FIX report to jules" in actions[0]
 
     def test_providerless_legacy_binding_fails_closed_without_client_probe(self):
-        github = MagicMock()
+        github = controller_github_mock()
         with (
             patch("auto_coder.cloud_manager.CloudManager.get_binding", return_value=None),
             patch("auto_coder.cloud_task_engine.CloudTaskEngine.get_client_for_provider") as resolver,
@@ -1019,8 +1048,10 @@ class TestAdversarialValidationCodexFeedback:
         manager = CloudManager("owner/repo", tmp_path / "cloud.csv")
         finding = "### Auto-Coder adversarial finding\n\nShared finding"
         thread = ReviewThread(id="PRRT_shared", comments=[ReviewThreadComment(database_id=301, body=finding)])
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [thread]
         codex = MagicMock()
         codex.send_followup.return_value = True
@@ -1054,10 +1085,12 @@ class TestAdversarialValidationCodexFeedback:
 
     def test_invalid_metadata_falls_back_to_pr_body_task_for_delivery(self, tmp_path):
         finding = "### Auto-Coder adversarial finding\n\nConcrete counterexample"
-        github_client = MagicMock()
+        github_client = controller_github_mock()
         github_client.get_pr_comments.return_value = []
+        github_client.get_pr_comments_strict = github_client.get_pr_comments
+        github_client.get_authenticated_user_login.return_value = "controller"
         github_client.get_pr_review_threads_strict.return_value = [ReviewThread(id="PRRT_current", comments=[ReviewThreadComment(database_id=301, body=finding)])]
-        cloud_client = MagicMock()
+        cloud_client = controller_github_mock()
         cloud_client.send_followup.return_value = True
         pr_data = {
             "number": 1670,
@@ -1077,9 +1110,11 @@ class TestAdversarialValidationCodexFeedback:
         assert all("task_fake" not in action for action in actions)
 
     def test_successful_adversarial_delivery_deduplicates_review_thread_path(self, tmp_path):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_comments.return_value = []
-        cloud_client = MagicMock()
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
+        cloud_client = controller_github_mock()
         cloud_client.send_followup.return_value = True
         pr_data = {
             "number": 100,
@@ -1110,8 +1145,10 @@ class TestAdversarialValidationCodexFeedback:
         """The production adversarial path must not replay a 429-ambiguous POST."""
         finding = "### Auto-Coder adversarial finding\n\nConcrete counterexample"
         thread = ReviewThread(id="PRRT_adversarial", comments=[ReviewThreadComment(database_id=301, body=finding)])
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [thread]
         pr_data = {
             "number": 100,
@@ -1154,8 +1191,10 @@ class TestAdversarialValidationCodexFeedback:
     def test_initial_provider_receipt_recovery_does_not_satisfy_later_generation(self, tmp_path):
         """A crash before routing receipts cannot consume B's delivery obligation."""
         finding = "### Auto-Coder adversarial finding\n\nThe correction remains incomplete"
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [ReviewThread(id="PRRT_crash", comments=[ReviewThreadComment(database_id=2201, body=finding)])]
         config = MagicMock(quota_selection_strategy="surplus")
         config.get_backend_config.return_value = None
@@ -1203,8 +1242,10 @@ class TestAdversarialValidationCodexFeedback:
     def test_accepted_validation_snapshot_survives_initial_thread_lookup_failure(self, tmp_path):
         finding = "### Auto-Coder adversarial finding\n\nThe accepted validation remains causally frozen"
         thread = ReviewThread(id="PRRT_lookup", comments=[ReviewThreadComment(database_id=2202, body=finding)])
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [thread]
         config = MagicMock(quota_selection_strategy="surplus")
         config.get_backend_config.return_value = None
@@ -1248,10 +1289,12 @@ class TestAdversarialValidationCodexFeedback:
             id="PRRT_adversarial",
             comments=[ReviewThreadComment(database_id=301, body=finding, author_login="auto-coder-reviewer[bot]")],
         )
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = [thread]
-        cloud_client = MagicMock()
+        cloud_client = controller_github_mock()
         cloud_client.send_followup.return_value = True
         pr_data = {
             "number": 100,
@@ -1289,10 +1332,12 @@ class TestAdversarialValidationCodexFeedback:
                 comments=[ReviewThreadComment(database_id=301, body=current)],
             ),
         ]
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = threads
-        cloud_client = MagicMock()
+        cloud_client = controller_github_mock()
         cloud_client.send_followup.return_value = True
         pr_data = {
             "number": 100,
@@ -1315,9 +1360,11 @@ class TestAdversarialValidationCodexFeedback:
         assert len(state["delivered_feedback"]) == 3
 
     def test_sends_complete_report_as_custom_codex_cloud_followup(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_comments.return_value = []
-        cloud_client = MagicMock()
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
+        cloud_client = controller_github_mock()
         cloud_client.send_followup.return_value = True
         pr_data = {
             "number": 100,
@@ -1356,10 +1403,12 @@ class TestAdversarialValidationCodexFeedback:
         assert delivery_comment.startswith(adversarial_validation_codex_feedback_marker("head123"))
 
     def test_missing_branch_metadata_blocks_feedback_instead_of_weak_prompt(self):
-        client = MagicMock()
+        client = controller_github_mock()
         finding = "### Auto-Coder adversarial finding\n\nreport"
         client.get_pr_review_threads_strict.return_value = [ReviewThread(id="PRRT_current", comments=[ReviewThreadComment(database_id=301, body=finding)])]
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         pr_data = {
             "number": 100,
             "body": "Fixes #99\n\nhttps://chatgpt.com/codex/tasks/task_e_abc123",
@@ -1378,7 +1427,7 @@ class TestAdversarialValidationCodexFeedback:
         assert any("PR head/base branch metadata is unavailable" in action for action in actions)
 
     def test_delivery_marker_does_not_replace_actionable_feedback_identity(self):
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [{"body": adversarial_validation_codex_feedback_marker("head123") + "\nDelivered"}]
         pr_data = {
@@ -1410,10 +1459,12 @@ class TestAdversarialValidationCodexFeedback:
             id="PRRT_second",
             comments=[ReviewThreadComment(database_id=302, body=second)],
         )
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = [first_thread]
-        cloud_client = MagicMock()
+        cloud_client = controller_github_mock()
         cloud_client.send_followup.return_value = True
         pr_data = {
             "number": 100,
@@ -1447,11 +1498,13 @@ class TestAdversarialValidationCodexFeedback:
             id="PRRT_adversarial",
             comments=[ReviewThreadComment(database_id=301, body=finding, author_login="auto-coder-reviewer[bot]")],
         )
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_authenticated_user_login.return_value = "auto-coder-bot"
         client.get_pr_review_threads_strict.return_value = [thread]
-        cloud_client = MagicMock()
+        cloud_client = controller_github_mock()
         cloud_client.send_followup.return_value = True
         pr_data = {
             "number": 100,
@@ -1516,7 +1569,7 @@ class TestAdversarialValidationPRFlow:
             "base": {"ref": "main", "sha": base_sha},
         }
         issue = {"number": 99, "title": "Contract", "body": "## Requirements\nREQ-001: Preserve the gate."}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_issue.return_value = issue
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
@@ -1625,7 +1678,7 @@ class TestAdversarialValidationPRFlow:
 
         head_sha = "d" * 40
         pr_data = {"number": 100, "body": "", "labels": [], "head": {"ref": "feature", "sha": head_sha}, "base": {"ref": "main"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
@@ -1674,7 +1727,7 @@ class TestAdversarialValidationPRFlow:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "abc123456789" + "0" * 28
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {
@@ -1721,7 +1774,7 @@ class TestAdversarialValidationPRFlow:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "abc123456789" + "0" * 28
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [{"body": format_adversarial_validation_comment(AdversarialValidationResult(result="PASS"), head_sha)}] if saved_pass else []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -1781,7 +1834,7 @@ class TestAdversarialValidationPRFlow:
         # any publication effect.
         head_sha = "abc123456789" + "0" * 28
         prior_body = format_adversarial_validation_comment(AdversarialValidationResult(result="PASS", summary="Historical"), head_sha)
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [{"body": prior_body}]
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -1828,9 +1881,11 @@ class TestAdversarialValidationPRFlow:
             summary="Every otherwise-valid adversarial-validation backend is currently quota/usage exhausted",
             retry_not_before_epoch=retry_epoch,
         )
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         config = AutomationConfig()
         config.AUTO_MERGE = True
@@ -1864,7 +1919,7 @@ class TestAdversarialValidationPRFlow:
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "abc123456789" + "0" * 28
         future_retry = time.time() + 3600
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {
@@ -1917,7 +1972,7 @@ class TestAdversarialValidationPRFlow:
         attempt_repository.latest_sequence.return_value = 2
         attempt_repository.latest_published_sequence.return_value = 2
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {
@@ -1971,7 +2026,7 @@ class TestAdversarialValidationPRFlow:
         # registered a higher sequence before this retry's publication check.
         attempt_repository.latest_sequence.return_value = 3
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {
@@ -2089,6 +2144,8 @@ class TestAdversarialValidationPRFlow:
         attempt_repository.latest_sequence.return_value = 1
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pull_request.return_value = {"head": {"sha": "head-h2"}}
         client.requirement_text = "M3 changed behavior must be preserved."
 
@@ -2183,9 +2240,11 @@ class TestAdversarialValidationPRFlow:
         def invoke_real_validator(*args, **kwargs):
             return run_real_validation(*args, **kwargs, backend_manager=manager, session_registry=registry)
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         config = AutomationConfig()
         config.AUTO_MERGE = True
@@ -2233,8 +2292,10 @@ class TestAdversarialValidationPRFlow:
             summary="Newer result keeps the thread open",
             thread_dispositions=[ReviewThreadDisposition(thread_id="thread-t", status="STILL_VALID", rationale="Still reproducible", evidence="Current head")],
         )
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         config = AutomationConfig()
@@ -2304,7 +2365,7 @@ class TestAdversarialValidationPRFlow:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "abc123456789" + "0" * 28
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         saved_result = AdversarialValidationResult(
             result="NEEDS_FIX",
@@ -2361,7 +2422,7 @@ class TestAdversarialValidationPRFlow:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "abc123456789" + "0" * 28
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {
@@ -2425,7 +2486,7 @@ class TestAdversarialValidationPRFlow:
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": "abc123456789"}}
         with (
@@ -2482,7 +2543,7 @@ class TestAdversarialValidationPRFlow:
         config.AUTO_MERGE = True
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         if local:
             from auto_coder.pr_processor import ReviewRepairRouteDecision, ReviewRepairRouteDisposition
@@ -2547,8 +2608,10 @@ class TestAdversarialValidationPRFlow:
             id="PRRT_nonempty_snapshot",
             comments=[ReviewThreadComment(database_id=2301, body=finding_body)],
         )
-        github = MagicMock()
+        github = controller_github_mock()
         github.get_pr_comments.return_value = []
+        github.get_pr_comments_strict = github.get_pr_comments
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pr_review_threads_strict.return_value = [review_thread]
         result = AdversarialValidationResult(result="NEEDS_FIX", summary="Correction B remains incomplete", findings=[finding])
         config = MagicMock(quota_selection_strategy="surplus")
@@ -2661,7 +2724,7 @@ class TestAdversarialValidationPRFlow:
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
 
@@ -2697,7 +2760,7 @@ class TestAdversarialValidationPRFlow:
         config.AUTO_MERGE = True
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         status = ProcessedPRResult(pr_data=pr_data)
 
@@ -2746,7 +2809,7 @@ class TestAdversarialValidationPRFlow:
         config.ENABLE_ADVERSARIAL_VALIDATION = False
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": "abc123456789"}}
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
@@ -2792,7 +2855,7 @@ class TestAdversarialValidationPRFlow:
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
 
@@ -2833,7 +2896,7 @@ class TestAdversarialValidationPRFlow:
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
 
         # Remote PR now has a newer commit "def987654321" pushed
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": "def987654321"}}
 
@@ -2876,7 +2939,7 @@ class TestAdversarialValidationPRFlow:
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
 
         # Remote verification API throws an exception
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.side_effect = RuntimeError("GitHub API rate limited")
 
@@ -2904,7 +2967,7 @@ class TestAdversarialValidationPRFlow:
         config = AutomationConfig()
         pr_data = {"number": 77, "head": {"ref": "feature-77", "sha": "abc123"}, "labels": []}
         status = ProcessedPRResult(pr_data=pr_data)
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
 
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {}, status)
@@ -2931,7 +2994,7 @@ class TestAdversarialValidationPRFlow:
         pr_data = {"number": 78, "head": {"ref": "feature-78", "sha": "abc123"}, "labels": []}
         status = ProcessedPRResult(pr_data=pr_data)
 
-        actions = _handle_pr_merge(MagicMock(), "owner/repo", pr_data, config, {}, status)
+        actions = _handle_pr_merge(controller_github_mock(), "owner/repo", pr_data, config, {}, status)
 
         assert actions == [
             "All GitHub Actions checks passed for PR #78",
@@ -2966,7 +3029,7 @@ class TestAdversarialValidationPRFlow:
         # Missing sha in head dictionary
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
 
@@ -3006,7 +3069,7 @@ class TestAdversarialValidationPRFlow:
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": "abc123456789"}}
 
@@ -3043,7 +3106,7 @@ class TestAdversarialValidationPRFlow:
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "maintenance123"
         pr_data = {"number": 100, "body": "Periodic documentation refresh", "labels": [], "head": {"ref": "docs-refresh", "sha": head_sha}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         config = AutomationConfig()
@@ -3079,7 +3142,7 @@ class TestAdversarialValidationPRFlow:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         pr_data = {"number": 100, "body": "Fixes #42", "labels": [], "head": {"ref": "feature-branch", "sha": "current-head"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_issue.return_value = None
         config = AutomationConfig()
@@ -3113,7 +3176,7 @@ class TestAdversarialValidationPRFlow:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "current2"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [codex_review_summary("👀 **In progress**")]
         config = AutomationConfig()
@@ -3148,7 +3211,7 @@ class TestAdversarialValidationPRFlow:
         mock_exit_in_progress,
     ):
         pr_data = {"number": 90, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "current2"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         config = AutomationConfig()
         config.AUTO_MERGE = True
@@ -3196,7 +3259,7 @@ class TestAdversarialValidationPRFlow:
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         status = ProcessedPRResult(pr_data=pr_data)
 
-        actions = _handle_pr_merge(MagicMock(), "owner/repo", pr_data, config, {}, status)
+        actions = _handle_pr_merge(controller_github_mock(), "owner/repo", pr_data, config, {}, status)
 
         mock_run_validation.assert_not_called()
         mock_merge_pr.assert_not_called()
@@ -3223,7 +3286,7 @@ class TestAdversarialValidationPRFlow:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "current2"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_issue.return_value = {"number": 99, "title": "Specification"}
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [codex_review_summary("✅ **Completed**")]
@@ -3260,7 +3323,7 @@ class TestAdversarialValidationPRFlow:
         mock_run_validation.return_value = AdversarialValidationResult(result="PASS", summary="Current head satisfies the Issue")
         current_sha = "current-head-h2"
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": current_sha}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [codex_review_summary("✅ **Completed**", reviewed_sha="old-head-h1")]
         client.get_pull_request.return_value = {"head": {"sha": current_sha}}
@@ -3321,7 +3384,7 @@ class TestAdversarialValidationPRFlow:
         mock_run_validation.side_effect = validation_with_refresh
         head_sha = "current-head-h2"
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": head_sha}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [codex_review_summary("✅ **Completed**", reviewed_sha="old-head-h1")]
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -3393,7 +3456,7 @@ class TestAdversarialValidationPRFlow:
 
         mock_checks.side_effect = ci_status
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": "current-head"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [codex_review_summary("✅ **Completed**", reviewed_sha="old-head")]
 
@@ -3483,7 +3546,7 @@ class TestAdversarialValidationPRFlow:
 
         mock_merge_pr.side_effect = merge_side_effect
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": "current-head"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [codex_review_summary("✅ **Completed**", reviewed_sha="old-head")]
         client.get_pull_request.return_value = {"head": {"sha": "current-head"}}
@@ -3527,7 +3590,7 @@ class TestAtomicMergeSHAPrecondition:
         mock_get_ghapi.return_value = mock_api
         mock_get_ghapi_adapter.return_value = mock_api
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.token = "fake-token"
 
@@ -3590,7 +3653,7 @@ class TestAtomicMergeSHAPrecondition:
         mock_get_ghapi.return_value = mock_api
         mock_get_ghapi_adapter.return_value = mock_api
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.token = "fake-token"
 
@@ -3644,9 +3707,11 @@ class TestMaxAdversarialValidationsGating:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "abc123456789" + "0" * 28
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
 
         config = AutomationConfig()
@@ -3683,7 +3748,7 @@ class TestMaxAdversarialValidationsGating:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "newcommit1234"
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {"body": "<!-- auto-coder-adversarial-validation:v4:oldsha1 -->\n## ❌ Auto-Coder adversarial validation: NEEDS_FIX"},
@@ -3734,7 +3799,7 @@ class TestMaxAdversarialValidationsGating:
         )
 
         head_sha = "newcommit1234"
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {"body": f"<!-- auto-coder-adversarial-validation:v4:oldsha1 -->\n## ❌ Auto-Coder adversarial validation: {old_verdict}"},
@@ -3775,7 +3840,7 @@ class TestMaxAdversarialValidationsGating:
     ):
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         head_sha = "abc123456789" + "0" * 28
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [
             {"body": f"<!-- auto-coder-adversarial-validation:v4:{head_sha} -->\n## ❌ Auto-Coder adversarial validation: NEEDS_FIX"},
@@ -3938,7 +4003,7 @@ class TestClaimedReviewThreadValidationFlow:
                 )
             ],
         )
-        client = GitHubClient("test-token")
+        client = controller_github_client()
         client.get_pr_review_threads_strict = MagicMock(return_value=[thread])
         client.get_pr_reviews_strict = MagicMock(
             return_value=[
@@ -4086,7 +4151,7 @@ class TestClaimedReviewThreadValidationFlow:
         if review_state == "ordinary-no-commit":
             human_thread.comments[-1].body = "Verified the existing behavior; no code change was needed.\n\n<!-- auto-coder-review-addressed:v1 -->"
         threads = [human_thread] if ordinary_only else [app_thread, human_thread]
-        client = GitHubClient("test-token")
+        client = controller_github_client()
         client.get_authenticated_user_login = MagicMock(return_value="implementer")
         client.get_pr_review_threads_strict = MagicMock(return_value=threads)
         client.get_pr_reviews_strict = MagicMock(
@@ -4224,7 +4289,7 @@ class TestClaimedReviewThreadValidationFlow:
                 )
             ],
         )
-        client = GitHubClient("test-token")
+        client = controller_github_client()
         client.get_pr_review_threads_strict = MagicMock(return_value=[thread])
         client.get_pr_reviews_strict = MagicMock(
             return_value=[
@@ -4312,7 +4377,7 @@ class TestClaimedReviewThreadValidationFlow:
                 )
             ],
         )
-        client = GitHubClient("test-token")
+        client = controller_github_client()
         client.get_pr_review_threads_strict = MagicMock(return_value=[thread])
         client.get_pr_reviews_strict = MagicMock(
             return_value=[
@@ -4408,7 +4473,7 @@ class TestClaimedReviewThreadValidationFlow:
                 )
             ],
         )
-        client = GitHubClient("test-token")
+        client = controller_github_client()
         client.get_pr_review_threads_strict = MagicMock(return_value=[authentic_thread, human_thread])
         client.get_pr_reviews_strict = MagicMock(
             return_value=[
@@ -4508,7 +4573,7 @@ class TestClaimedReviewThreadValidationFlow:
                 )
             ],
         )
-        client = GitHubClient("test-token")
+        client = controller_github_client()
         client.get_pr_review_threads_strict = MagicMock(return_value=[])
         client.get_pr_reviews_strict = MagicMock(return_value=[])
         client.get_pr_comments = MagicMock(return_value=[codex_review_summary("Completed", head_sha)])
@@ -4587,7 +4652,7 @@ class TestClaimedReviewThreadValidationFlow:
                 )
             ],
         )
-        client = GitHubClient("test-token")
+        client = controller_github_client()
         client.get_pr_review_threads_strict = MagicMock(return_value=[thread])
         client.get_pr_reviews_strict = MagicMock(
             return_value=[
@@ -4688,8 +4753,10 @@ class TestClaimedReviewThreadValidationFlow:
                 )
             ],
         )
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_reviews_strict.return_value = [{"body": format_adversarial_validation_comment(AdversarialValidationResult(result=saved_verdict, summary="Prior result without this reply"), head_sha), "user": {"login": "auto-coder-reviewer[bot]"}}]
         client.get_issue.return_value = {"number": 99, "title": "Contract", "body": "Required behavior"}
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -4750,6 +4817,8 @@ class TestClaimedReviewThreadValidationFlow:
         client = _closure_client([claimed])
         client.get_pull_request_head_sha_strict.return_value = head_sha
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_issue.return_value = {"number": 99, "title": "Contract", "body": "Required behavior"}
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         config = AutomationConfig()
@@ -4822,6 +4891,8 @@ class TestClaimedReviewThreadValidationFlow:
         client = _closure_client([claimed])
         client.get_pull_request_head_sha_strict.return_value = head_sha
         client.get_pr_comments.return_value = []
+        client.get_pr_comments_strict = client.get_pr_comments
+        client.get_authenticated_user_login.return_value = "controller"
         client.get_issue.return_value = {"number": 99, "title": "Contract", "body": "Required behavior"}
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         config = AutomationConfig()
@@ -4910,7 +4981,7 @@ class TestClaimedReviewThreadValidationFlow:
         config.AUTO_MERGE = True
         pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-123", "sha": "123abc456"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": "123abc456"}}
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
@@ -4969,7 +5040,7 @@ class TestClaimedReviewThreadValidationFlow:
         config.AUTO_MERGE = True
         pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-123", "sha": "123abc456"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": "123abc456"}}
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
@@ -5032,7 +5103,7 @@ class TestClaimedReviewThreadValidationFlow:
         config = AutomationConfig()
         config.AUTO_MERGE = True
         pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-123", "sha": "123abc456"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
 
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
@@ -5058,7 +5129,7 @@ class TestClaimedReviewThreadValidationFlow:
         config.AUTO_MERGE = True
         pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-123", "sha": "123abc456"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_authenticated_user_login.return_value = "agent[bot]"
         client.get_pr_review_threads_strict.return_value = [
             ReviewThread(
@@ -5094,7 +5165,7 @@ class TestClaimedReviewThreadValidationFlow:
         config.AUTO_MERGE = True
         pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-123", "sha": "123abc456"}}
 
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.side_effect = Exception("transient GitHub API error")
 
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
@@ -5122,7 +5193,7 @@ class TestClaimedReviewThreadValidationFlow:
         config = AutomationConfig()
         config.AUTO_MERGE = True
         pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-123", "sha": "123abc456"}}
-        client = MagicMock()
+        client = controller_github_mock()
         client.get_pr_review_threads_strict.return_value = []
 
         actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})

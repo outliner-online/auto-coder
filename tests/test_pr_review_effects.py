@@ -1,12 +1,15 @@
 import json
 import threading
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from auto_coder import pr_processor
 from auto_coder.accepted_finding_bridge import ObservedRoot, RootObservation
+from auto_coder.controller_identity_history import ControllerIdentityHistoryError, controller_authority_scope
 from auto_coder.github_app_reviewer import ReviewerAppIdentity, ReviewPublicationResult
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.pr_review_cycle import (
     PUBLICATION_ACKNOWLEDGED,
     ContractSnapshot,
@@ -218,6 +221,60 @@ def test_uncertain_effect_reconciles_without_resend_and_survives_restart(tmp_pat
     assert transport.sent == 0
     assert transport.reconciled == 1
     assert confirmed.owner_token == "new-worker"
+
+
+@pytest.mark.parametrize("changed_authority", ["current-account", "history-declaration"])
+def test_controller_change_before_native_effect_settlement_preserves_receipt_without_replay(tmp_path, monkeypatch, changed_authority):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    repository = ReviewEffectRepository("owner/repo", tmp_path / "effects.json")
+    payload = _payload()
+
+    class Controller:
+        identity = ControllerIdentity("controller", account_id=101)
+
+        def get_authenticated_controller_identity(self, _repo=None):
+            return self.identity
+
+        def resolve_github_account_identity(self, _login):
+            raise AssertionError("An empty historical declaration performs no lookup")
+
+    client = Controller()
+    transport = _Transport(EffectAttempt(CONFIRMED, "native-thread:12"), EffectAttempt(CONFIRMED, "native-thread:12"))
+    original_record = repository.record
+    changed = False
+    configuration = tmp_path / ".auto-coder" / "owner" / "repo" / "config.toml"
+
+    def change_before_settlement(operation_id, owner_token, outcome):
+        nonlocal changed
+        if outcome.status == CONFIRMED and not changed:
+            changed = True
+            if changed_authority == "current-account":
+                client.identity = ControllerIdentity("new-controller", account_id=102)
+            else:
+                configuration.parent.mkdir(parents=True)
+                configuration.write_text("[github-controller-identity-history]\nprior_logins = []\n", encoding="utf-8")
+        return original_record(operation_id, owner_token, outcome)
+
+    monkeypatch.setattr(repository, "record", change_before_settlement)
+    executor = ReviewEffectExecutor(repository, "worker")
+    with pytest.raises(ControllerIdentityHistoryError), controller_authority_scope(client, "owner/repo"):
+        pending = executor.apply(payload, "thread-closure", "native-thread:12", transport, lambda: True)
+        assert pending.status == UNCERTAIN
+
+    operation_id = repository.operation_identity(payload, "thread-closure", "native-thread:12")
+    retained = repository.get(operation_id)
+    assert retained is not None and retained.status == UNCERTAIN
+    assert retained.receipt == "native-thread:12"
+    assert retained.exact_payload == payload.canonical_json()
+    assert transport.sent == 1
+
+    client.identity = ControllerIdentity("controller", account_id=101)
+    if configuration.exists():
+        configuration.unlink()
+    with controller_authority_scope(client, "owner/repo"):
+        confirmed = executor.apply(payload, "thread-closure", "native-thread:12", transport, lambda: True)
+    assert confirmed.status == CONFIRMED and confirmed.receipt == "native-thread:12"
+    assert transport.sent == 1 and transport.reconciled == 1
 
 
 @pytest.mark.parametrize("initial_status", [RESERVED, UNCERTAIN])

@@ -13,6 +13,7 @@ import pytest
 from auto_coder.adversarial_validator import format_adversarial_review_summary
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.durable_repair_allowance import GenerationLifecycleState, RepairAllowanceLedger
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.local_review_repair import LocalReviewRepairStore, admit_local_repair_allowance
 from auto_coder.local_review_validation import LocalRepairVerificationStore, run_pending_local_repair_verification
 from auto_coder.pr_processor import _review_feedback_identity
@@ -413,6 +414,8 @@ def test_production_pending_lane_excludes_unrelated_threads_and_reports_missing_
 
     repository, head, targets, identities, _request_value, ledger, store, _authority = verification_case
     client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+    client.get_pr_comments_strict.return_value = []
     roots = [
         ReviewThread(
             id=target.thread_id,
@@ -532,6 +535,8 @@ def test_same_commit_actionable_validation_routes_to_local_repair_even_with_forc
     saved = AdversarialValidationResult(result=status, summary="Unresolved original validation", findings=[finding])
     thread = ReviewThread(id="original", comments=[ReviewThreadComment(database_id=1, body=format_adversarial_finding_comment(finding), author_login="auto-coder-reviewer[bot]")])
     client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+    client.get_pr_comments_strict.return_value = []
     client.get_pr_review_threads_strict.return_value = [thread]
     client.get_pr_reviews_strict.return_value = [{"body": format_adversarial_validation_comment(saved, head), "user": {"login": "auto-coder-reviewer[bot]"}, "commit_id": head}]
     pr_data = {"number": 42, "body": "<!-- auto-coder:local-llm -->\nFixes #7", "labels": [], "head": {"ref": "repair", "sha": head}, "base": {"ref": "main"}}
