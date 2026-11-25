@@ -1,0 +1,59 @@
+{
+  "candidate": {
+    "configuration_digest": "sha256:0ef0889fb3931e737a7fdbb605803ce8e48c811853068b8888afecf0c2b994e3",
+    "inventory_nodes": 14584,
+    "max_command_elapsed_seconds": 618,
+    "max_job_elapsed_seconds": 671,
+    "max_native_phase_seconds": {
+      "call": 297.934,
+      "setup": 262.437,
+      "teardown": 2.495,
+      "total": 562.867
+    },
+    "max_shard": "7/10",
+    "post_command_seconds": 5,
+    "pre_command_seconds": 48,
+    "run_attempt": 1,
+    "run_id": 45487475778,
+    "source_sha": "aed1e23dbe3047e5ed691b8d0b88b1295b6de936"
+  },
+  "comparison": {
+    "command_elapsed_delta_seconds": -14,
+    "conclusion": "inconclusive",
+    "job_elapsed_delta_seconds": -20,
+    "native_phase_delta_seconds": 17.896,
+    "reasons": [
+      "different source revisions",
+      "different configuration digests",
+      "different native inventories",
+      "different shard counts",
+      "single successful observation per configuration"
+    ]
+  },
+  "controls": {
+    "automatic_retry_observation": "Both successful runs are attempt 1; every receipt records one native invocation and each selected node executes once.",
+    "profile_id": "source-required-v1",
+    "python_major_minor": "3.12",
+    "selector": "not opencode_live",
+    "workflow": "Test Source for Runtime"
+  },
+  "reference": {
+    "configuration_digest": "sha256:081577e63a5fdd885ae3d61d8dc1f3e69835f4fa17135edc6c0d963b2566e386",
+    "inventory_nodes": 14293,
+    "max_command_elapsed_seconds": 632,
+    "max_job_elapsed_seconds": 691,
+    "max_native_phase_seconds": {
+      "call": 94.63,
+      "setup": 442.26,
+      "teardown": 8.081,
+      "total": 544.971
+    },
+    "max_shard": "3/12",
+    "post_command_seconds": 6,
+    "pre_command_seconds": 53,
+    "run_attempt": 1,
+    "run_id": 45146500439,
+    "source_sha": "1911e76a774d794ca2d42f7512646e19c8d69aba"
+  },
+  "schema_version": "complete-source-timing-comparison-v1"
+}

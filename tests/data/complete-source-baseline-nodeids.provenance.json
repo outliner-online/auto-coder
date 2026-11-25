@@ -1,0 +1,9 @@
+{
+  "inventory_sha256": "4633b49e4754d63f112407ac7736b4651dc64bb8ff4df33c3cd0ae0466fc20c3",
+  "nodes": 14291,
+  "profile_id": "source-required-v1",
+  "python_major_minor": "3.12",
+  "schema_version": "complete-source-baseline-v1",
+  "selector": "not opencode_live",
+  "source_sha": "0924a591da911c91633612136a7e626d98bdba7d"
+}

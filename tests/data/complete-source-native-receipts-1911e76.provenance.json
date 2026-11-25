@@ -1,0 +1,9 @@
+{
+  "archive_sha256": "221db3557cf9ac3d340b889acd5164604fa95ffa81aafe4ee90f26aa182a3bb8",
+  "run_id": 45146500439,
+  "run_attempt": 1,
+  "source_sha": "1911e76a774d794ca2d42f7512646e19c8d69aba",
+  "profile_id": "source-required-v1",
+  "selector": "not opencode_live",
+  "schema_version": "complete-source-native-receipts-v1"
+}

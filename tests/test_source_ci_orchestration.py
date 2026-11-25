@@ -6,14 +6,19 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 import yaml
+from scripts import check_source_test_shards
 
 from auto_coder.ci_shard_plan import ShardContext, read_plan
-from auto_coder.source_ci_evidence import receipt_complete, validate_receipt
+from auto_coder.source_ci_evidence import PLAN_JOB_NAME, WORKFLOW_PATH, _artifact_name, receipt_complete, validate_receipt
+from auto_coder.tested_source_refs import TestedSourceError as SourceQualificationError
+from auto_coder.util.gh_cache import GitDataResponse
 from tests.test_ci_shard_plan import _history, _inventory, _plan_cli, _project, _run
 
 pytestmark = pytest.mark.usefixtures("_use_real_commands")
@@ -93,6 +98,58 @@ def _apply_receipt(project: Path, plan_path: Path, shard: int, receipt: Path, *,
         *(plan.context.pytest_args if pytest_args is None else pytest_args),
         env_patch={"GITHUB_WORKFLOW": "Test Source for Runtime", "GITHUB_JOB": "complete-source-shard", "GITHUB_RUN_ID": "7", "GITHUB_RUN_ATTEMPT": attempt, "GITHUB_SHA": plan.context.checkout_sha, "GITHUB_EVENT_NAME": event_name, **(env_patch or {})},
     )
+
+
+def _iso(seconds: int) -> str:
+    return (datetime(2026, 11, 23, tzinfo=timezone.utc) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+class _AggregateEvidence:
+    """Actions readback for receipts produced by the real native plugins."""
+
+    def __init__(self, plan_path: Path, artifacts: Path) -> None:
+        self.plan_path = plan_path
+        self.artifacts = artifacts
+        self.plan, _raw = read_plan(plan_path)
+
+    def request(self, method: str, path: str, payload: dict[str, object] | None = None) -> GitDataResponse:
+        assert method == "GET" and payload is None
+        if path == "actions/runs/7/attempts/1":
+            return GitDataResponse(
+                200,
+                {
+                    "id": 7,
+                    "run_attempt": 1,
+                    "head_sha": self.plan.context.origin["run_head_sha"],
+                    "event": self.plan.context.origin["event_name"],
+                    "path": WORKFLOW_PATH,
+                    "status": "in_progress",
+                    "run_started_at": _iso(0),
+                },
+            )
+        if path == "actions/runs/7/attempts/1/jobs?per_page=100":
+            jobs: list[dict[str, object]] = [{"name": PLAN_JOB_NAME, "run_id": 7, "run_attempt": 1, "id": 100, "status": "completed", "conclusion": "success", "started_at": _iso(1), "completed_at": _iso(5), "steps": []}]
+            steps = [{"name": name, "conclusion": "success"} for name in ("Prepare Python-only management test fixture", "Install Chromium", "Verify real headless Chromium", "Run complete required source selection")]
+            for shard in range(1, len(self.plan.shards) + 1):
+                receipt_path = self.artifacts / _artifact_name(7, 1, shard) / "receipt.json"
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                jobs.append({"name": f"Complete source tests ({shard}/{len(self.plan.shards)})", "run_id": 7, "run_attempt": 1, "id": 100 + shard, "status": "completed", "conclusion": "success", "started_at": receipt["started_at"], "completed_at": receipt["completed_at"], "steps": steps})
+            return GitDataResponse(200, {"total_count": len(jobs), "jobs": jobs})
+        if path.startswith("actions/runs/7/attempts/1/jobs?per_page=100&page="):
+            return GitDataResponse(200, {"total_count": len(self.plan.shards) + 1, "jobs": []})
+        if path.startswith("actions/runs/7/artifacts?per_page=100"):
+            names = [_artifact_name(7, 1, None)] + [_artifact_name(7, 1, shard) for shard in range(1, len(self.plan.shards) + 1)]
+            artifacts = [{"name": name, "id": 400 + index, "expired": False, "created_at": _iso(21), "workflow_run": {"id": 7}} for index, name in enumerate(names)]
+            return GitDataResponse(200, {"total_count": len(artifacts), "artifacts": artifacts})
+        raise AssertionError(path)
+
+
+def _run_aggregate(monkeypatch: pytest.MonkeyPatch, plan_path: Path, artifacts: Path) -> None:
+    evidence = _AggregateEvidence(plan_path, artifacts)
+    monkeypatch.setenv("GITHUB_TOKEN", "aggregate-read-token")
+    monkeypatch.setattr(check_source_test_shards, "GitHubGitDataClient", lambda _token, _repository: evidence)
+    monkeypatch.setattr(sys, "argv", ["check_source_test_shards.py", "--repository", evidence.plan.context.repository, "--run-id", "7", "--run-attempt", "1", "--source-sha", evidence.plan.context.checkout_sha, "--plan", str(plan_path), "--artifacts", str(artifacts)])
+    check_source_test_shards.main()
 
 
 def _create_source_context(project: Path, output: Path, source_sha: str, event_sha: str, run_head_sha: str, event_name: str) -> subprocess.CompletedProcess[str]:
@@ -214,9 +271,11 @@ def test_actual_source_plan_and_all_native_shard_receipts_cover_exact_full_inven
     assert created.returncode == 0, created.stdout + created.stderr
     plan, _raw = read_plan(plan_path)
     assert len(plan.shards) == len(collected)
+    artifacts = tmp_path / "passing-artifacts"
     observed: list[str] = []
     for shard in range(1, len(plan.shards) + 1):
-        receipt = tmp_path / f"receipt-{shard}.json"
+        receipt = artifacts / _artifact_name(7, 1, shard) / "receipt.json"
+        receipt.parent.mkdir(parents=True)
         applied = _apply_receipt(project, plan_path, shard, receipt)
         assert applied.returncode == 0, applied.stdout + applied.stderr
         data = json.loads(receipt.read_text(encoding="utf-8"))
@@ -231,15 +290,18 @@ def test_actual_source_plan_and_all_native_shard_receipts_cover_exact_full_inven
         if any("expected_failure" in node for node in data["executed"]):
             assert any(report["outcome"] == "skipped" and report["wasxfail"] for report in data["reports"])
     assert observed == list(collected) and Counter(observed) == Counter(collected)
+    _run_aggregate(monkeypatch, plan_path, artifacts)
 
 
-def test_real_native_failures_and_teardown_errors_never_create_qualifying_receipts(tmp_path: Path) -> None:
+def test_real_native_failures_and_teardown_errors_never_create_qualifying_receipts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project, context_path, _context = _source_project(tmp_path, BAD_TESTS)
     plan_path = tmp_path / "plan.json"
     created = _plan_cli(project, context_path, plan_path, None, "-m", "not opencode_live")
     assert created.returncode == 0, created.stdout + created.stderr
     plan, _raw = read_plan(plan_path)
-    receipt = tmp_path / "failed-receipt.json"
+    artifacts = tmp_path / "failed-artifacts"
+    receipt = artifacts / _artifact_name(7, 1, 1) / "receipt.json"
+    receipt.parent.mkdir(parents=True)
     run = _apply_receipt(project, plan_path, 1, receipt)
     assert run.returncode != 0, run.stdout + run.stderr
     payload = json.loads(receipt.read_text(encoding="utf-8"))
@@ -248,6 +310,8 @@ def test_real_native_failures_and_teardown_errors_never_create_qualifying_receip
     assert any(report["phase"] == "teardown" and report["outcome"] == "failed" for report in payload["reports"])
     with pytest.raises(ValueError, match="incomplete or failed"):
         validate_receipt(payload, plan, 1, 7, 1)
+    with pytest.raises(SourceQualificationError, match="incomplete or failed"):
+        _run_aggregate(monkeypatch, plan_path, artifacts)
 
 
 def test_wrong_producing_attempt_and_receipt_overwrite_are_native_failures(tmp_path: Path) -> None:

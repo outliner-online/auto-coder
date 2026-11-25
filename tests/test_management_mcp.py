@@ -115,7 +115,12 @@ def real_boundary(tmp_path, monkeypatch):
                 "aud": project,
                 "sub": uid,
                 "iat": now - 10,
-                "exp": now + 300,
+                # The real Firebase SDK validates this claim against wall time,
+                # while the grant authority below intentionally uses the
+                # fixture clock.  Keep the login credential valid across slow
+                # production-boundary tests that start a real worker before
+                # requesting it; access-token expiry is tested separately.
+                "exp": now + 3600,
                 "auth_time": now - 20,
                 "firebase": {"sign_in_provider": "google.com"},
             },

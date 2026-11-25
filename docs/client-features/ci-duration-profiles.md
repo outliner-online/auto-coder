@@ -160,3 +160,44 @@ GitHub, change CI required checks, or wire a scheduling algorithm. Consumers
 may use `nodes[exact_nodeid].p95_seconds` as an *optional measured estimate*
 and must retain their own unknown-node fallback, without treating a duration
 profile as a test-result cache.
+
+The complete-source planner uses a one-second estimate for a current node with
+neither native history nor an exact or same-file bootstrap estimate. This
+keeps large sets of new, usually fast parametrizations from overwhelming the
+measured long-test weights and collapsing those tests into one slow shard. The
+fallback affects assignment only: native collection remains the complete
+inventory, and receipts still verify every selected node exactly once.
+
+## Issue #2870 timing result
+
+The available successful Actions observations do **not** establish a measured
+latency improvement. Candidate run
+[45487475778](https://github.com/outliner-online/auto-coder/actions/runs/45487475778)
+used source `aed1e23d`, 14,584 selected nodes, and 10 shards; reference run
+[45146500439](https://github.com/outliner-online/auto-coder/actions/runs/45146500439)
+used source `1911e76a`, 14,293 selected nodes, and 12 shards. Their source-profile
+configuration digests also differ. They therefore are not a same-source,
+old-setting/new-setting comparison.
+
+For the slowest elapsed job in each successful attempt, the observed timing
+breakdown is:
+
+| Observation | Job elapsed (queue excluded) | Before test command | Test-command wall | After test command | Native setup | Native call | Native teardown | Native total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Candidate, shard 7/10 | 671 s | 48 s | 618 s | 5 s | 262.437 s | 297.934 s | 2.495 s | 562.867 s |
+| Reference, shard 3/12 | 691 s | 53 s | 632 s | 6 s | 442.260 s | 94.630 s | 8.081 s | 544.971 s |
+
+Thus the candidate's maximum job elapsed time is 20 seconds lower and its
+command wall time is 14 seconds lower, while the summed native pytest phases
+on the elapsed-max shard are 17.896 seconds higher. Both observations are run
+attempt 1; every shard receipt records one native invocation and each selected
+node once, so the evidence shows no workflow rerun or native retry contribution.
+One observation per differing source, configuration, inventory, and shard
+layout cannot distinguish the fallback's effect from workload and runner
+variation. The result is **inconclusive**, not a claim that the change reduced
+end-to-end or native pytest latency. A qualifying improvement claim requires
+interleaved or repeated old-setting/new-setting runs of the same source, lock,
+profile, prerequisites, inventory, and runner inputs, with both maximum job
+elapsed and maximum native phase totals improving beyond observed variation.
+The machine-readable observation used by the regression is stored in
+`tests/data/complete-source-timing-comparison-aed1e23.json`.

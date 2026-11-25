@@ -27,6 +27,31 @@ from src.auto_coder.invocation_process_supervisor import (
 from tests.test_local_conflict_repair_job import sparse_thread_switches  # noqa: F401
 
 
+def _descriptor_is_writable(descriptor: int) -> bool:
+    """Probe a pipe without select(2)'s platform descriptor-number ceiling."""
+    with selectors.DefaultSelector() as selector:
+        selector.register(descriptor, selectors.EVENT_WRITE)
+        return bool(selector.select(0))
+
+
+def test_descriptor_writability_supports_fd_above_select_ceiling() -> None:
+    read_descriptor, write_descriptor = os.pipe()
+    high_descriptor = None
+    try:
+        try:
+            high_descriptor = fcntl.fcntl(write_descriptor, fcntl.F_DUPFD, 2048)
+        except OSError as error:
+            if error.errno in {errno.EINVAL, errno.EMFILE, errno.ENFILE}:
+                pytest.skip("descriptor limit cannot provide the synthetic high-FD control")
+            raise
+        assert _descriptor_is_writable(high_descriptor)
+    finally:
+        os.close(read_descriptor)
+        os.close(write_descriptor)
+        if high_descriptor is not None:
+            os.close(high_descriptor)
+
+
 class ProcessGroupOwner:
     """Deterministic unit-test owner; production conformance uses cgroup v2."""
 

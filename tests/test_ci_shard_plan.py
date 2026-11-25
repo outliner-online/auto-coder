@@ -719,7 +719,7 @@ def test_source_valid_partial_native_profile_and_invalid_history_preserve_curren
     assert native_source["status"] == "matched"
     assert bootstrap["status"] == "matched"
     assert [entry["provenance"] for entry in estimated] == ["native_p95", "snapshot_exact", "source_floor", "source_floor"]
-    assert [entry["estimated_ms"] for entry in estimated] == [126000, 2500, 5000, 5000]
+    assert [entry["estimated_ms"] for entry in estimated] == [126000, 2500, 1000, 1000]
     assert estimated[0]["sample_count"] == 1
     assert sum("native_p95" in str(row) for row in estimated) == 1
     # Foreign native identity cannot override validated non-native estimates or the full current inventory.
@@ -730,7 +730,7 @@ def test_source_valid_partial_native_profile_and_invalid_history_preserve_curren
     assert bootstrap["status"] == "matched"
     assert [row["nodeid"] for row in degraded] == list(current)
     assert [row["provenance"] for row in degraded] == ["same_file_max", "snapshot_exact", "source_floor", "source_floor"]
-    assert [row["estimated_ms"] for row in degraded] == [2500, 2500, 5000, 5000]
+    assert [row["estimated_ms"] for row in degraded] == [2500, 2500, 1000, 1000]
 
 
 def test_source_policy_degraded_history_cli_applies_every_fresh_node_with_native_outcomes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -862,7 +862,7 @@ def test_new_file(variant, request):
                 assert estimates[native_node]["provenance"] == "same_file_max"
         else:
             assert {row["provenance"] for row in estimates.values()} == {"source_floor"}
-            assert {row["estimated_ms"] for row in estimates.values()} == {5_000}
+            assert {row["estimated_ms"] for row in estimates.values()} == {1_000}
         observed: list[str] = []
         shard_results: list[subprocess.CompletedProcess[str]] = []
         for shard_number in range(1, len(verified.shards) + 1):
