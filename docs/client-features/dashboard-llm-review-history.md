@@ -247,14 +247,17 @@ approval or completion. Replaying a previously blocked decision uses the existin
 handoff rather than adding another model review or provider request.
 
 When acknowledged cloud corrections leave ordinary review threads unresolved,
-an authentic older-head finding can still enter its first current-head review.
-The existing review-thread gate records a deferred
+the current head can enter its first independent review even without an authentic
+older-head finding. An existing authentic older-head finding can also continue
+to revalidation. The existing review-thread gate records a deferred
 `acknowledged-review-reassessment` effect with the examined head, ordinary
-blocking thread IDs and authenticated revalidation thread IDs. This admission
-is separate from the preceding deferred repair observation and the following
-validator result. It is not an explicit force request, an external-thread
-closure, or merge completion. Changed post-Codex discussion, newly actionable
-feedback and observed uncertain delivery retain their existing waits.
+blocking thread IDs and authenticated revalidation thread IDs; that last list
+is empty for ordinary-only admission. This admission is separate from the
+preceding deferred repair observation and the following validator result.
+It is not an explicit force request, an external-thread closure, or merge
+completion. Changed post-Codex discussion, newly actionable feedback, observed
+uncertain delivery, the review-count limit and same-head verdict reuse retain
+their existing behavior.
 
 A completed Codex correction with confirmed delivery receipts and a native
 completed assistant turn later than each retained pre-send baseline can admit

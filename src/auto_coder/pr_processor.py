@@ -6735,9 +6735,9 @@ def _coordinate_pr_review(
                         repair_kwargs["allow_current_head_reassessment"] = True
                     repair_result = _delegate_cloud_review_thread_repair(repo_name, pr_data, **repair_kwargs)
                     actions.extend(repair_result)
-                    if revalidating_older_head_threads and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.acknowledged_no_actionable_feedback:
-                        # A completed ordinary correction must not starve an
-                        # authentic finding's first review on the current head.
+                    if (revalidating_older_head_threads or current_head_unreviewed) and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.acknowledged_no_actionable_feedback:
+                        # Acknowledged ordinary corrections can admit the first
+                        # current-head review without an older authentic finding.
                         # These ordinary roots retain their merge/closure gates.
                         acknowledged_repair_threads = repair_threads
                     if current_head_unreviewed and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.completed_no_actionable_feedback:
