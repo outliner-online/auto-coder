@@ -169,6 +169,75 @@ def test_jules_only_ordinary_selector_has_no_dispatch_candidate():
     assert config.get_ordinary_priority_groups() == []
 
 
+def test_production_dispatch_skips_raw_jules_alias_before_local_fallback(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    from auto_coder.automation_config import AutomationConfig
+    from auto_coder.issue_dispatch import DispatchOutcome
+    from auto_coder.issue_processor import _dispatch_issue_candidates
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = LLMBackendConfiguration.load_from_dict(
+        {
+            "backend": {"order": ["retired", "codex"]},
+            "backends": {"retired": {"backend_type": "jules"}},
+        }
+    )
+    local = MagicMock(return_value=["local completed"])
+    monkeypatch.setattr("auto_coder.llm_backend_config.get_llm_config", lambda **_kwargs: config)
+    monkeypatch.setattr("auto_coder.issue_processor._take_issue_actions", local)
+    monkeypatch.setattr("auto_coder.issue_processor.get_current_attempt", lambda *_args: 0)
+    monkeypatch.setattr("auto_coder.cli_helpers.build_backend_manager", lambda **_kwargs: MagicMock())
+
+    execution = _dispatch_issue_candidates(
+        "owner/repo",
+        {"number": 2891, "title": "Retired provider", "labels": []},
+        AutomationConfig(),
+        MagicMock(),
+        ["retired", "codex"],
+    )
+
+    assert execution.result.outcome is DispatchOutcome.LOCAL_COMPLETED
+    assert execution.result.backend_name == "codex"
+    local.assert_called_once()
+
+
+def test_historical_jules_acceptance_suppresses_supported_replacement(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    from auto_coder.automation_config import AutomationConfig
+    from auto_coder.issue_dispatch import AdapterOutcome, CandidateHandoff, DispatchOutcome, IssueAttemptIdentity, IssueDispatchGuard
+    from auto_coder.issue_processor import _dispatch_issue_candidates
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    identity = IssueAttemptIdentity("owner", "repo", 2891, "0")
+    guard = IssueDispatchGuard()
+    accepted = guard.dispatch_candidates(
+        identity,
+        [CandidateHandoff("jules", "jules")],
+        lambda _candidate: AdapterOutcome(DispatchOutcome.REMOTE_ACCEPTED, "historical-session"),
+    )
+    assert accepted.outcome is DispatchOutcome.REMOTE_ACCEPTED
+
+    config = LLMBackendConfiguration.load_from_dict({"backend": {"order": ["codex"]}})
+    local = MagicMock(return_value=["must not run"])
+    monkeypatch.setattr("auto_coder.llm_backend_config.get_llm_config", lambda **_kwargs: config)
+    monkeypatch.setattr("auto_coder.issue_processor._take_issue_actions", local)
+    monkeypatch.setattr("auto_coder.issue_processor.get_current_attempt", lambda *_args: 0)
+
+    execution = _dispatch_issue_candidates(
+        "owner/repo",
+        {"number": 2891, "title": "Owned attempt", "labels": []},
+        AutomationConfig(),
+        MagicMock(),
+        ["codex"],
+    )
+
+    assert execution.result.outcome is DispatchOutcome.REMOTE_ACCEPTED
+    assert execution.result.provider_reference == "historical-session"
+    local.assert_not_called()
+
+
 def test_message_manager_never_constructs_inherited_cloud_candidate(monkeypatch):
     from unittest.mock import MagicMock
 

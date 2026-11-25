@@ -8969,14 +8969,15 @@ class AutomationEngine:
         if candidate.type == "issue":
             self._get_local_job_store()
 
-        # Remote ordinary routing follows the supported cloud providers and is
-        # independent of the retired Jules availability switch.
+        # Supported cloud policy must not depend on Jules availability.  Keep
+        # the legacy Jules signal only for historical reconciliation paths;
+        # ordinary candidate projection independently excludes new Jules work.
         if self.config.jules_mode is not None:
             jules_mode = self.config.jules_mode
         else:
-            from .llm_backend_config import is_cloud_mode_enabled
+            from .llm_backend_config import is_cloud_mode_enabled, is_jules_mode_enabled
 
-            jules_mode = is_cloud_mode_enabled(repo_name=repo_name)
+            jules_mode = is_cloud_mode_enabled(repo_name=repo_name) or is_jules_mode_enabled(repo_name=repo_name)
 
         return self._process_single_candidate_unified(
             repo_name,
@@ -9200,9 +9201,9 @@ class AutomationEngine:
         with active_repo_context(repo_name):
             os.environ["REPO_NAME"] = repo_name
             self.config.repo_name = repo_name
-            from .llm_backend_config import is_cloud_mode_enabled
+            from .llm_backend_config import is_cloud_mode_enabled, is_jules_mode_enabled
 
-            jules_mode = is_cloud_mode_enabled(repo_name=repo_name)
+            jules_mode = jules_mode and (is_cloud_mode_enabled(repo_name=repo_name) or is_jules_mode_enabled(repo_name=repo_name))
             from datetime import datetime
 
             with ProgressStage("Processing single PR/IS"):

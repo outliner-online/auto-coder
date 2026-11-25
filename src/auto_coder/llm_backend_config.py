@@ -475,7 +475,7 @@ class LLMBackendConfiguration:
         """Initialize default backends if none are configured."""
         if not self.backends:
             # Add default configurations for known backends
-            default_backends = ["codex", "antigravity", "qwen", "auggie", "claude", "codex-mcp", "aider"]
+            default_backends = ["codex", "antigravity", "qwen", "auggie", "claude", "jules", "codex-mcp", "aider"]
             for backend_name in default_backends:
                 self.backends[backend_name] = BackendConfig(name=backend_name)
 
@@ -799,7 +799,7 @@ class LLMBackendConfiguration:
                     backend_config.options_for_noedit = list(parent_config.options_for_noedit)
 
         # Add default backends if they are not already in the configuration
-        default_backends = ["codex", "antigravity", "qwen", "auggie", "claude", "codex-mcp", "aider"]
+        default_backends = ["codex", "antigravity", "qwen", "auggie", "claude", "jules", "codex-mcp", "aider"]
         for backend_name in default_backends:
             if backend_name not in backends:
                 backends[backend_name] = BackendConfig(name=backend_name)
@@ -2096,6 +2096,10 @@ def is_jules_mode_enabled(repo_name: Optional[str] = None) -> bool:
 def is_cloud_mode_enabled(repo_name: Optional[str] = None) -> bool:
     """Return whether ordinary Issue policy contains a supported cloud backend."""
     llm_config = get_llm_config(repo_name=repo_name)
+    # Retain diagnostic compatibility for the already-rejected legacy section;
+    # load_from_dict/load_from_file still reject backend_cloud before this point.
+    if llm_config.backend_cloud_order or llm_config.backend_cloud_priority_groups or llm_config.backend_cloud:
+        return True
     return any(llm_config.resolve_backend_type(name) in {"codex-cloud", "claude-routine"} for group in llm_config.get_ordinary_priority_groups() for name in group)
 
 
