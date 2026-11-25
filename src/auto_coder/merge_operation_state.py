@@ -82,6 +82,60 @@ class BlockReason(str, Enum):
     RETRIES_EXHAUSTED = "throttle_retries_exhausted"
 
 
+class ReservationRefusal(str, Enum):
+    """Machine-readable reasons why an App-bound reservation was refused."""
+
+    INELIGIBLE = "ineligible"
+    BINDING_REQUIRED = "binding_required"
+    INVALID_BINDING = "invalid_binding"
+    PRINCIPAL_MISMATCH = "principal_mismatch"
+
+
+@dataclass(frozen=True)
+class EffectSenderBinding:
+    """Verified, nonsecret identity of the App principal sending an effect."""
+
+    app_role: str
+    api_origin: str
+    repository: str
+    app_id: int
+    installation_id: int
+    bot_login: str
+
+    def valid_for(self, identity: MergeOperationIdentity) -> bool:
+        return (
+            bool(self.app_role.strip())
+            and self.api_origin.rstrip("/") == identity.api_origin.rstrip("/")
+            and self.repository.casefold() == identity.repository.casefold()
+            and type(self.app_id) is int
+            and self.app_id > 0
+            and type(self.installation_id) is int
+            and self.installation_id > 0
+            and bool(self.bot_login.strip())
+            and self.bot_login.endswith("[bot]")
+        )
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "app_role": self.app_role,
+                "api_origin": self.api_origin.rstrip("/"),
+                "repository": self.repository,
+                "app_id": self.app_id,
+                "installation_id": self.installation_id,
+                "bot_login": self.bot_login,
+            },
+            sort_keys=True,
+        )
+
+    @staticmethod
+    def from_json(raw: str) -> EffectSenderBinding | None:
+        if not raw:
+            return None
+        data = json.loads(raw)
+        return EffectSenderBinding(data["app_role"], data["api_origin"], data["repository"], data["app_id"], data["installation_id"], data["bot_login"])
+
+
 @dataclass(frozen=True)
 class MergeOperationIdentity:
     """Target identity: API origin, repository, and PR number."""
@@ -146,6 +200,7 @@ class EffectRecord:
     throttle_attempts: int = 0
     throttled_attempt_ids: tuple[str, ...] = field(default_factory=tuple)
     last_error: str = ""
+    sender_binding: EffectSenderBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +228,17 @@ class ReservationResult:
     operation: MergeOperation
     attempt_id: str = ""
     generation: int = 0
+    refusal: ReservationRefusal | None = None
+
+
+@dataclass(frozen=True)
+class EffectAttemptRecord:
+    effect_name: EffectName
+    generation: int
+    attempt_id: str
+    sender_binding: EffectSenderBinding | None
+    receipt: EffectReceipt | None
+    outcome: str
 
 
 class MergeOperationPersistenceError(RuntimeError):
@@ -210,10 +276,18 @@ class MergeOperationStore:
             receipt_json TEXT NOT NULL, throttle_attempts INTEGER NOT NULL,
             throttled_attempt_ids TEXT NOT NULL, last_error TEXT NOT NULL,
             updated_at REAL NOT NULL, PRIMARY KEY (op_key, effect_name))""")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(merge_operation_effects)")}
+        if "sender_binding_json" not in columns:
+            connection.execute("ALTER TABLE merge_operation_effects ADD COLUMN sender_binding_json TEXT NOT NULL DEFAULT ''")
         connection.execute("""CREATE TABLE IF NOT EXISTS merge_operation_attempt_history (
             history_id INTEGER PRIMARY KEY AUTOINCREMENT, op_key TEXT NOT NULL,
             effect_name TEXT NOT NULL, generation INTEGER NOT NULL, attempt_id TEXT NOT NULL,
             outcome TEXT NOT NULL, detail TEXT NOT NULL, recorded_at REAL NOT NULL)""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS merge_operation_effect_attempts (
+            op_key TEXT NOT NULL, effect_name TEXT NOT NULL, generation INTEGER NOT NULL,
+            attempt_id TEXT NOT NULL, sender_binding_json TEXT NOT NULL,
+            receipt_json TEXT NOT NULL, outcome TEXT NOT NULL, updated_at REAL NOT NULL,
+            PRIMARY KEY (op_key, effect_name, generation, attempt_id))""")
         return connection
 
     # -- row <-> dataclass -------------------------------------------------
@@ -227,7 +301,7 @@ class MergeOperationStore:
             return None
         effects: dict[EffectName, EffectRecord] = {}
         for erow in connection.execute(
-            "SELECT effect_name, state, attempt_id, generation, receipt_json, throttle_attempts, " "throttled_attempt_ids, last_error FROM merge_operation_effects WHERE op_key=?",
+            "SELECT effect_name, state, attempt_id, generation, receipt_json, throttle_attempts, " "throttled_attempt_ids, last_error, sender_binding_json FROM merge_operation_effects WHERE op_key=?",
             (identity.key(),),
         ).fetchall():
             name = EffectName(erow[0])
@@ -240,6 +314,7 @@ class MergeOperationStore:
                 throttle_attempts=erow[5],
                 throttled_attempt_ids=tuple(json.loads(erow[6])),
                 last_error=erow[7],
+                sender_binding=EffectSenderBinding.from_json(erow[8]),
             )
         return MergeOperation(
             identity=identity,
@@ -276,7 +351,7 @@ class MergeOperationStore:
         )
         for name, effect in operation.effects.items():
             connection.execute(
-                "INSERT OR REPLACE INTO merge_operation_effects VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO merge_operation_effects " "(op_key,effect_name,state,attempt_id,generation,receipt_json,throttle_attempts,throttled_attempt_ids,last_error,updated_at,sender_binding_json) " "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     key,
                     name.value,
@@ -288,8 +363,30 @@ class MergeOperationStore:
                     json.dumps(effect.throttled_attempt_ids),
                     effect.last_error,
                     now,
+                    effect.sender_binding.to_json() if effect.sender_binding is not None else "",
                 ),
             )
+
+    def _save_attempt(
+        self,
+        connection: sqlite3.Connection,
+        op_key: str,
+        effect: EffectAttemptRecord,
+        now: float,
+    ) -> None:
+        connection.execute(
+            "INSERT OR REPLACE INTO merge_operation_effect_attempts VALUES (?,?,?,?,?,?,?,?)",
+            (
+                op_key,
+                effect.effect_name.value,
+                effect.generation,
+                effect.attempt_id,
+                effect.sender_binding.to_json() if effect.sender_binding is not None else "",
+                effect.receipt.to_json() if effect.receipt is not None else "",
+                effect.outcome,
+                now,
+            ),
+        )
 
     def _append_history(
         self,
@@ -325,6 +422,33 @@ class MergeOperationStore:
         except Exception as exc:
             logger.error("Could not list merge operations: {}", exc)
             raise MergeOperationPersistenceError("Merge operations could not be read") from exc
+
+    def get_attempt(
+        self,
+        identity: MergeOperationIdentity,
+        effect_name: EffectName,
+        generation: int,
+        attempt_id: str,
+    ) -> EffectAttemptRecord | None:
+        """Read durable evidence for an exact historical or current attempt."""
+        try:
+            with _LOCK, self._connect() as connection:
+                row = connection.execute(
+                    "SELECT sender_binding_json, receipt_json, outcome FROM merge_operation_effect_attempts " "WHERE op_key=? AND effect_name=? AND generation=? AND attempt_id=?",
+                    (identity.key(), effect_name.value, generation, attempt_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                return EffectAttemptRecord(
+                    effect_name,
+                    generation,
+                    attempt_id,
+                    EffectSenderBinding.from_json(row[0]),
+                    EffectReceipt.from_json(row[1]),
+                    row[2],
+                )
+        except Exception as exc:
+            raise MergeOperationPersistenceError("Merge operation attempt could not be read") from exc
 
     def get_or_create(
         self,
@@ -415,7 +539,26 @@ class MergeOperationStore:
             logger.error("Could not persist merge operation {}: {}", identity.key(), exc)
             raise MergeOperationPersistenceError("Merge operation could not be persisted") from exc
 
-    def reserve_attempt(self, identity: MergeOperationIdentity, effect_name: EffectName, *, now: float | None = None) -> ReservationResult:
+    def reserve_app_attempt(
+        self,
+        identity: MergeOperationIdentity,
+        effect_name: EffectName,
+        sender_binding: EffectSenderBinding | None,
+        *,
+        now: float | None = None,
+    ) -> ReservationResult:
+        """Reserve an App attempt, atomically persisting its verified sender."""
+        return self.reserve_attempt(identity, effect_name, now=now, sender_binding=sender_binding, require_sender_binding=True)
+
+    def reserve_attempt(
+        self,
+        identity: MergeOperationIdentity,
+        effect_name: EffectName,
+        *,
+        now: float | None = None,
+        sender_binding: EffectSenderBinding | None = None,
+        require_sender_binding: bool = False,
+    ) -> ReservationResult:
         """Acquire exclusive execution rights for one effect before its mutation call.
 
         Refused when the effect is already running (another entry point/
@@ -426,15 +569,25 @@ class MergeOperationStore:
         current_time = time.time() if now is None else now
         try:
             with _LOCK, self._connect() as connection:
+                # Serialize the eligibility read with both the binding and
+                # reservation writes, including across controller processes.
+                connection.execute("BEGIN IMMEDIATE")
                 operation = self._load_operation(connection, identity)
                 if operation is None:
                     raise MergeOperationPersistenceError(f"No merge operation exists for {identity.key()}; call get_or_create first")
                 effect = operation.effect(effect_name)
+                if require_sender_binding and sender_binding is None:
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.BINDING_REQUIRED)
+                if sender_binding is not None and not sender_binding.valid_for(identity):
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.INVALID_BINDING)
+                if effect.sender_binding is not None and sender_binding != effect.sender_binding:
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.PRINCIPAL_MISMATCH)
                 if operation.status in _TERMINAL_OPERATION_STATUSES or operation.status is OperationStatus.OPERATIONALLY_BLOCKED:
-                    return ReservationResult(False, operation)
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.INELIGIBLE)
                 if effect.state not in _RETRYABLE_EFFECT_STATES:
-                    return ReservationResult(False, operation)
+                    return ReservationResult(False, operation, refusal=ReservationRefusal.INELIGIBLE)
                 attempt_id = uuid.uuid4().hex
+                authoritative_binding = effect.sender_binding or sender_binding
                 updated_effect = EffectRecord(
                     effect_name,
                     EffectState.RUNNING,
@@ -444,6 +597,7 @@ class MergeOperationStore:
                     throttle_attempts=effect.throttle_attempts,
                     throttled_attempt_ids=effect.throttled_attempt_ids,
                     last_error=effect.last_error,
+                    sender_binding=authoritative_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -460,6 +614,12 @@ class MergeOperationStore:
                     effects=new_effects,
                 )
                 self._save_operation(connection, operation, current_time)
+                self._save_attempt(
+                    connection,
+                    identity.key(),
+                    EffectAttemptRecord(effect_name, operation.generation, attempt_id, authoritative_binding, None, "reserved"),
+                    current_time,
+                )
                 self._append_history(connection, identity.key(), effect_name, operation.generation, attempt_id, "reserved", "", current_time)
                 return ReservationResult(True, operation, attempt_id, operation.generation)
         except MergeOperationPersistenceError:
@@ -506,6 +666,18 @@ class MergeOperationStore:
                 if operation is None:
                     raise MergeOperationPersistenceError(f"No merge operation exists for {identity.key()}")
                 if not self._owns_attempt(operation, effect_name, attempt_id, generation):
+                    connection.execute(
+                        "UPDATE merge_operation_effect_attempts SET receipt_json=?, outcome=?, updated_at=? " "WHERE op_key=? AND effect_name=? AND generation=? AND attempt_id=?",
+                        (
+                            receipt.to_json() if receipt is not None else "",
+                            f"stale_{outcome_label}",
+                            current_time,
+                            identity.key(),
+                            effect_name.value,
+                            generation,
+                            attempt_id,
+                        ),
+                    )
                     self._append_history(connection, identity.key(), effect_name, generation, attempt_id, f"stale_{outcome_label}", detail, current_time)
                     return False
                 prior_effect = operation.effect(effect_name)
@@ -518,6 +690,7 @@ class MergeOperationStore:
                     throttle_attempts=prior_effect.throttle_attempts,
                     throttled_attempt_ids=prior_effect.throttled_attempt_ids,
                     last_error=detail if new_state is EffectState.DELIVERY_UNKNOWN else prior_effect.last_error,
+                    sender_binding=prior_effect.sender_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -537,6 +710,12 @@ class MergeOperationStore:
                     effects=new_effects,
                 )
                 self._save_operation(connection, operation, current_time)
+                self._save_attempt(
+                    connection,
+                    identity.key(),
+                    EffectAttemptRecord(effect_name, generation, attempt_id, prior_effect.sender_binding, updated_effect.receipt, outcome_label),
+                    current_time,
+                )
                 self._append_history(connection, identity.key(), effect_name, generation, attempt_id, outcome_label, detail, current_time)
                 return True
         except MergeOperationPersistenceError:
@@ -633,6 +812,7 @@ class MergeOperationStore:
                     throttle_attempts=attempts,
                     throttled_attempt_ids=throttled_ids,
                     last_error=detail,
+                    sender_binding=prior_effect.sender_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -687,6 +867,7 @@ class MergeOperationStore:
                     throttle_attempts=prior_effect.throttle_attempts,
                     throttled_attempt_ids=prior_effect.throttled_attempt_ids,
                     last_error=detail,
+                    sender_binding=prior_effect.sender_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -731,6 +912,7 @@ class MergeOperationStore:
                     throttle_attempts=0,
                     throttled_attempt_ids=(),
                     last_error="",
+                    sender_binding=prior_effect.sender_binding,
                 )
                 new_effects = dict(operation.effects)
                 new_effects[effect_name] = updated_effect
@@ -783,6 +965,7 @@ class MergeOperationStore:
                                 throttle_attempts=effect.throttle_attempts,
                                 throttled_attempt_ids=effect.throttled_attempt_ids,
                                 last_error="interrupted before a terminal outcome was recorded",
+                                sender_binding=effect.sender_binding,
                             )
                             self._append_history(connection, identity.key(), name, effect.generation, effect.attempt_id, "reopen_delivery_unknown", "", current_time)
                     operation = MergeOperation(

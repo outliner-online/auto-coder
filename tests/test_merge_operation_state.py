@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from auto_coder.merge_operation_state import (
     MAX_THROTTLED_RETRIES_AFTER_FIRST,
     MIN_LOCAL_RETRY_INTERVAL_SECONDS,
@@ -9,16 +11,115 @@ from auto_coder.merge_operation_state import (
     ConfirmationSource,
     EffectName,
     EffectReceipt,
+    EffectSenderBinding,
     EffectState,
     MergeOperationIdentity,
     MergeOperationPersistenceError,
     MergeOperationStore,
     OperationStatus,
+    ReservationRefusal,
 )
 
 
 def _identity(pr: int = 42) -> MergeOperationIdentity:
     return MergeOperationIdentity("https://api.github.com", "acme/widgets", pr)
+
+
+def _binding(*, app_id: int = 11, installation_id: int = 22) -> EffectSenderBinding:
+    return EffectSenderBinding("terminal-merge", "https://api.github.com", "acme/widgets", app_id, installation_id, "auto-coder[bot]")
+
+
+def test_app_reservation_atomically_binds_sender_and_refuses_changed_principal(tmp_path, monkeypatch):
+    path = tmp_path / "merge.db"
+    identity = _identity()
+    store = MergeOperationStore(path)
+    store.get_or_create(identity, expected_head_sha="H", merge_method="squash", approval_credential_role="bot", reviewer_identity="r", needs_approval=False, now=1)
+
+    missing = store.reserve_app_attempt(identity, EffectName.MERGE, None, now=2)
+    assert not missing.granted
+    assert missing.refusal is ReservationRefusal.BINDING_REQUIRED
+    assert store.get(identity).effect(EffectName.MERGE).state is EffectState.NOT_ATTEMPTED
+
+    original_save_attempt = store._save_attempt
+    monkeypatch.setattr(store, "_save_attempt", lambda *args: (_ for _ in ()).throw(sqlite3.OperationalError("write failed")))
+    with pytest.raises(MergeOperationPersistenceError):
+        store.reserve_app_attempt(identity, EffectName.MERGE, _binding(), now=3)
+    monkeypatch.setattr(store, "_save_attempt", original_save_attempt)
+    assert store.get(identity).effect(EffectName.MERGE).state is EffectState.NOT_ATTEMPTED
+
+    reserved = store.reserve_app_attempt(identity, EffectName.MERGE, _binding(), now=4)
+    assert reserved.granted
+    reopened = MergeOperationStore(path)
+    assert reopened.get(identity).effect(EffectName.MERGE).sender_binding == _binding()
+    refused = reopened.reserve_app_attempt(identity, EffectName.MERGE, _binding(installation_id=23), now=5)
+    assert refused.refusal is ReservationRefusal.PRINCIPAL_MISMATCH
+    assert reopened.get(identity).effect(EffectName.MERGE).attempt_id == reserved.attempt_id
+
+
+def test_bound_unsent_attempt_continues_only_with_same_principal_after_restart(tmp_path):
+    path = tmp_path / "merge.db"
+    identity = _identity()
+    store = MergeOperationStore(path)
+    store.get_or_create(identity, expected_head_sha="H", merge_method="squash", approval_credential_role="bot", reviewer_identity="r", needs_approval=False, now=1)
+    first = store.reserve_app_attempt(identity, EffectName.MERGE, _binding(), now=1)
+    assert store.record_confirmed_unsent(identity, EffectName.MERGE, first.attempt_id, first.generation, now=2)
+
+    restarted = MergeOperationStore(path)
+    changed = restarted.reserve_app_attempt(identity, EffectName.MERGE, _binding(app_id=99), now=3)
+    assert changed.refusal is ReservationRefusal.PRINCIPAL_MISMATCH
+    continued = restarted.reserve_app_attempt(identity, EffectName.MERGE, _binding(), now=3)
+    assert continued.granted
+    assert continued.operation.effect(EffectName.MERGE).sender_binding == _binding()
+
+
+def test_legacy_schema_migrates_as_explicitly_unbound_without_relabeling(tmp_path):
+    path = tmp_path / "merge.db"
+    identity = _identity()
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE merge_operations (op_key TEXT PRIMARY KEY, api_origin TEXT NOT NULL, repository TEXT NOT NULL,
+        pr_number INTEGER NOT NULL, expected_head_sha TEXT NOT NULL, merge_method TEXT NOT NULL,
+        approval_credential_role TEXT NOT NULL, reviewer_identity TEXT NOT NULL, generation INTEGER NOT NULL,
+        status TEXT NOT NULL, resume_reason TEXT NOT NULL, not_before REAL NOT NULL, updated_at REAL NOT NULL);
+        CREATE TABLE merge_operation_effects (op_key TEXT NOT NULL, effect_name TEXT NOT NULL, state TEXT NOT NULL,
+        attempt_id TEXT NOT NULL, generation INTEGER NOT NULL, receipt_json TEXT NOT NULL, throttle_attempts INTEGER NOT NULL,
+        throttled_attempt_ids TEXT NOT NULL, last_error TEXT NOT NULL, updated_at REAL NOT NULL,
+        PRIMARY KEY (op_key, effect_name));
+        CREATE TABLE merge_operation_attempt_history (history_id INTEGER PRIMARY KEY AUTOINCREMENT, op_key TEXT NOT NULL,
+        effect_name TEXT NOT NULL, generation INTEGER NOT NULL, attempt_id TEXT NOT NULL,
+        outcome TEXT NOT NULL, detail TEXT NOT NULL, recorded_at REAL NOT NULL);
+    """)
+    connection.execute("INSERT INTO merge_operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (identity.key(), identity.api_origin, identity.repository, identity.pr_number, "H", "squash", "bot", "r", 1, "waiting", "", 0, 1))
+    connection.execute("INSERT INTO merge_operation_effects VALUES (?,?,?,?,?,?,?,?,?,?)", (identity.key(), "approval", "confirmed_complete", "old-a", 1, EffectReceipt(ConfirmationSource.OWN_RESPONSE, review_id="R").to_json(), 0, "[]", "", 1))
+    connection.execute("INSERT INTO merge_operation_effects VALUES (?,?,?,?,?,?,?,?,?,?)", (identity.key(), "merge", "not_attempted", "", 1, "", 0, "[]", "", 1))
+    connection.commit()
+    connection.close()
+
+    migrated = MergeOperationStore(path).get(identity)
+    assert migrated.effect(EffectName.APPROVAL).state is EffectState.CONFIRMED_COMPLETE
+    assert migrated.effect(EffectName.APPROVAL).sender_binding is None
+    assert migrated.effect(EffectName.MERGE).sender_binding is None
+
+
+def test_late_bound_receipt_is_retained_only_on_original_attempt(tmp_path):
+    path = tmp_path / "merge.db"
+    identity = _identity()
+    store = MergeOperationStore(path)
+    store.get_or_create(identity, expected_head_sha="H1", merge_method="squash", approval_credential_role="bot", reviewer_identity="r", needs_approval=False, now=1)
+    old = store.reserve_app_attempt(identity, EffectName.MERGE, _binding(), now=1)
+    store.get_or_create(identity, expected_head_sha="H2", merge_method="squash", approval_credential_role="bot", reviewer_identity="r", needs_approval=False, now=2)
+    current = store.reserve_app_attempt(identity, EffectName.MERGE, _binding(), now=2)
+
+    late_receipt = EffectReceipt(ConfirmationSource.STATE_OBSERVATION, reviewer_identity="observer", target_head_sha="H1", merge_commit_sha="old")
+    assert not store.record_confirmed_complete(identity, EffectName.MERGE, old.attempt_id, old.generation, late_receipt, now=3)
+    restarted = MergeOperationStore(path)
+    old_record = restarted.get_attempt(identity, EffectName.MERGE, old.generation, old.attempt_id)
+    assert old_record.sender_binding == _binding()
+    assert old_record.receipt == late_receipt
+    active = restarted.get(identity).effect(EffectName.MERGE)
+    assert active.attempt_id == current.attempt_id
+    assert active.receipt is None
+    assert active.sender_binding == _binding()
 
 
 def test_as001_approved_merge_unsent_survives_restart(tmp_path):
