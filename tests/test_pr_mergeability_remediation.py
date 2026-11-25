@@ -11,11 +11,14 @@ def _client():
     """A Mock GitHub client pre-configured so the stale-review-thread
     rollback retry at the top of _handle_pr_merge is a no-op."""
     client = Mock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+    client.get_pr_comments_strict.return_value = []
     client.get_pr_review_threads_strict.return_value = []
     return client
 
 
 from src.auto_coder.automation_config import AutomationConfig
+from src.auto_coder.github_controller_auth import ControllerIdentity
 from src.auto_coder.pr_processor import PRActionList, _get_mergeable_state, _handle_pr_merge, _start_mergeability_remediation
 from src.auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
 

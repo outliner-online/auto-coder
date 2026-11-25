@@ -6,6 +6,7 @@ import pytest
 
 from auto_coder.automation_config import AutomationConfig, Candidate, CandidateProcessingResult, ExplicitTargetOutcome, ProcessedPRResult, PRProcessingOutcome
 from auto_coder.automation_engine import AutomationEngine
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.issue_context import extract_lifecycle_directive_issue_references
 from auto_coder.pr_processor import CloudTaskOriginResolution
@@ -582,7 +583,8 @@ def _joined_draft_review_repair(tmp_path, *, other_binding, retained=False, chan
 
     pr = {"number": 5940, "title": "Grid", "body": "Related to #5460", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "base": {"ref": "main", "sha": "base"}, "labels": [], "user": {"login": "maintainer"}}
     github = MagicMock()
-    github.get_authenticated_user_login.return_value = "controller"
+    github.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+    github.get_pr_comments_strict.return_value = []
     github.get_issue.return_value = {"number": 5459, "state": "open"}
     github.get_issue_details.side_effect = lambda issue: issue
     github.get_pull_request_metadata_strict.return_value = pr

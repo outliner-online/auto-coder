@@ -27,6 +27,7 @@ from auto_coder.ci_observation import (
 )
 from auto_coder.ci_repair_authority import CIRepairAuthority, current_ci_failure_authority, evaluate_ci_repair_snapshot
 from auto_coder.ci_repair_verification import FocusedVerification, TargetResult, TargetStatus, verify_targets
+from auto_coder.controller_identity_history import ControllerIdentity
 from auto_coder.invocation_admission import InvocationAdmissionGate
 from auto_coder.local_ci_repair_execution import CorrectionPorts, LocalCIRepairRequest
 from auto_coder.local_ci_repair_job import DurableCICorrection, LocalCIRepairJobPorts, build_local_ci_repair_job_adapter
@@ -123,6 +124,8 @@ class Harness:
         controller, remote, head, base = repository(tmp_path)
         github = MagicMock()
         github.token = "token"
+        github.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=101)
+        github.get_authenticated_user_login.return_value = "controller"
         github.get_pull_request_metadata_strict.side_effect = lambda *_args: metadata(head, base)
         return cls(tmp_path, controller, remote, head, base, LocalJobStore(tmp_path / "jobs.sqlite3"), github, authority_head=head)
 

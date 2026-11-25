@@ -5,6 +5,7 @@ import pytest
 
 from src.auto_coder.automation_config import AutomationConfig
 from src.auto_coder.ci_repair_authority import CIRepairAuthority
+from src.auto_coder.github_controller_auth import ControllerIdentity
 from src.auto_coder.pr_processor import PRActionList, ProcessedPRResult, PRProcessingOutcome, _handle_pr_merge
 from src.auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
 from tests.ci_observation_fakes import authoritative_ci_status
@@ -12,6 +13,7 @@ from tests.ci_observation_fakes import authoritative_ci_status
 
 def _client():
     client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
     client.get_pr_review_threads_strict.return_value = []
     return client
 

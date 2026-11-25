@@ -10,6 +10,7 @@ from threading import Event
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, Mock, patch
 
+import httpx
 import pytest
 
 from auto_coder.automation_config import AutomationConfig, Candidate, CandidateProcessingResult, ExplicitTargetOutcome, ProcessedPRResult, PRProcessingOutcome
@@ -1871,15 +1872,24 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         github.get_pr_review_threads_strict = Mock(return_value=[] if failure_kind == "legacy-saved-error" else [thread])
         saved_report = format_adversarial_validation_comment(AdversarialValidationResult(result="ERROR", summary="Previously recorded validator error"), head_sha)
         github.get_pr_reviews_strict = Mock(return_value=[] if legacy_source else [{"body": saved_report, "user": {"login": "auto-coder-reviewer[bot]"}}])
-        # Keep both public PR/Issue comment readers intact. Fail below the
-        # non-strict reader's exception-to-empty boundary, as REST can do.
+        # Keep the public readers intact and control their respective REST
+        # boundaries so strict lookup failures cannot become empty history.
         github._get_issue_comments = Mock(return_value=[{"body": saved_report}] if legacy_source else [])
+        native_comments = Mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"id": 501, "body": saved_report, "user": {"id": 101, "login": "auto-coder-reviewer[bot]"}}] if legacy_source else [],
+                request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues/94/comments"),
+            )
+        )
+        monkeypatch.setattr("auto_coder.util.gh_cache._strict_request", native_comments)
         if failure_kind == "identity":
             monkeypatch.setattr("auto_coder.pr_processor.resolve_reviewer_app_identity", Mock(side_effect=PermissionError(diagnostic)))
         elif failure_kind == "native-review":
             github.get_pr_reviews_strict.side_effect = OSError(diagnostic)
         elif failure_kind in {"legacy-comment", "native-precedence"}:
             github._get_issue_comments.side_effect = OSError(diagnostic)
+            native_comments.side_effect = OSError(diagnostic)
         engine = AutomationEngine(github, config=config)
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         engine._check_and_handle_closed_branch = Mock(return_value=True)
@@ -1957,9 +1967,17 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         else:
             github.get_pr_reviews_strict.assert_called()
         if legacy_source:
-            github._get_issue_comments.assert_called_with("owner/repo", 94, fresh=True)
+            native_comments.assert_called_with(
+                "GET",
+                "https://api.github.com/repos/owner/repo/issues/94/comments",
+                headers={"Authorization": "Bearer test-token", "Accept": "application/vnd.github+json", "Cache-Control": "no-cache"},
+                params={"per_page": 100, "page": 1},
+                follow_redirects=False,
+                timeout=30,
+            )
         else:
-            github._get_issue_comments.assert_not_called()
+            native_comments.assert_not_called()
+        github._get_issue_comments.assert_not_called()
         if failure_kind == "legacy-comment":
             assert github.get_pr_comments("owner/repo", 94) == [], "informational comments must retain their existing best-effort behavior"
         assert any("Awaiting implementer provenance clarification" in action for action in actions) is (not failed and failure_kind != "legacy-saved-error")

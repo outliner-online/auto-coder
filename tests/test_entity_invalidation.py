@@ -74,6 +74,7 @@ def test_management_reevaluation_processing_target_has_one_followup(tmp_path: Pa
     assert followup is not None and followup.generation == 2
 
 
+from src.auto_coder.github_controller_auth import ControllerIdentity
 from src.auto_coder.github_pending_work import PendingWorkScheduler, PendingWorkStore
 from src.auto_coder.github_request_governor import GitHubRequestDeferred, GitHubRequestGovernor
 from src.auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
@@ -1552,6 +1553,7 @@ def test_authoritative_lifecycle_transition_survives_later_author_exclusion(tmp_
     github = GitHubClient("test-token")
     github.get_pull_request_metadata_strict = MagicMock(return_value=pr_data)
     github.get_pr_review_threads_strict = MagicMock(return_value=[])
+    github.get_authenticated_controller_identity = MagicMock(return_value=ControllerIdentity("controller", account_id=20))
     claim_store = DispatchClaimStore(db_path=tmp_path / "dispatch-claims.sqlite3")
     with (
         patch("src.auto_coder.pr_processor.get_dispatch_claim_store", return_value=claim_store),

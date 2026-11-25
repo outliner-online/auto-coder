@@ -26,6 +26,7 @@ import pytest
 from auto_coder.adversarial_validator import adversarial_validation_comment_marker
 from auto_coder.automation_config import AutomationConfig, EmptyPRResult, PRProcessingOutcome, StaleJulesPRResult
 from auto_coder.automation_engine import AutomationEngine
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.llm_backend_config import (
     get_feature_switch_from_config,
     get_pr_review_thread_gate_from_config,
@@ -621,6 +622,8 @@ class TestAS007AS008ReenableSemantics:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MockGitHubClient(spec=GitHubClient)
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+        client.get_pr_comments_strict.return_value = []
         human_thread = _make_human_thread()
         client.get_pr_review_threads_strict = MagicMock(return_value=[human_thread])
         client.get_pull_request = MagicMock(return_value={"head": {"sha": head_sha}})
@@ -659,6 +662,8 @@ class TestAS007AS008ReenableSemantics:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MockGitHubClient(spec=GitHubClient)
+        client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
+        client.get_pr_comments_strict.return_value = []
         # Genuinely resolved on GitHub
         resolved_thread = _make_human_thread(is_resolved=True)
         client.get_pr_review_threads_strict = MagicMock(return_value=[resolved_thread])

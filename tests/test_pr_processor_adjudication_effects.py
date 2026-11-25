@@ -17,6 +17,7 @@ import pytest
 
 from auto_coder.adversarial_validator import format_test_oracle_gap_comment
 from auto_coder.cloud_manager import CloudTaskBinding
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.pr_processor import (
     _adjudication_context_store_path,
     _adjudication_effects_store_path,
@@ -256,6 +257,8 @@ def test_adjudication_envelope_reply_is_excluded_from_generic_cloud_feedback(rep
         ],
     )
     github_client = _github_client(thread)
+    github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
+    github_client.get_pr_comments_strict.return_value = []
     github_client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(head_ref="work-branch", head_sha=HEAD_SHA, base_ref="main")
 
     with (

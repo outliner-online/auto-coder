@@ -652,6 +652,11 @@ def run_public_ci_consumer(snapshot, *, head, pr_number=PR_NUMBER, thread_state=
         "base": {"ref": "main"},
     }
     client = MagicMock(token="controlled-token")
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=101)
+    client.get_authenticated_user_login.return_value = "controller"
+    client.get_pr_comments.return_value = []
+    client.get_pr_comments_strict.return_value = []
+    client.get_pr_review_threads_strict.return_value = list(thread_state.unresolved or thread_state.blocking_unresolved) if thread_state is not None else []
     client.get_pull_request.return_value = {"head": {"sha": head}}
     cycles = iter(range(20))
 
