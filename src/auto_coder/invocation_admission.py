@@ -421,6 +421,29 @@ def ci_repair_designated() -> bool:
     return _ci_repair_designated.get()
 
 
+_pr_review_designated: ContextVar[bool] = ContextVar("auto_coder_pr_review_designated", default=False)
+
+
+@contextmanager
+def bind_pr_review_designation() -> Iterator[None]:
+    """Keep editable PR review verification focused on the review's own scope.
+
+    This per-context bootstrap policy skips only the automatic unscoped baseline
+    in a fresh local clone. It grants no admission or publication authority and
+    does not prevent the reviewer from running relevant focused checks.
+    """
+    token = _pr_review_designated.set(True)
+    try:
+        yield
+    finally:
+        _pr_review_designated.reset(token)
+
+
+def pr_review_designated() -> bool:
+    """Return whether this invocation belongs to an editable PR review."""
+    return _pr_review_designated.get()
+
+
 _pending_handle: ContextVar[Optional[InvocationHandle]] = ContextVar("auto_coder_pending_invocation_handle", default=None)
 
 

@@ -64,6 +64,7 @@ from tests.test_accepted_finding_bridge import (  # noqa: F401  (env is a shared
     REPO,
     Env,
     _commit,
+    _simulated_review_source,
     accept_strong,
     env,
     finding_json,
@@ -348,6 +349,7 @@ class Flow:
         evidence = PullRequestRoutingMetadata("https://api.github.com", REPO, self.pr, "open", self.pr_data()["body"], REPO, "feature-branch", self.head)
         route = ReviewRepairRouteDecision(ReviewRepairRouteDisposition.LOCAL_REQUIRED if self.origin == "local" else ReviewRepairRouteDisposition.CLOUD, "controlled", evidence if self.origin == "local" else None)
         patches = [
+            _simulated_review_source(env.worktree, self.head),
             patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True),
             patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"}),
             patch("auto_coder.pr_processor._check_github_actions_status", side_effect=self._ci_results()),

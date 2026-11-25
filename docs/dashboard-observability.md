@@ -1,5 +1,29 @@
 # Dashboard observability verification
 
+Editable PR reviewers report source changes through the existing
+`pr.adversarial-validation` stage with `Outcome.DEFERRED`,
+`effect=reviewer-source-changes`, the original `examined_head`, `local_phase`,
+`published`, `reason`, `review_disposition`, and a bounded `retry_not_before`.
+A confirmed candidate push is `CORRECTIVE_HANDOFF`; an unconfirmed publication
+is `RECONCILIATION_WAIT`. Neither is a review PASS or merge completion. The retry
+deadline retains the worker's wake even when a failed push produced no GitHub
+head-change event. Recovery emits `effect=reviewer-publication-resumed` without
+another reviewer invocation. The existing detail evidence renderer displays
+these facts without a new event schema or dashboard-owned decision. Strong
+reviewer edits retain the existing deferred `pr.strong-audit` reason and retry
+path, without accepting that invocation's Strong result.
+
+Run `bash scripts/test.sh tests/test_editable_pr_review_flow.py` for real
+detached-workspace and bare-origin publication, interrupted reviewer/check
+refusal, pending CI followed by fresh-session review, and lost-push-response
+recovery. In particular,
+`test_review_fix_is_published_without_self_approval_then_independently_reviewed`
+and `test_accepted_push_with_lost_acknowledgement_resumes_without_another_reviewer`
+read the actual TraceCollector snapshot and assert the deferred effect facts,
+publication state, and absence of approval/merge from the editing invocation.
+`tests/test_editable_review.py` covers the durable publisher's exact-commit,
+destination, concurrent-update and interruption boundaries.
+
 PR `Worker` diagnostics distinguish admission `skipped`, processing `deferred`,
 and an error-free `evaluated` observation. A successful function return alone
 does not mean completed business effects; the evaluated row explicitly carries
@@ -646,6 +670,20 @@ and `tests/test_pr_review_cycle.py::test_renewed_strong_pass_preserves_open_find
 `tests/test_single_review_ordinary_closure_flow.py::test_renewed_pass_at_repair_head_closes_retained_findings_without_another_repair`
 verifies that this PASS does not emit another corrective handoff and only reaches
 merge after independent exact closure.
+
+A renewed Strong audit that edits source remains DEFERRED while its existing
+`reason` records publication or refusal after the current head/base/contract/policy
+and PR publication authority are checked again. The existing
+`pr.adversarial-validation` source-correction event carries `local_phase`,
+`published`, `review_disposition`, and the same `retry_not_before` deadline as the
+processing result. An uncertain push retains its commit and schedules publication
+recovery before another reviewer can run. Retained findings stay open, and neither
+the source-producing verdict nor the recovered push approves the new head. These
+events already reach the stage timeline, so no schema or dashboard projection
+change is required. Runnable real-Git coverage is
+`tests/test_editable_pr_review_flow.py::test_renewed_strong_fix_is_published_without_closing_retained_findings`,
+`tests/test_editable_pr_review_flow.py::test_renewed_strong_fix_refuses_publication_when_target_changes`,
+and `tests/test_editable_pr_review_flow.py::test_renewed_strong_pending_publication_retries_without_another_reviewer`.
 
 Automatic local reviewer selection uses the existing interaction mode to report
 fresh execution when the manager does not retain the original private workspace;

@@ -27,6 +27,7 @@ from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsSta
 from auto_coder.util.github_request_outcome import GitHubRequestContext, github_http_client
 from auto_coder.webhook_server import process_github_payload
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
 @pytest.fixture(autouse=True)
@@ -801,6 +802,7 @@ class TestNewOriginCoverage:
         mock_checks,
         mock_mergeable,
         mock_exit_in_progress,
+        tmp_path,
     ):
         """The inventory's prior citation
         (test_take_pr_actions_preserves_structured_adversarial_failure) mocks
@@ -813,7 +815,7 @@ class TestNewOriginCoverage:
         from auto_coder.pr_processor import _handle_pr_merge
 
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
-        mock_worktree.return_value.__enter__.return_value = "/tmp/worktree"
+        mock_worktree.return_value = _simulated_pr_review_worktree(tmp_path / "review-worktree", "abc123456789")
         mock_run_validation.return_value = AdversarialValidationResult(
             result="NEEDS_FIX",
             summary="Found specification violation",

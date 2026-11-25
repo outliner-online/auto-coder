@@ -44,6 +44,7 @@ def render(context):
         "resolution_head_sha": "accepted-head" if variables["prior_gap_status"] == "RESOLVED" else "",
     }
     values = {
+        "review_permissions": prompts["pr"]["editable_review_permissions"],
         "review_policy": rereview,
         "repo_name": "owner/repo",
         "pr_number": "2495",

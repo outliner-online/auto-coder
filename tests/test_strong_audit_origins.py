@@ -48,7 +48,7 @@ class OriginScenario:
         self.native_reviews = []
         self.timeline = []
         self.repository, self.base, self.head = _repository(root)
-        _git(self.repository, "remote", "add", "origin", "https://github.com/owner/repo.git")
+        _git(self.repository, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
         _git(self.repository, "config", f"url.{self.repository}.insteadOf", "https://github.com/owner/repo.git")
         _git(self.repository, "update-ref", "refs/pull/100/head", self.head)
         monkeypatch.chdir(self.repository)

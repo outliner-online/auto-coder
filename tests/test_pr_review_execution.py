@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from auto_coder.invocation_admission import bind_pr_review_designation
 from auto_coder.pr_review_cycle import ContractSnapshot, Finding, StrongPolicyIdentity
 from auto_coder.pr_review_execution import ReviewExecutionInput, ReviewMode, ScopeAssessment, build_review_prompt, parse_review_result
 
@@ -56,6 +57,22 @@ def test_strong_prompt_is_independent_and_role_tagged() -> None:
     assert "continue a prior conversation" in prompt
     assert "Do not execute test wrappers, formatters, builds, setup scripts" in prompt
     assert "Inspect source/tests and supplied CI evidence" in prompt
+
+
+@pytest.mark.parametrize("mode", list(ReviewMode))
+def test_editable_review_prompt_preserves_scope_and_independent_approval(mode: ReviewMode) -> None:
+    with bind_pr_review_designation():
+        prompt = build_review_prompt(_input(mode))
+    assert "permits edits in its private PR review workspace" in prompt
+    assert "add focused regression tests" in prompt
+    assert "including setup, dependency installation, builds, and formatting" in prompt
+    assert "Do not run the full repository suite" in prompt
+    assert "Do not change branches or HEAD, stage, commit, push, merge" in prompt
+    assert "independent review and CI for the new candidate before merge" in prompt
+    assert "Do not continue a prior conversation" in prompt
+    assert "strictly read-only" not in prompt
+    assert "Do not execute test wrappers" not in prompt
+    assert "$review_permissions" not in prompt
 
 
 @pytest.mark.parametrize("mode", list(ReviewMode))

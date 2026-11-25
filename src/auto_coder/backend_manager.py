@@ -33,6 +33,7 @@ from .invocation_admission import (
     ci_repair_designated,
     current_invocation_gate,
     current_invocation_target,
+    pr_review_designated,
     set_pending_invocation_handle,
 )
 from .invocation_process_supervisor import CgroupV2Owner, InvocationProcessSupervisor
@@ -979,6 +980,8 @@ class BackendManager(LLMBackendManagerBase):
                         if is_local and workspace_binding is not None and not is_noedit and retained_session is None:
                             if defer_local_tests:
                                 record_implementation_workspace_tests_skipped(workspace_binding, "operator_deferred_until_merge")
+                            elif pr_review_designated():
+                                record_implementation_workspace_tests_skipped(workspace_binding, "pr_review_policy")
                             elif ci_repair_designated():
                                 record_implementation_workspace_tests_skipped(workspace_binding)
                             else:

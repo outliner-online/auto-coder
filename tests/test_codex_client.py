@@ -172,12 +172,13 @@ class TestCodexClient:
         logged = json.loads(log_file.read_text(encoding="utf-8"))
         assert logged["response_length"] == len(f"{stdout}\n{stderr}")
 
+    @pytest.mark.parametrize("is_noedit", [True, False])
     @patch("subprocess.run")
     @patch("src.auto_coder.codex_client.CommandExecutor.run_command")
     @patch("builtins.print")
     @patch("src.auto_coder.codex_client.get_llm_config")
-    def test_noedit_json_returns_dedicated_final_message(self, mock_get_config, mock_print, mock_run_command, mock_run):
-        """No-edit JSON runs must not expose a contaminated event stream to callers."""
+    def test_review_json_returns_dedicated_final_message(self, mock_get_config, mock_print, mock_run_command, mock_run, is_noedit):
+        """Either review mode must return the terminal payload, not diagnostic events."""
         mock_run.return_value.returncode = 0
         final_message = '{"result":"PASS","summary":"Verified","findings":[]}'
 
@@ -195,24 +196,26 @@ class TestCodexClient:
         mock_backend = BackendConfig(
             name="codex",
             model="codex",
-            options=["exec", "--json"],
-            options_for_noedit=["exec", "--json"],
+            options=["exec", "--json", "--sandbox", "workspace-write"],
+            options_for_noedit=["exec", "--json", "--sandbox", "read-only"],
         )
         mock_get_config.return_value.get_backend_config.return_value = mock_backend
 
-        client = CodexClient(use_noedit_options=True, capture_final_message=True)
-        output = client._run_llm_cli("review this", is_noedit=True)
+        client = CodexClient(use_noedit_options=is_noedit, capture_final_message=True)
+        output = client._run_llm_cli("review this", is_noedit=is_noedit)
 
         assert output == final_message
         called_cmd = mock_run_command.call_args.args[0]
+        assert called_cmd[called_cmd.index("--sandbox") + 1] == ("read-only" if is_noedit else "workspace-write")
         output_path = Path(called_cmd[called_cmd.index("--output-last-message") + 1])
         assert not output_path.exists()
 
+    @pytest.mark.parametrize("is_noedit", [True, False])
     @patch("subprocess.run")
     @patch("src.auto_coder.codex_client.CommandExecutor.run_command")
     @patch("builtins.print")
     @patch("src.auto_coder.codex_client.get_llm_config")
-    def test_noedit_json_empty_final_message_falls_back_to_stdout(self, mock_get_config, mock_print, mock_run_command, mock_run):
+    def test_review_json_empty_final_message_falls_back_to_stdout(self, mock_get_config, mock_print, mock_run_command, mock_run, is_noedit):
         """An absent final payload must retain strict JSONL fallback handling."""
         mock_run.return_value.returncode = 0
         stdout = '{"type":"turn.completed"}'
@@ -225,9 +228,9 @@ class TestCodexClient:
         )
         mock_get_config.return_value.get_backend_config.return_value = mock_backend
 
-        client = CodexClient(use_noedit_options=True, capture_final_message=True)
+        client = CodexClient(use_noedit_options=is_noedit, capture_final_message=True)
 
-        assert client._run_llm_cli("review this", is_noedit=True) == stdout
+        assert client._run_llm_cli("review this", is_noedit=is_noedit) == stdout
 
     @patch("subprocess.run")
     @patch("src.auto_coder.codex_client.CommandExecutor.run_command")

@@ -31,6 +31,8 @@ from .automation_config import AutomationConfig
 from .backend_manager import CLOUD_BACKEND_TYPES, BackendManager, run_llm_prompt
 from .ci_observation import CIConclusion, ObservationAvailability, WorkflowObservation
 from .cli_event_stream import extract_claude_jsonl_result, extract_codex_jsonl_message, extract_muse_jsonl_result
+from .editable_review import ReviewChangesProduced, assert_review_workspace_unchanged
+from .invocation_admission import pr_review_designated
 from .issue_context import IssueOracleResolution, VerifiedIssueOracle, get_linked_issues_context, resolve_issue_oracles
 from .logger_config import get_logger
 from .ordinary_correction_references import CANONICAL_CORRECTION_PREFIX, CanonicalCorrectionContext, build_correction_reference_context, validate_correction_reference
@@ -324,6 +326,10 @@ def _pytest_target_selection_error(test_result: Any) -> Optional[str]:
     return None
 
 
+class ReviewCheckInterrupted(RuntimeError):
+    """An interrupted check cannot publish its partially modified source."""
+
+
 def run_exact_head_dynamic_check(
     config: AutomationConfig,
     check_target: str,
@@ -374,6 +380,9 @@ def run_exact_head_dynamic_check(
         env_overrides={"INSIDE_TARGET_EXECUTION": "true"},
         cwd=execution_cwd,
     )
+    if pr_review_designated() and (test_result.returncode < 0 or test_result.returncode in {126, 127} or 128 <= test_result.returncode <= 255):
+        raise ReviewCheckInterrupted(f"Reviewer dynamic check was interrupted or could not start (exit={test_result.returncode}); no source candidate was accepted")
+    assert_review_workspace_unchanged()
 
     after = current_head()
     if not after.success or not after.stdout.strip():
@@ -2857,6 +2866,17 @@ def _remaining_unverified_paths(result: AdversarialValidationResult, context: Ad
     return [path for path in context.unverified_files if path not in accounted]
 
 
+def _assert_reviewer_workspace(backend_manager: Optional[BackendManager]) -> None:
+    """Separate a completed source correction from any same-invocation verdict."""
+    try:
+        assert_review_workspace_unchanged()
+    except ReviewChangesProduced:
+        session_id = getattr(backend_manager, "_last_session_id", None)
+        if isinstance(session_id, str) and session_id and backend_manager is not None:
+            backend_manager.release_local_session(session_id)
+        raise
+
+
 def _continue_reviewer_session(
     backend_manager: BackendManager,
     session_id: str,
@@ -2868,7 +2888,9 @@ def _continue_reviewer_session(
     is_retained_local = retained_local if retained_local is not None else bool(getattr(backend_manager, "has_retained_local_session", lambda _sid: False)(session_id))
     if is_retained_local:
         backend_manager.authorize_retained_local_session_reuse(session_id)
-    return backend_manager.continue_session(session_id, prompt, is_noedit=True)
+    response = backend_manager.continue_session(session_id, prompt, is_noedit=not pr_review_designated())
+    _assert_reviewer_workspace(backend_manager)
+    return response
 
 
 def _complete_changed_file_evidence(
@@ -2922,6 +2944,8 @@ def _complete_changed_file_evidence(
     try:
         response = _continue_reviewer_session(backend_manager, session_id, prompt)
         current_identity = backend_manager.get_current_backend_identity()
+    except ReviewChangesProduced:
+        raise
     except Exception as exc:
         return AdversarialValidationResult(
             result="ERROR",
@@ -3897,6 +3921,7 @@ def run_adversarial_validation(
     head_sha = str((pr_data.get("head") or {}).get("sha") or pr_data.get("head_sha") or "")
 
     def verify_execution_target(boundary: str) -> None:
+        _assert_reviewer_workspace(backend_manager)
         if execution_cwd is None:
             return
         target = Path(execution_cwd)
@@ -4084,6 +4109,7 @@ def run_adversarial_validation(
     closure_extension = _closure_prompt_extension(closure_input, context.issue_requirements)
     prompt = render_prompt(
         "pr.adversarial_validation",
+        review_permissions=render_prompt("pr.editable_review_permissions" if pr_review_designated() else "pr.read_only_review_permissions", include_header=False),
         review_policy=review_policy,
         repo_name=repo_name,
         pr_number=pr_number,
@@ -4119,7 +4145,7 @@ def run_adversarial_validation(
             )
             was_resumed = getattr(backend_manager, "_last_continue_session_resumed", False)
         else:
-            response = run_llm_prompt(prompt, backend_manager=backend_manager, is_noedit=True)
+            response = run_llm_prompt(prompt, backend_manager=backend_manager, is_noedit=not pr_review_designated())
             was_resumed = False
     verify_execution_target("LLM completion")
 
@@ -4382,6 +4408,11 @@ def run_adversarial_validation(
                     # "no valid disposition" (stays unresolved) rather than reuse
                     # evidence the dynamic check may have since contradicted.
                     logger.warning(f"Dynamic-check follow-up for PR #{pr_number} returned no thread_dispositions; " f"{len(initial_thread_dispositions)} claimed thread(s) will not be resolved this run")
+            except (ReviewChangesProduced, ReviewCheckInterrupted):
+                session_id = getattr(backend_manager, "_last_session_id", None)
+                if isinstance(session_id, str) and session_id:
+                    backend_manager.release_local_session(session_id)
+                raise
             except Exception as e:
                 logger.warning(f"Failed to execute dynamic validation check '{check_target}': {e}")
                 # Inability to complete a requested check must be treated as non-pass (fail-closed)
@@ -4444,7 +4475,7 @@ def run_adversarial_validation(
                     retained_local=completion_retained_local,
                 )
             else:
-                completion_response = run_llm_prompt(completion_prompt, backend_manager=backend_manager, is_noedit=True)
+                completion_response = run_llm_prompt(completion_prompt, backend_manager=backend_manager, is_noedit=not pr_review_designated())
             verify_execution_target("test-oracle gap completion response")
             if not validation_snapshot_is_current(repo_name, pr_data, config, github_client, context.validation_snapshot):
                 raise RuntimeError("repository/PR/head/base/Requirements snapshot changed or could not be reconfirmed")
@@ -4485,6 +4516,8 @@ def run_adversarial_validation(
                             gap.resolution_head_sha = ""
                 failures = omitted or invalid_evidence or list(completion_gap_ids)
                 result.diagnostic_reason = f"Current-head completion for {repo_name}#{pr_number} at {head_sha} did not provide qualifying evidence for: " f"{', '.join(failures)}"
+        except ReviewChangesProduced:
+            raise
         except Exception as exc:
             result.result = "BLOCKED"
             result.diagnostic_category = "test_oracle_gap_completion_failed"
@@ -4512,6 +4545,7 @@ def run_adversarial_validation(
                 diagnostic_reason="PR head, base/change representation, or Issue Requirement manifest changed or could not be reconfirmed",
             )
 
+    _assert_reviewer_workspace(backend_manager)
     result = _apply_coverage_and_verdict_precedence(result, context)
     result.review_input_context_identity = validation_input_identity(context)
     result.accepted_finding_projection = project_accepted_findings(bridge, projection_target, claimed_review_threads, accepted_finding_dispositions(result, claimed_review_threads, accepted_projection, head_sha)) if accepted_projection.records else accepted_projection

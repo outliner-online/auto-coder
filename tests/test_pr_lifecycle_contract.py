@@ -8,8 +8,10 @@ with ``-m pr_lifecycle_contract``.
 import subprocess
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
+from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
+from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -55,6 +57,7 @@ from auto_coder.two_tier_pr_gate import TwoTierPrGate
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
 from auto_coder.util.github_action import GitHubActionsStatusResult, _check_github_actions_status
 from auto_coder.utils import CommandResult
+from tests.test_accepted_finding_bridge import _simulated_review_source
 
 pytestmark = [pytest.mark.pr_lifecycle_contract, pytest.mark.pr_repair_contract]
 
@@ -62,6 +65,14 @@ REPOSITORY = "owner/repo"
 PR_NUMBER = 2501
 H1 = "1" * 40
 H2 = "2" * 40
+
+
+@contextmanager
+def _simulated_pr_review_worktree(worktree: Path, head: str) -> Iterator[str]:
+    """Bind declared synthetic Git evidence inside its own execution thread."""
+    worktree.mkdir(exist_ok=True)
+    with _simulated_review_source(worktree, head):
+        yield str(worktree)
 
 
 @pytest.mark.parametrize(
@@ -1010,7 +1021,7 @@ def test_final_attempt_admission_serializes_newer_and_current_work(tmp_path, reg
             return_value=ReviewPublicationResult(True, "APPROVE", ""),
         ),
         patch("auto_coder.pr_processor.ci_observation_merge_authority", return_value=nullcontext(True)),
-        patch("auto_coder.pr_processor.isolated_pr_head_worktree", return_value=nullcontext(tmp_path)),
+        patch("auto_coder.pr_processor.isolated_pr_head_worktree", return_value=_simulated_pr_review_worktree(tmp_path / "review-worktree", H1)),
         patch("auto_coder.pr_processor._merge_pr", return_value=True) as merge,
     ):
         unsafe.return_value = SimpleNamespace(metadata_error=None, actions=[], authoritative_pr_data=pr_data, closed=False)
@@ -1262,7 +1273,7 @@ def test_controller_reentry_carries_cloud_repair_to_new_head_and_final_merge(tmp
         strong_review = stack.enter_context(patch("auto_coder.pr_processor.run_adversarial_validation", return_value=AdversarialValidationResult(result="PASS", summary="independent strong pass")))
         stack.enter_context(patch("auto_coder.pr_processor.publish_adversarial_review", return_value=ReviewPublicationResult(True, "APPROVE", "")))
         stack.enter_context(patch("auto_coder.pr_processor.ci_observation_merge_authority", return_value=nullcontext(True)))
-        stack.enter_context(patch("auto_coder.pr_processor.isolated_pr_head_worktree", return_value=nullcontext(tmp_path)))
+        stack.enter_context(patch("auto_coder.pr_processor.isolated_pr_head_worktree", return_value=_simulated_pr_review_worktree(tmp_path / "review-worktree", H2)))
         merge = stack.enter_context(patch("auto_coder.pr_processor._merge_pr", return_value=True))
         stack.enter_context(patch.object(slots, "reconcile"))
         collection_label.return_value.__enter__.return_value = True
