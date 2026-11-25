@@ -2256,6 +2256,32 @@ class GitHubClient:
             raise RuntimeError("GitHub did not return the authenticated user's login")
         return login
 
+    def get_authenticated_controller_identity(self):
+        """Return the positive account ID and canonical login proven by this token."""
+        from ..github_controller_auth import ControllerIdentity
+
+        api = get_ghapi_client(self.token)
+        user = api.users.get_authenticated()
+        login = user.get("login") if isinstance(user, dict) else getattr(user, "login", None)
+        account_id = user.get("id") if isinstance(user, dict) else getattr(user, "id", None)
+        if not isinstance(login, str) or not login or not isinstance(account_id, int) or isinstance(account_id, bool) or account_id <= 0:
+            raise RuntimeError("GitHub did not return the authenticated account identity")
+        return ControllerIdentity(login, account_id=account_id)
+
+    def resolve_github_account_identity(self, login: str):
+        """Resolve a configured login through GitHub without inferring controller role."""
+        from ..github_controller_auth import ControllerIdentity
+
+        if not isinstance(login, str) or not login.strip():
+            raise ValueError("A GitHub account login is required")
+        api = get_ghapi_client(self.token)
+        user = api.users.get_by_username(login.strip())
+        canonical = user.get("login") if isinstance(user, dict) else getattr(user, "login", None)
+        account_id = user.get("id") if isinstance(user, dict) else getattr(user, "id", None)
+        if not isinstance(canonical, str) or not canonical or not isinstance(account_id, int) or isinstance(account_id, bool) or account_id <= 0:
+            raise RuntimeError("GitHub account identity response was malformed")
+        return ControllerIdentity(canonical, account_id=account_id)
+
     def _get_pr_review_threads(self, repo_name: str, pr_number: int) -> List[ReviewThread]:
         """Fetch all review-thread pages and let callers decide error handling."""
         owner, repo = repo_name.split("/")
@@ -2963,7 +2989,7 @@ class GitHubClient:
                 if hasattr(created_at, "isoformat"):
                     created_at = created_at.isoformat()
 
-                result.append({"body": comment.get("body"), "created_at": created_at, "user": {"login": user.get("login")} if user else None, "id": comment.get("id")})
+                result.append({"body": comment.get("body"), "created_at": created_at, "user": {"login": user.get("login"), "id": user.get("id")} if user else None, "id": comment.get("id")})
 
             if len(comments) < per_page:
                 break

@@ -10471,15 +10471,24 @@ def _load_pr_delivered_review_feedback(github_client: Optional[Any], repo_name: 
     """Return feedback identities with a durable delivery receipt on the PR."""
     if github_client is None or not feedback:
         return set()
-    comments = github_client.get_pr_comments(repo_name, pr_number)
+    from .controller_identity_history import ControllerAttribution, controller_author_set_for_client
+
+    comments = github_client.get_pr_comments_strict(repo_name, pr_number)
     receipt_comments = [comment for comment in comments if isinstance(comment, dict) and CLOUD_REVIEW_FEEDBACK_MARKER_PREFIX in str(comment.get("body", ""))]
     if not receipt_comments:
         return set()
-    trusted_login = github_client.get_authenticated_user_login()
-    if not isinstance(trusted_login, str) or not trusted_login.strip():
-        raise ValueError("authenticated GitHub receipt author is unavailable")
-    trusted_login = trusted_login.strip().lower()
-    bodies = "\n".join(comment.get("body", "") for comment in receipt_comments if isinstance(comment.get("user"), dict) and str(comment["user"].get("login", "")).strip().lower() == trusted_login)
+    author_set = controller_author_set_for_client(github_client, repo_name)
+    trusted_bodies: list[str] = []
+    for comment in receipt_comments:
+        user = comment.get("user")
+        if not isinstance(user, dict):
+            raise ValueError("GitHub receipt author evidence is malformed")
+        attribution = author_set.classify(user.get("id"), str(user.get("login", "")), relevant=True)
+        if attribution is ControllerAttribution.UNATTRIBUTED_RELEVANT:
+            raise ValueError("historical GitHub receipt author association is unavailable")
+        if attribution in (ControllerAttribution.CURRENT, ControllerAttribution.PRIOR):
+            trusted_bodies.append(str(comment.get("body", "")))
+    bodies = "\n".join(trusted_bodies)
     return {identity for identity in feedback if f"<!-- {CLOUD_REVIEW_FEEDBACK_MARKER_PREFIX}{hashlib.sha256(identity.encode('utf-8')).hexdigest()} -->" in bodies}
 
 

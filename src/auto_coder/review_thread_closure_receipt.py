@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from typing import Iterator, Optional
 
+from .controller_identity_history import ControllerAttribution, ControllerAuthorSet, controller_author_set_for_client
 from .runtime_locks import ensure_lock_directory, file_lock, lock_path, runtime_root
 from .util.gh_cache import GitHubClient, ReviewThread
 from .util.github_request_outcome import normalize_api_origin
@@ -47,6 +48,8 @@ class ReceiptObservation:
     thread: ReviewThread = field(default_factory=ReviewThread)
     authenticated_login: str = ""
     receipt: Optional[ClosureReceipt] = None
+    author_set: Optional[ControllerAuthorSet] = None
+    publisher_login: str = ""
 
 
 def _positive_id(value: object) -> bool:
@@ -122,20 +125,28 @@ def _parse_receipt_body(body: str, comment_id: Optional[int]) -> ClosureReceipt:
     return receipt
 
 
-def parse_owned_receipt(thread: ReviewThread, authenticated_login: str) -> Optional[ClosureReceipt]:
+def parse_owned_receipt(thread: ReviewThread, authenticated_login: str | ControllerAuthorSet) -> Optional[ClosureReceipt]:
     """Read only a complete, unique receipt owned by the proven credential.
 
     Quoted markers and replies by another actor are ordinary discussion. An
     exact owned protocol prefix with an invalid envelope is unknown state.
     """
-    if not isinstance(authenticated_login, str) or not authenticated_login.strip():
+    if not isinstance(authenticated_login, (str, ControllerAuthorSet)) or (isinstance(authenticated_login, str) and not authenticated_login.strip()):
         raise ClosureReceiptError("Authenticated controller identity is unavailable")
     if thread.comments_truncated or not isinstance(thread.is_resolved, bool):
         raise ClosureReceiptError("Closure receipt thread observation is incomplete")
     owned = []
     for comment in thread.comments or []:
         body = comment.body or ""
-        if is_same_github_login(comment.author_login, authenticated_login) and body.lstrip().startswith(CLOSURE_RECEIPT_PREFIX):
+        relevant = body.lstrip().startswith(CLOSURE_RECEIPT_PREFIX)
+        if isinstance(authenticated_login, ControllerAuthorSet):
+            attribution = authenticated_login.classify(comment.author_id, comment.author_login, relevant=relevant)
+            if attribution is ControllerAttribution.UNATTRIBUTED_RELEVANT:
+                raise ClosureReceiptError("Relevant historical closure receipt authorship is unavailable")
+            trusted = attribution in (ControllerAttribution.CURRENT, ControllerAttribution.PRIOR)
+        else:
+            trusted = is_same_github_login(comment.author_login, authenticated_login)
+        if trusted and relevant:
             owned.append(_parse_receipt_body(body, comment.database_id))
     if not owned:
         return None
@@ -161,7 +172,8 @@ def observe_closure_receipt(
     if not _positive_id(root_comment_database_id):
         raise ClosureReceiptError("The requested closure root identity is invalid")
     try:
-        authenticated_login = github_client.get_authenticated_user_login()
+        author_set = controller_author_set_for_client(github_client, repo_name)
+        authenticated_login = author_set.current.login
         threads = github_client.get_pr_review_threads_strict(repo_name, pr_number)
     except Exception as exc:
         raise ClosureReceiptError("Could not obtain authoritative closure receipt evidence") from exc
@@ -175,10 +187,13 @@ def observe_closure_receipt(
     thread = matches[0]
     if not thread.comments or thread.comments_truncated or not isinstance(thread.is_resolved, bool) or not _positive_id(thread.comments[0].database_id) or thread.comments[0].database_id != root_comment_database_id:
         raise ClosureReceiptError("GitHub did not return a complete exact closure thread/root")
-    receipt = parse_owned_receipt(thread, authenticated_login)
+    receipt = parse_owned_receipt(thread, author_set)
     if receipt is not None and (receipt.api_origin != normalize_api_origin(api_origin) or receipt.repository.casefold() != repo_name.casefold() or receipt.pr_number != pr_number):
         raise ClosureReceiptError("Owned closure receipt belongs to a different API/repository/PR namespace")
-    return ReceiptObservation(thread=thread, authenticated_login=authenticated_login, receipt=receipt)
+    publisher_login = ""
+    if receipt is not None:
+        publisher_login = next((comment.author_login for comment in thread.comments if comment.database_id == receipt.comment_id), "")
+    return ReceiptObservation(thread=thread, authenticated_login=authenticated_login, receipt=receipt, author_set=author_set, publisher_login=publisher_login)
 
 
 def _same_receipt(left: ClosureReceipt, right: ClosureReceipt) -> bool:
@@ -211,6 +226,8 @@ def put_receipt(github_client: GitHubClient, observation: ReceiptObservation, de
     current = observe_closure_receipt(github_client, desired.repository, desired.pr_number, desired.thread_id, desired.root_comment_database_id, api_origin=desired.api_origin)
     if not is_same_github_login(current.authenticated_login, observation.authenticated_login):
         raise ClosureReceiptError("Controller identity changed before closure receipt publication")
+    if current.author_set is None or observation.author_set is None or current.author_set.fingerprint != observation.author_set.fingerprint:
+        raise ClosureReceiptError("Controller identity history changed before closure receipt publication")
     prior = current.receipt
     if observation.receipt is not None and (prior is None or prior.comment_id != observation.receipt.comment_id):
         raise ClosureReceiptError("Previously observed closure receipt disappeared or changed identity")
@@ -258,6 +275,8 @@ def put_receipt(github_client: GitHubClient, observation: ReceiptObservation, de
         raise ClosureReceiptError("GitHub returned a replacement reply instead of the observed receipt")
     if not is_same_github_login(confirmed.authenticated_login, current.authenticated_login):
         raise ClosureReceiptError("Controller identity changed during closure receipt confirmation")
+    if confirmed.author_set is None or current.author_set is None or confirmed.author_set.fingerprint != current.author_set.fingerprint:
+        raise ClosureReceiptError("Controller identity history changed during closure receipt confirmation")
     # Exact body, reply ID and credential read-back above also preserve the
     # operation provenance on the historical-cleanup exception. A concurrently
     # rebound receipt can never inherit another operation's rollback proof.

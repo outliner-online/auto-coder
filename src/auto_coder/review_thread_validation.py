@@ -34,6 +34,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Set
 
 from .adversarial_validator import CHANGE_PROVENANCE_CLARIFICATION_MARKER, ReviewThreadDisposition
 from .canonical_pr_blocker_ledger import BlockerLedgerSnapshot
+from .controller_identity_history import ControllerAttribution, controller_author_set_for_client
 from .logger_config import get_logger
 from .prompt_loader import render_prompt
 from .review_feedback_marker import reply_claims_review_addressed
@@ -312,8 +313,7 @@ def _find_github_stale_blockers(github_client: Any, repo_name: str, pr_number: i
     incomplete_thread_ids: List[str] = []
     current_head_sha: Optional[str] = None
     current_head_fetched = False
-    trusted_marker_author: Optional[str] = None
-    trusted_marker_author_fetched = False
+    trusted_marker_authors = None
 
     def _current_head() -> Optional[str]:
         nonlocal current_head_sha, current_head_fetched
@@ -322,17 +322,11 @@ def _find_github_stale_blockers(github_client: Any, repo_name: str, pr_number: i
             current_head_sha = github_client.get_pull_request_head_sha_strict(repo_name, pr_number)
         return current_head_sha
 
-    def _trusted_marker_author() -> str:
-        nonlocal trusted_marker_author, trusted_marker_author_fetched
-        if not trusted_marker_author_fetched:
-            trusted_marker_author_fetched = True
-            candidate = github_client.get_authenticated_user_login()
-            if not isinstance(candidate, str) or not candidate:
-                raise RuntimeError("Could not determine Auto-Coder's authenticated GitHub marker identity")
-            trusted_marker_author = candidate
-        if trusted_marker_author is None:
-            raise RuntimeError("Could not determine Auto-Coder's authenticated GitHub marker identity")
-        return trusted_marker_author
+    def _trusted_marker_author_set():
+        nonlocal trusted_marker_authors
+        if trusted_marker_authors is None:
+            trusted_marker_authors = controller_author_set_for_client(github_client, repo_name)
+        return trusted_marker_authors
 
     for thread in threads:
         comments = thread.comments or []
@@ -346,7 +340,7 @@ def _find_github_stale_blockers(github_client: Any, repo_name: str, pr_number: i
         # Mutable receipts are independent risk records, not chronological
         # BLOCKER/CLEARED events: editing a comment does not change its position.
         if has_receipt:
-            receipt = parse_owned_receipt(thread, _trusted_marker_author())
+            receipt = parse_owned_receipt(thread, _trusted_marker_author_set())
             if receipt is not None:
                 if receipt.api_origin != "https://api.github.com" or receipt.repository.casefold() != repo_name.casefold() or receipt.pr_number != pr_number:
                     raise RuntimeError(f"Closure receipt namespace does not match {repo_name}#{pr_number}")
@@ -367,7 +361,10 @@ def _find_github_stale_blockers(github_client: Any, repo_name: str, pr_number: i
             body = (comment.body or "").strip()
             if not (body == STALE_BLOCKER_CLEARED_MARKER or body == STALE_BLOCKER_MARKER or body.startswith(f"{STALE_BLOCKER_MARKER}\n")):
                 continue
-            if not is_same_github_login(comment.author_login, _trusted_marker_author()):
+            attribution = _trusted_marker_author_set().classify(comment.author_id, comment.author_login, relevant=True)
+            if attribution is ControllerAttribution.UNATTRIBUTED_RELEVANT:
+                raise RuntimeError(f"Historical stale-marker authorship is unavailable for thread {thread.id}")
+            if attribution not in (ControllerAttribution.CURRENT, ControllerAttribution.PRIOR):
                 continue
             if body == STALE_BLOCKER_CLEARED_MARKER:
                 latest_blocker_head = None
