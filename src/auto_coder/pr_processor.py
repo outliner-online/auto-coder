@@ -2496,11 +2496,13 @@ class CloudReviewRepairResult(list[str]):
         diagnostic_reason: str = "",
         acknowledged_no_actionable_feedback: bool = False,
         completed_no_actionable_feedback: bool = False,
+        settled_no_actionable_feedback: bool = False,
     ) -> None:
         super().__init__(values)
         self.diagnostic_reason = diagnostic_reason
         self.acknowledged_no_actionable_feedback = acknowledged_no_actionable_feedback
         self.completed_no_actionable_feedback = completed_no_actionable_feedback
+        self.settled_no_actionable_feedback = settled_no_actionable_feedback
         self.wait_reason = wait_reason
         self.delivered = delivered
         self.deferred = deferred
@@ -6372,6 +6374,7 @@ def _coordinate_pr_review(
     gate_retained_resume = False
     acknowledged_repair_threads: Tuple[ReviewThread, ...] = ()
     completed_repair_threads: Tuple[ReviewThread, ...] = ()
+    settled_repair_threads: Tuple[ReviewThread, ...] = ()
     current_head_unreviewed = False
     reviewer_login = ""
     claimed_review_threads: Sequence[Any] = ()
@@ -6516,7 +6519,7 @@ def _coordinate_pr_review(
                     if any(marker in str(pr_data.get("body") or "") for marker in _LOCAL_REPAIR_MARKERS):
                         repair_kwargs["config"] = config
                     if current_head_unreviewed and not force_admission_eligible and not pending_provenance:
-                        repair_kwargs["allow_completed_reassessment"] = True
+                        repair_kwargs["allow_current_head_reassessment"] = True
                     repair_result = _delegate_cloud_review_thread_repair(repo_name, pr_data, **repair_kwargs)
                     actions.extend(repair_result)
                     if revalidating_older_head_threads and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.acknowledged_no_actionable_feedback:
@@ -6528,6 +6531,10 @@ def _coordinate_pr_review(
                         # Completed provider work admits an independent first review,
                         # even when the implementer honestly reports incomplete work.
                         completed_repair_threads = repair_threads
+                    if current_head_unreviewed and not force_admission_eligible and not pending_provenance and repair_result.deferred and not repair_result.delivered and repair_result.settled_no_actionable_feedback:
+                        # Current native task settlement permits examination of this
+                        # head without claiming discarded historical work completed.
+                        settled_repair_threads = repair_threads
                     if repair_result.deferred and processing_status is not None:
                         processing_status.error = None
                         processing_status.outcome = PRProcessingOutcome.DEFERRED
@@ -6544,7 +6551,7 @@ def _coordinate_pr_review(
                     if repair_result.local_phase in {"completed_no_change", "awaiting_validation"} and adv_enabled:
                         _verify_pending_local_correction(github_client, repo_name, pr_data, config, actions, processing_status, retry_failed=force_adversarial_validation)
                         return actions
-            if not force_admission_eligible and not acknowledged_repair_threads and not completed_repair_threads:
+            if not force_admission_eligible and not acknowledged_repair_threads and not completed_repair_threads and not settled_repair_threads:
                 return actions
             if completed_repair_threads:
                 actions.append(f"Continuing to first current-head adversarial validation for PR #{pr_number} after completed cloud review repairs; ordinary unresolved threads remain merge blockers")
@@ -6557,6 +6564,19 @@ def _coordinate_pr_review(
                         "effect": "completed-cloud-review-reassessment",
                         "examined_head": head_sha_for_gate,
                         "blocking_thread_ids": [thread.id for thread in completed_repair_threads],
+                    },
+                )
+            elif settled_repair_threads:
+                actions.append(f"Continuing to first current-head adversarial validation for PR #{pr_number} after observing a settled current Codex task with retained historical feedback; historical completion remains unproven")
+                _record_pr_stage(
+                    pr_number,
+                    "pr.review-thread-gate",
+                    f"pr#{pr_number} review-thread gate",
+                    Outcome.DEFERRED,
+                    {
+                        "effect": "settled-cloud-task-reassessment",
+                        "examined_head": head_sha_for_gate,
+                        "blocking_thread_ids": [thread.id for thread in settled_repair_threads],
                     },
                 )
             elif acknowledged_repair_threads:
@@ -6776,6 +6796,8 @@ def _coordinate_pr_review(
                         actions.append(f"Continuing to forced adversarial validation for PR #{pr_number} despite unresolved review threads observed after Codex review completion (explicit --force); merge remains blocked while they are unresolved")
                     elif completed_repair_threads and post_codex_thread_state.blocking_unresolved == completed_repair_threads:
                         actions.append(f"Continuing to current-head adversarial validation for PR #{pr_number} after Codex review confirmed unchanged completed repairs; ordinary unresolved threads remain merge blockers")
+                    elif settled_repair_threads and post_codex_thread_state.blocking_unresolved == settled_repair_threads:
+                        actions.append(f"Continuing to current-head adversarial validation for PR #{pr_number} after Codex review confirmed unchanged retained historical feedback; ordinary unresolved threads remain merge blockers")
                     elif acknowledged_repair_threads and post_codex_thread_state.blocking_unresolved == acknowledged_repair_threads:
                         actions.append(f"Continuing to current-head adversarial validation for PR #{pr_number} after Codex review confirmed unchanged acknowledged repairs; ordinary unresolved threads remain merge blockers")
                     else:
@@ -10840,25 +10862,31 @@ def _checkpoint_cloud_review_repair(repo_name: str, pr_data: Dict[str, Any], git
         _record_pr_stage(target.pr_number, "pr.no-commit-recovery", f"pr#{target.pr_number} no-commit recovery", Outcome.DEFERRED, {"provider": origin.provider, "task_id": origin.task_id, "reason": "observation_or_delivery_unavailable", "error_type": type(exc).__name__, "head_sha": target.head_sha})
 
 
-def _completed_cloud_review_feedback(repo_name: str, pr_data: dict, github_client: Optional[GitHubClient], origin: CloudTaskOrigin, identities: Tuple[str, ...]) -> bool:
-    """Observe finished exact feedback without granting delivery or closure authority."""
-    observer = getattr(type(origin.client), "has_completed_review_feedback", None)
+def _observe_cloud_review_feedback(repo_name: str, pr_data: dict, github_client: Optional[GitHubClient], origin: CloudTaskOrigin, identities: Tuple[str, ...]) -> str:
+    """Observe review readiness without granting delivery or closure authority."""
+    from .codex_cloud_client import CodexReviewFeedbackReadiness
+
+    observer = getattr(type(origin.client), "observe_review_feedback_readiness", None)
     target = resolve_existing_pr_repair_target(repo_name, pr_data)
+    waiting = CodexReviewFeedbackReadiness.WAITING.value
     if origin.provider != "codex-cloud" or not callable(observer) or target is None or github_client is None or not identities:
-        return False
+        return waiting
     try:
-        if observer(origin.client, origin.task_id, identities, target) is not True:
-            return False
+        readiness = observer(origin.client, origin.task_id, identities, target)
+        if not isinstance(readiness, CodexReviewFeedbackReadiness) or readiness is CodexReviewFeedbackReadiness.WAITING:
+            return waiting
         live = github_client.get_pull_request_metadata_strict(repo_name, target.pr_number)
         if not isinstance(live, dict) or live.get("number") != target.pr_number or live.get("state") != "open" or live.get("merged") is True or resolve_existing_pr_repair_target(repo_name, live) != target:
-            return False
+            return waiting
         fresh = _resolve_cloud_task_origin(repo_name, live, github_client)
         if fresh.origin is None or (fresh.origin.provider, fresh.origin.task_id, fresh.origin.attribution_token) != (origin.provider, origin.task_id, origin.attribution_token):
-            return False
-        return _revalidate_cloud_origin(repo_name, target.pr_number, fresh.origin, github_client=github_client) is None
+            return waiting
+        if _revalidate_cloud_origin(repo_name, target.pr_number, fresh.origin, github_client=github_client) is not None:
+            return waiting
+        return readiness.value
     except Exception as exc:
-        logger.warning("Completed cloud feedback observation unavailable for PR #{}: {}", target.pr_number, type(exc).__name__)
-        return False
+        logger.warning("Cloud review readiness observation unavailable for PR #{}: {}", target.pr_number, type(exc).__name__)
+        return waiting
 
 
 def _delegate_cloud_review_thread_repair(
@@ -10870,7 +10898,7 @@ def _delegate_cloud_review_thread_repair(
     validated_feedback: Sequence[str] = (),
     validated_head_sha: str = "",
     canonical_blocker_ids: Sequence[str] = (),
-    allow_completed_reassessment: bool = False,
+    allow_current_head_reassessment: bool = False,
 ) -> CloudReviewRepairResult:
     """Assign unresolved review feedback to its originating cloud task.
 
@@ -11118,14 +11146,12 @@ def _delegate_cloud_review_thread_repair(
             and all(not thread.is_resolved and not thread.comments_truncated and addressed_through_by_thread[thread.id] == len(thread.comments) - 1 for thread in unresolved_threads)
             and not any(identity.startswith(prefix) for identity in indeterminate)
         )
-        completed_no_actionable_feedback = (
-            allow_completed_reassessment
-            and bool(findings)
-            and all(not thread.is_resolved and not thread.comments_truncated and thread.comments for thread in unresolved_threads)
-            and not any(identity.startswith(prefix) for identity in indeterminate)
-            and _completed_cloud_review_feedback(repo_name, pr_data, github_client, selected_origin, tuple(sorted(identity for _thread, _comment, identity in findings)))
-        )
-        if not completed_no_actionable_feedback:
+        readiness = "waiting"
+        if allow_current_head_reassessment and bool(findings) and all(not thread.is_resolved and not thread.comments_truncated and thread.comments for thread in unresolved_threads) and not any(identity.startswith(prefix) for identity in indeterminate):
+            readiness = _observe_cloud_review_feedback(repo_name, pr_data, github_client, selected_origin, tuple(sorted(identity for _thread, _comment, identity in findings)))
+        completed_no_actionable_feedback = readiness == "completed"
+        settled_no_actionable_feedback = readiness == "current_task_settled"
+        if not completed_no_actionable_feedback and not settled_no_actionable_feedback:
             _checkpoint_cloud_review_repair(repo_name, pr_data, github_client, selected_origin, acknowledged=acknowledged)
         return CloudReviewRepairResult(
             [f"{provider_label} review repair was already requested for PR #{pr_number} for all current actionable feedback"],
@@ -11133,6 +11159,7 @@ def _delegate_cloud_review_thread_repair(
             diagnostic_reason=reason,
             acknowledged_no_actionable_feedback=acknowledged_no_actionable_feedback,
             completed_no_actionable_feedback=completed_no_actionable_feedback,
+            settled_no_actionable_feedback=settled_no_actionable_feedback,
         )
 
     blocked = [(thread, comment, identity) for thread, comment, identity in pending if identity in indeterminate]

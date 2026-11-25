@@ -380,7 +380,7 @@ def test_passing_codex_pr_delegates_blocking_review_threads(
         _pr_data(),
         github_client=client,
         unresolved_threads=(thread,),
-        allow_completed_reassessment=True,
+        allow_current_head_reassessment=True,
     )
 
 

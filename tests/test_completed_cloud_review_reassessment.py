@@ -9,6 +9,7 @@ import pytest
 from auto_coder.adversarial_validator import AdversarialValidationResult
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.cloud_manager import CloudTaskBinding
+from auto_coder.codex_cloud_client import CodexReviewFeedbackReadiness
 from auto_coder.github_app_reviewer import ReviewPublicationResult
 from auto_coder.pr_processor import (
     AdversarialValidationEligibility,
@@ -64,8 +65,9 @@ def _client():
     return github
 
 
+@pytest.mark.parametrize("readiness", [CodexReviewFeedbackReadiness.COMPLETED, CodexReviewFeedbackReadiness.CURRENT_TASK_SETTLED])
 @pytest.mark.parametrize("case", ["completed", "completed_due_checkpoint", "not_completed", "not_requested", "truncated", "pending", "changed_head", "closed", "changed_owner", "observation_error"])
-def test_completed_delivery_observation_does_not_replay_feedback(tmp_path, case):
+def test_completed_delivery_observation_does_not_replay_feedback(tmp_path, case, readiness):
     """The real producer admits only positive, current evidence without altering old receipts."""
     thread = _thread()
     identity = _review_feedback_identity(f"{REPOSITORY}#{PR}:codex-cloud:{TASK}:", thread, 0)
@@ -92,12 +94,14 @@ def test_completed_delivery_observation_does_not_replay_feedback(tmp_path, case)
     with (
         patch("auto_coder.pr_processor.CloudManager.get_binding", return_value=owner, side_effect=bindings),
         patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=state),
-        patch("auto_coder.codex_cloud_client.CodexCloudClient.has_completed_review_feedback", return_value=case != "not_completed", side_effect=RuntimeError("provider unavailable") if case == "observation_error" else None) as completed,
+        patch("auto_coder.codex_cloud_client.CodexCloudClient.observe_review_feedback_readiness", return_value=CodexReviewFeedbackReadiness.WAITING if case == "not_completed" else readiness, side_effect=RuntimeError("provider unavailable") if case == "observation_error" else None) as completed,
         patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup") as send,
     ):
-        result = _delegate_cloud_review_thread_repair(REPOSITORY, _pr(), github_client=github, unresolved_threads=(thread,), allow_completed_reassessment=case != "not_requested")
+        result = _delegate_cloud_review_thread_repair(REPOSITORY, _pr(), github_client=github, unresolved_threads=(thread,), allow_current_head_reassessment=case != "not_requested")
 
-    assert result.completed_no_actionable_feedback is (case in {"completed", "completed_due_checkpoint"})
+    admitted = case in {"completed", "completed_due_checkpoint"}
+    assert result.completed_no_actionable_feedback is (admitted and readiness is CodexReviewFeedbackReadiness.COMPLETED)
+    assert result.settled_no_actionable_feedback is (admitted and readiness is CodexReviewFeedbackReadiness.CURRENT_TASK_SETTLED)
     assert result.acknowledged_no_actionable_feedback is False
     assert result.deferred is True
     assert result.delivered is False
@@ -115,6 +119,7 @@ def test_completed_delivery_observation_does_not_replay_feedback(tmp_path, case)
     github.reply_to_review_thread.assert_not_called()
 
 
+@pytest.mark.parametrize("readiness", [CodexReviewFeedbackReadiness.COMPLETED, CodexReviewFeedbackReadiness.CURRENT_TASK_SETTLED])
 @pytest.mark.parametrize(
     "case, expects_validation",
     [
@@ -127,7 +132,7 @@ def test_completed_delivery_observation_does_not_replay_feedback(tmp_path, case)
         ("saved_verdict", False),
     ],
 )
-def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path, case, expects_validation):
+def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path, case, expects_validation, readiness):
     """The real receipt-only delegation path reaches one validator without closing ordinary roots."""
     from auto_coder.execution_trace import Outcome, get_trace_collector
     from tests.test_dashboard_observability import _mounted_detail
@@ -173,13 +178,15 @@ def test_completed_cloud_feedback_reaches_first_current_head_validation(tmp_path
             "_merge_pr": {},
         }
         mocks = {name: stack.enter_context(patch("auto_coder.pr_processor." + name, **kwargs)) for name, kwargs in patches.items()}
-        completed = stack.enter_context(patch("auto_coder.codex_cloud_client.CodexCloudClient.has_completed_review_feedback", return_value=case != "not_completed"))
+        completed = stack.enter_context(patch("auto_coder.codex_cloud_client.CodexCloudClient.observe_review_feedback_readiness", return_value=CodexReviewFeedbackReadiness.WAITING if case == "not_completed" else readiness))
         send = stack.enter_context(patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup"))
         execution = stack.enter_context(collector.start_execution(REPOSITORY, "pr", PR, origin="worker"))
         actions = _handle_pr_merge(github, REPOSITORY, _pr(), config, {})
 
     events = [event for event in collector.get_snapshot(repository=REPOSITORY, item_type="pr", item_number=PR).events if event.execution_id == execution.scope.execution_id]
-    reassessments = [event for event in events if event.stage_id == "pr.review-thread-gate" and event.facts.get("effect") == "completed-cloud-review-reassessment"]
+    expected_effect = "completed-cloud-review-reassessment" if readiness is CodexReviewFeedbackReadiness.COMPLETED else "settled-cloud-task-reassessment"
+    reassessments = [event for event in events if event.stage_id == "pr.review-thread-gate" and event.facts.get("effect") == expected_effect]
+    assert not any((event.facts or {}).get("effect") == ("settled-cloud-task-reassessment" if readiness is CodexReviewFeedbackReadiness.COMPLETED else "completed-cloud-review-reassessment") for event in events)
     if expects_validation:
         mocks["run_adversarial_validation"].assert_called_once()
         assert thread.id not in mocks["run_adversarial_validation"].call_args.kwargs["claimed_review_threads_section"]

@@ -70,6 +70,15 @@ class CanonicalCorrectionReference:
 
 
 @dataclass(frozen=True)
+class ExternalReviewContext:
+    """Immutable source prose without an executable correction binding."""
+
+    blocker_id: str = ""
+    authoritative_boundary: str = ""
+    review_text: str = ""
+
+
+@dataclass(frozen=True)
 class CanonicalCorrectionContext:
     api_origin: str = ""
     repository: str = ""
@@ -79,10 +88,15 @@ class CanonicalCorrectionContext:
     validation_snapshot: str = ""
     requirement_manifest_identity: str = ""
     references: tuple[CanonicalCorrectionReference, ...] = ()
+    external_review_context: tuple[ExternalReviewContext, ...] = ()
 
     @property
     def fingerprint(self) -> str:
-        return _digest(asdict(self))
+        payload = asdict(self)
+        if not self.external_review_context:
+            # Retained contexts without source prose keep their original binding.
+            payload.pop("external_review_context")
+        return _digest(payload)
 
 
 def build_correction_reference_context(
@@ -92,19 +106,26 @@ def build_correction_reference_context(
     validation_snapshot: str = "",
     requirement_manifest_identity: str = "",
 ) -> CanonicalCorrectionContext:
-    references = tuple(
-        CanonicalCorrectionReference(
-            correction_identity=f"{CANONICAL_CORRECTION_PREFIX}{blocker.blocker_id}",
-            scope_fingerprint=correction_scope_fingerprint(blocker),
-            category=blocker.category,
-            requirement_ids=requirement_identities(blocker.qualified_requirements),
-            authoritative_boundary=blocker.authoritative_boundary,
-            incorrect_behavior=blocker.incorrect_behavior_or_missing_invariant,
-            required_outcome=blocker.required_correction_outcome,
-            observation_labels=tuple(sorted({alias.alias_value for alias in blocker.aliases if alias.alias_type == ORDINARY_LABEL_ALIAS})),
+    references = []
+    external_review_context = []
+    for blocker in sorted(snapshot.get_open_blockers(), key=lambda entry: entry.blocker_id):
+        # External intake retains the review source without inventing a typed
+        # requirement scope. Its thread boundary is not a finding's code anchor.
+        if not blocker.qualified_requirements and any(alias.alias_type == "external_review_comment" for alias in blocker.aliases):
+            external_review_context.append(ExternalReviewContext(blocker_id=blocker.blocker_id, authoritative_boundary=blocker.authoritative_boundary, review_text=blocker.accepted_scope.description))
+            continue
+        references.append(
+            CanonicalCorrectionReference(
+                correction_identity=f"{CANONICAL_CORRECTION_PREFIX}{blocker.blocker_id}",
+                scope_fingerprint=correction_scope_fingerprint(blocker),
+                category=blocker.category,
+                requirement_ids=requirement_identities(blocker.qualified_requirements),
+                authoritative_boundary=blocker.authoritative_boundary,
+                incorrect_behavior=blocker.incorrect_behavior_or_missing_invariant,
+                required_outcome=blocker.required_correction_outcome,
+                observation_labels=tuple(sorted({alias.alias_value for alias in blocker.aliases if alias.alias_type == ORDINARY_LABEL_ALIAS})),
+            )
         )
-        for blocker in sorted(snapshot.get_open_blockers(), key=lambda entry: entry.blocker_id)
-    )
     return CanonicalCorrectionContext(
         api_origin=normalize_api_origin(snapshot.api_origin),
         repository=snapshot.repository,
@@ -113,7 +134,8 @@ def build_correction_reference_context(
         base_sha=base_sha,
         validation_snapshot=validation_snapshot,
         requirement_manifest_identity=requirement_manifest_identity,
-        references=references,
+        references=tuple(references),
+        external_review_context=tuple(external_review_context),
     )
 
 
