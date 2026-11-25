@@ -28,7 +28,6 @@ class OrdinaryIssueAdapterEffects:
 
     process_codex_cloud: Callable[..., List[str]]
     process_claude_routine: Callable[..., List[str]]
-    process_jules: Callable[..., List[str]]
     take_local_actions: Callable[..., List[str]]
     record_dispatch_stage: Callable[..., None]
 
@@ -56,7 +55,7 @@ class OrdinaryIssueAdapterInput:
 class OrdinaryIssueAdapterComposition:
     """Resolve candidates and invoke the existing provider effect owners."""
 
-    _REMOTE_TYPES = {"codex-cloud", "claude-routine", "jules"}
+    _REMOTE_TYPES = {"codex-cloud", "claude-routine"}
     _LOCAL_TYPES = {"codex", "codex-mcp", "antigravity", "qwen", "auggie", "muse", "claude", "aider", "opencode"}
 
     def __init__(self, dispatch_guard: Optional[IssueDispatchGuard] = None) -> None:
@@ -87,6 +86,11 @@ class OrdinaryIssueAdapterComposition:
         def invoke(candidate: CandidateHandoff) -> AdapterOutcome:
             nonlocal actions
             backend_type = candidate.provider.lower()
+            if backend_type == "jules":
+                return AdapterOutcome(
+                    DispatchOutcome.NOT_STARTED,
+                    diagnostic=f"ordinary Issue backend '{candidate.backend_name}' resolves to retired provider jules",
+                )
             observed_acceptance: List[AdapterOutcome] = []
 
             def accepted_evidence(diagnostic: str = "") -> Optional[AdapterOutcome]:
@@ -145,18 +149,6 @@ class OrdinaryIssueAdapterComposition:
                         label_context=request.label_context,
                         acceptance_observer=observed_acceptance.append,
                         **({"retry_authority": request.retry_authority} if request.retry_authority is not None else {}),  # type: ignore[arg-type]
-                    )
-                elif backend_type == "jules":
-                    actions = request.effects.process_jules(
-                        request.repo_name,
-                        request.issue_data,
-                        request.config,
-                        request.github_client,
-                        label_context=request.label_context,
-                        implementation_slots=request.implementation_slots,
-                        backend_name=candidate.backend_name,
-                        acceptance_observer=observed_acceptance.append,
-                        **({"retry_authority": request.retry_authority} if request.retry_authority is not None else {}),
                     )
                 elif backend_type in self._LOCAL_TYPES:
                     model = llm_config.get_model_for_backend(candidate.backend_name) or ""

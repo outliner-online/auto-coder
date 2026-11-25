@@ -1208,6 +1208,7 @@ def _process_issue_high_score_cloud(
     if candidates:
         from .quota_selector import rank_high_score_backends_by_quota
 
+        candidates = [name for name in candidates if llm_config.resolve_backend_type(name) in {"codex-cloud", "claude-routine"}]
         candidates = rank_high_score_backends_by_quota(candidates, llm_config)
         if not candidates:
             raise CloudSubmissionNotStartedError("No configured high-score Cloud backend is eligible to submit work")
@@ -1248,17 +1249,6 @@ def _process_issue_high_score_cloud(
                     label_context=label_context,
                     **({"implementation_slots": implementation_slots} if implementation_slots is not None else {}),  # type: ignore[arg-type]
                     **({"manual_retry": True} if manual_retry else {}),  # type: ignore[arg-type]
-                    **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
-                )
-            elif backend_type == "jules":
-                return _process_issue_jules_mode(
-                    repo_name,
-                    issue_data,
-                    config,
-                    github_client,
-                    label_context=label_context,
-                    **({"implementation_slots": implementation_slots} if implementation_slots is not None else {}),  # type: ignore[arg-type]
-                    **({"backend_name": backend_name} if backend_name != "jules" or retry_authority is not None else {}),  # type: ignore[arg-type]
                     **({"retry_authority": retry_authority} if retry_authority is not None else {}),  # type: ignore[arg-type]
                 )
         except (AutoCoderUsageLimitError, CloudSubmissionNotStartedError) as e:
@@ -1355,7 +1345,6 @@ def _dispatch_issue_candidates(
             effects=OrdinaryIssueAdapterEffects(
                 process_codex_cloud=_process_issue_codex_cloud_mode,
                 process_claude_routine=_process_issue_claude_routine_mode,
-                process_jules=_process_issue_jules_mode,
                 take_local_actions=_take_issue_actions,
                 record_dispatch_stage=_record_dispatch_stage,
             ),

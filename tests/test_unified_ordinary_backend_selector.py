@@ -143,6 +143,32 @@ def test_inherited_noedit_filters_task_only_backends():
         cloud_only.get_noedit_default_backend()
 
 
+def test_ordinary_selector_filters_jules_alias_without_reordering_supported_candidates():
+    config = LLMBackendConfiguration.load_from_dict(
+        {
+            "backend": {"priority_groups": [["retired", "remote"], ["local"]]},
+            "backends": {
+                "retired": {"backend_type": "jules"},
+                "remote": {"backend_type": "codex-cloud"},
+                "local": {"backend_type": "codex"},
+            },
+        }
+    )
+
+    assert config.get_ordinary_priority_groups() == [["remote"], ["local"]]
+
+
+def test_jules_only_ordinary_selector_has_no_dispatch_candidate():
+    config = LLMBackendConfiguration.load_from_dict(
+        {
+            "backend": {"order": ["retired"]},
+            "backends": {"retired": {"backend_type": "jules"}},
+        }
+    )
+
+    assert config.get_ordinary_priority_groups() == []
+
+
 def test_message_manager_never_constructs_inherited_cloud_candidate(monkeypatch):
     from unittest.mock import MagicMock
 
