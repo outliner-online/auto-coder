@@ -162,8 +162,8 @@ def test_unselected_indeterminate_receipt_blocks_only_its_owning_task(evidence, 
     assert status.call_count == (0 if same_owner else 1)
 
 
-@pytest.mark.parametrize("state", [CloudTaskState.RUNNING, CloudTaskState.QUEUED, CloudTaskState.PAUSED, CloudTaskState.FAILED, CloudTaskState.UNKNOWN, "completed"])
-def test_task_must_be_authoritatively_completed(evidence, state):
+@pytest.mark.parametrize("state", [CloudTaskState.RUNNING, CloudTaskState.QUEUED, CloudTaskState.PAUSED, CloudTaskState.UNKNOWN, "completed"])
+def test_task_must_be_authoritatively_completed_or_independently_idle_failed(evidence, state):
     client, _path, _record, status, history = evidence
     status.return_value = CloudTask(task_id=TASK_ID, state=state)
 
