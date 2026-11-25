@@ -6361,12 +6361,19 @@ def _defer_validation_result(
     processing_status: Optional[ProcessedPRResult],
     runtime: PRReviewRuntime,
     error: Optional[Exception] = None,
+    *,
+    phase: str = "gap-state-acceptance",
+    unavailable_reason: str = "head_observation_unavailable",
 ) -> None:
     """Keep the completed result pending and expose the real retry obligation."""
     if error is None:
         reason, retry_at = pending.reason or "head_observation_unavailable", pending.retry_not_before
+        if reason.startswith("publisher_publication_pending"):
+            phase = "publication-reconciliation"
     else:
-        reason = error.reason if isinstance(error, GitHubRequestDeferred) else "head_observation_unavailable"
+        reason = error.reason if isinstance(error, GitHubRequestDeferred) else unavailable_reason
+        if not isinstance(error, GitHubRequestDeferred) and unavailable_reason != "head_observation_unavailable":
+            reason = f"{reason}: {redact_string(str(error))[:2000]}"
         retry_at = error.retry_at if isinstance(error, GitHubRequestDeferred) else time.time() + 60.0
         pending = store.defer(pending.attempt_id, reason, retry_at)
         retry_at = pending.retry_not_before
@@ -6374,7 +6381,7 @@ def _defer_validation_result(
             PrAdversarialReviewTarget(repository=pending.repository, pr_number=pending.pr_number, head_sha=pending.head_sha),
             pending.review_id,
             "pending",
-            {"phase": "gap-state-acceptance", "attempt_id": pending.attempt_id, "attempt_sequence": pending.attempt_sequence, "examined_head": pending.head_sha, "reason": reason, "retry_not_before": retry_at},
+            {"phase": phase, "attempt_id": pending.attempt_id, "attempt_sequence": pending.attempt_sequence, "examined_head": pending.head_sha, "reason": reason, "retry_not_before": retry_at},
         )
     actions.retry_not_before = retry_at
     actions.record_disposition(ReviewDisposition.RECONCILIATION_WAIT)
@@ -6389,7 +6396,7 @@ def _defer_validation_result(
         "pr.adversarial-validation",
         f"pr#{pending.pr_number} adversarial validation",
         Outcome.DEFERRED,
-        {"effect": "validation-result-retained", "phase": "gap-state-acceptance", "attempt_id": pending.attempt_id, "attempt_sequence": pending.attempt_sequence, "examined_head": pending.head_sha, "reason": reason, "retry_not_before": retry_at},
+        {"effect": "validation-result-retained", "phase": phase, "attempt_id": pending.attempt_id, "attempt_sequence": pending.attempt_sequence, "examined_head": pending.head_sha, "reason": reason, "retry_not_before": retry_at},
     )
 
 
@@ -6569,7 +6576,7 @@ def _coordinate_pr_review(
                             deferred_result = None
                     except Exception as exc:
                         assert deferred_result is not None
-                        _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime, exc)
+                        _defer_validation_result(deferred_store, deferred_result, actions, processing_status, runtime, exc, phase="publication-reconciliation", unavailable_reason="publisher_publication_pending")
                         return actions
         except DeferredPRValidationStateError as exc:
             _record_review_wait(repo_name, pr_number, scope.head_sha, actions, processing_status, str(exc))

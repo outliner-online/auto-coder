@@ -1471,7 +1471,7 @@ class TestAdversarialValidationPRFlow:
         strong_reason,
     ):
         """A legacy/cached ordinary PASS cannot bypass the production merge closure."""
-        from auto_coder.llm_backend_config import BackendConfig
+        from auto_coder.llm_backend_config import BackendConfig, LLMBackendConfiguration
 
         head_sha, base_sha = "a" * 40, "b" * 40
         pr_data = {
@@ -1502,10 +1502,12 @@ class TestAdversarialValidationPRFlow:
         client.get_issue_timeline_strict.return_value = []
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[1])
         strong = BackendConfig(name="codex", model="strong-model")
-        llm_config = MagicMock()
-        llm_config.get_backend_strong_pr_adversarial_validation.return_value = strong
-        llm_config.get_strong_pr_adversarial_validation_backend_order.return_value = ["codex"]
-        llm_config.get_strong_pr_adversarial_validation_default_backend.return_value = "codex"
+        llm_config = LLMBackendConfiguration(
+            backends={"codex": strong},
+            backend_strong_pr_adversarial_validation=strong,
+            backend_strong_pr_adversarial_validation_order=["codex"],
+            backend_strong_pr_adversarial_validation_default="codex",
+        )
         monkeypatch.setenv("HOME", str(tmp_path))
 
         config = AutomationConfig()

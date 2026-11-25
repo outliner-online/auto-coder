@@ -287,9 +287,11 @@ separate stages. See [the admission contract](settled-codex-task-review-reassess
 A completed reviewer interaction can remain unaccepted while current HEAD or
 other required input evidence is unavailable. The existing Decision Log then
 shows `pr.adversarial-validation` / `DEFERRED` with
-`effect=validation-result-retained`, `phase=gap-state-acceptance`, the original
+`effect=validation-result-retained`, the acceptance or publication-reconciliation
+phase, the original
 `attempt_id` and `attempt_sequence`, `examined_head`, the concrete `reason`
-(such as `rate_limit_cooldown`), and `retry_not_before`.
+(such as `rate_limit_cooldown` or `publisher_publication_pending` with its
+diagnostic detail), and `retry_not_before`.
 
 After current inputs are confirmed unchanged, `effect=validation-result-resumed`
 records resumption of that same attempt without another LLM call. It does not

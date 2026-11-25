@@ -61,8 +61,11 @@ The diagnostic audit never supplies publication or merge authority.
 The existing `pr.adversarial-validation` stage distinguishes:
 
 - `DEFERRED`, `effect=validation-result-retained`: the result is retained while
-  its adoption waits. Facts include `phase=gap-state-acceptance`, `reason`,
-  `retry_not_before`, `attempt_id`, `attempt_sequence` and `examined_head`.
+  its adoption waits. Facts include the acceptance or publication-reconciliation
+  `phase`, `reason`, `retry_not_before`, `attempt_id`, `attempt_sequence` and
+  `examined_head`. Unknown or changed original publishers retain the specific
+  `publisher_publication_pending` reason and diagnostic detail; they are not
+  reported as unavailable HEAD observations.
 - `DEFERRED`, `effect=validation-result-resumed`: the original result is being
   consumed without another reviewer invocation. Subsequent acceptance,
   publication, repair or merge events describe their actual outcomes.
