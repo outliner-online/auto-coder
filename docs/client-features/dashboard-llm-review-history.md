@@ -270,3 +270,14 @@ execution and result. Changed discussion, uncertain delivery, active provider
 work, the reviewer limit and saved-verdict deduplication retain their existing
 admission behavior. Runnable regressions are listed in
 `docs/dashboard-observability.md`.
+
+### Retained feedback with a settled current Codex task
+
+When historical pre-send evidence is absent, the separate first-current-head
+admission appears as `pr.review-thread-gate`, outcome `DEFERRED`, with
+`effect=settled-cloud-task-reassessment`, `examined_head`, and
+`blocking_thread_ids`. The existing detail renderer presents these facts without
+a new origin or schema. This records permission to independently inspect the
+current head; it does not describe the absent historical request as completed.
+Delivery, later independent findings, correction and merge retain their own
+separate stages. See [the admission contract](settled-codex-task-review-reassessment.md).

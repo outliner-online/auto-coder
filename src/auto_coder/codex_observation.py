@@ -87,8 +87,15 @@ def execution_evidence(task: Optional[WhamTask], binding: ObservationBinding) ->
         return CodexExecutionEvidence()
     if task.environment_id and task.environment_id != binding.environment_id:
         return CodexExecutionEvidence()
+    return current_execution_evidence(task, binding.task_id)
+
+
+def current_execution_evidence(task: Optional[WhamTask], task_id: str) -> CodexExecutionEvidence:
+    """Normalize task-current fields without asserting repository/environment ownership."""
+    if task is None or task.id != task_id:
+        return CodexExecutionEvidence()
     assistant = task.current_assistant_turn
-    if assistant is None or not assistant.id or not assistant.id.startswith(f"{binding.task_id}~"):
+    if assistant is None or not assistant.id or not assistant.id.startswith(f"{task_id}~"):
         return CodexExecutionEvidence(user_turn_id=task.current_user_turn.id if task.current_user_turn else "")
     current = assistant.status.strip().lower()
     latest = task.latest_turn_status.strip().lower()

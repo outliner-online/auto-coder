@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from auto_coder.cloud_task_client_base import CloudTask, CloudTaskState
-from auto_coder.codex_cloud_client import CodexCloudClient, PendingCodexFollowUp
+from auto_coder.codex_cloud_client import CodexCloudClient, CodexReviewFeedbackReadiness, PendingCodexFollowUp
 from auto_coder.codex_wham_client import CodexWhamClient, WhamTurn
 from auto_coder.pr_repair import ExistingPrRepairTarget
 
@@ -68,7 +68,7 @@ def test_completed_ordinary_feedback_allows_new_head_observation_without_rewriti
     before = path.read_bytes()
     modified = path.stat().st_mtime_ns
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY, second.logical_identity), TARGET) is True
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY, second.logical_identity), TARGET) is CodexReviewFeedbackReadiness.COMPLETED
 
     status.assert_called_once_with(TASK_ID)
     history.assert_called_once_with(TASK_ID)
@@ -83,8 +83,8 @@ def test_every_distinct_selected_baseline_requires_completed_activity(evidence):
     second = replace(record, logical_identity=IDENTITY + "-second", pre_send_turn_id=f"{TASK_ID}~assttrn_after")
     _write(path, record, second)
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY, second.logical_identity), TARGET) is False
-    assert history.call_count == 1
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY, second.logical_identity), TARGET) is CodexReviewFeedbackReadiness.WAITING
+    assert history.call_count == 2
 
 
 @pytest.mark.parametrize(
@@ -108,7 +108,7 @@ def test_missing_native_authority_stays_waiting_without_provider_reads(evidence,
     _write(path, replace(record, **change))
     before = path.read_bytes()
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is False
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is CodexReviewFeedbackReadiness.WAITING
 
     status.assert_not_called()
     history.assert_not_called()
@@ -147,7 +147,7 @@ def test_malformed_or_ambiguous_native_receipts_do_not_authorize(evidence, damag
         serialized = json.dumps(document)
         path.write_text(serialized.replace('"status": "delivered"', '"status": "indeterminate", "status": "delivered"'))
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is False
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is CodexReviewFeedbackReadiness.WAITING
     status.assert_not_called()
     history.assert_not_called()
 
@@ -158,7 +158,7 @@ def test_unselected_indeterminate_receipt_blocks_only_its_owning_task(evidence, 
     uncertain = replace(record, logical_identity="another-request", status="indeterminate", task_id=TASK_ID if same_owner else "task_e_other")
     _write(path, record, uncertain)
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is (not same_owner)
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is (CodexReviewFeedbackReadiness.WAITING if same_owner else CodexReviewFeedbackReadiness.COMPLETED)
     assert status.call_count == (0 if same_owner else 1)
 
 
@@ -167,7 +167,7 @@ def test_task_must_be_authoritatively_completed(evidence, state):
     client, _path, _record, status, history = evidence
     status.return_value = CloudTask(task_id=TASK_ID, state=state)
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is False
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is CodexReviewFeedbackReadiness.WAITING
     history.assert_not_called()
 
 
@@ -176,7 +176,7 @@ def test_task_observation_must_have_exact_typed_identity(evidence, task):
     client, _path, _record, status, history = evidence
     status.return_value = task
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is False
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is CodexReviewFeedbackReadiness.WAITING
     history.assert_not_called()
 
 
@@ -196,7 +196,7 @@ def test_old_or_unrelated_completion_cannot_stand_for_selected_followup(evidence
         turns = [turns[0], replace(turns[1], created_at=None)]
     history.return_value = turns
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is False
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is CodexReviewFeedbackReadiness.WAITING
 
 
 @pytest.mark.parametrize("completed", [None, "", BASELINE, "task_e_other~assttrn_after", True, f"{TASK_ID}~"])
@@ -204,7 +204,7 @@ def test_provider_completion_identity_cannot_be_missing_or_baseline(evidence, mo
     client, _path, _record, _status, _history = evidence
     monkeypatch.setattr(client.wham_client, "resolve_completed_assistant_turn_after", lambda *_args: completed)
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is False
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is CodexReviewFeedbackReadiness.WAITING
 
 
 @pytest.mark.parametrize("change", ["owned-insert", "owned-edit", "owned-remove", "other-task"])
@@ -223,7 +223,7 @@ def test_rechecks_owning_receipts_after_provider_observations(evidence, change):
         return CloudTask(task_id=TASK_ID, state=CloudTaskState.COMPLETED)
 
     status.side_effect = observe
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is (change == "other-task")
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is (CodexReviewFeedbackReadiness.COMPLETED if change == "other-task" else CodexReviewFeedbackReadiness.WAITING)
 
 
 @pytest.mark.parametrize("boundary", ["status", "history"])
@@ -232,7 +232,7 @@ def test_provider_observation_failure_defers_without_receipt_changes(evidence, b
     before = path.read_bytes()
     (status if boundary == "status" else history).side_effect = RuntimeError("provider unavailable")
 
-    assert client.has_completed_review_feedback(TASK_ID, (IDENTITY,), TARGET) is False
+    assert client.observe_review_feedback_readiness(TASK_ID, (IDENTITY,), TARGET) is CodexReviewFeedbackReadiness.WAITING
     assert path.read_bytes() == before
 
 
@@ -240,6 +240,6 @@ def test_provider_observation_failure_defers_without_receipt_changes(evidence, b
 def test_empty_or_ambiguous_selection_never_reads_provider(evidence, identities):
     client, _path, _record, status, history = evidence
 
-    assert client.has_completed_review_feedback(TASK_ID, identities, TARGET) is False
+    assert client.observe_review_feedback_readiness(TASK_ID, identities, TARGET) is CodexReviewFeedbackReadiness.WAITING
     status.assert_not_called()
     history.assert_not_called()

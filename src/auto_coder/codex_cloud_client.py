@@ -7,6 +7,7 @@ Reference: https://github.com/openai/codex
 
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -46,6 +47,14 @@ class CodexSubmissionResult:
     task_id: str = ""
     task_url: str = ""
     diagnostic: str = ""
+
+
+class CodexReviewFeedbackReadiness(str, Enum):
+    """Read-only evidence for admitting the first review of the current PR head."""
+
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    CURRENT_TASK_SETTLED = "current_task_settled"
 
 
 @dataclass
@@ -772,13 +781,13 @@ class CodexCloudClient(CloudTaskClientBase):
         logger.info(f"Reconciled previously ambiguous Codex follow-up '{logical_identity}' as delivered")
         return FollowUpDeliveryOutcome.DELIVERED
 
-    def has_completed_review_feedback(self, task_id: str, logical_identities: tuple[str, ...], repair_target: ExistingPrRepairTarget) -> bool:
-        """Observe completed ordinary feedback without authorizing closure or rewriting receipts.
+    def observe_review_feedback_readiness(self, task_id: str, logical_identities: tuple[str, ...], repair_target: ExistingPrRepairTarget) -> CodexReviewFeedbackReadiness:
+        """Observe readiness without completing historical requests or changing receipts.
 
-        A task-level completed status can describe activity before an accepted
-        follow-up. Each selected native receipt must also have a completed
-        assistant turn after its recorded pre-send baseline. The caller retains
-        responsibility for current-head validation and every native review gate.
+        Retained baseline evidence can prove ordinary feedback completed. When
+        the provider has omitted a historical baseline, separately observe a
+        settled current task for first-current-head review admission only. The
+        caller owns current-head, review-count, closure and correction gates.
         """
         if (
             not is_valid_codex_cloud_task_id(task_id)
@@ -790,7 +799,7 @@ class CodexCloudClient(CloudTaskClientBase):
             or repair_target.pr_number <= 0
             or not all(isinstance(value, str) and value for value in (repair_target.repo_name, repair_target.head_branch, repair_target.base_branch, repair_target.head_sha))
         ):
-            return False
+            return CodexReviewFeedbackReadiness.WAITING
         state_path = _codex_followup_state_path(self.repo_name)
         selected_keys = {hashlib.sha256(f"{task_id}\0{identity}".encode("utf-8")).hexdigest(): identity for identity in logical_identities}
         turn_pattern = re.compile(rf"{re.escape(task_id)}~[A-Za-z0-9_-]+")
@@ -843,22 +852,52 @@ class CodexCloudClient(CloudTaskClientBase):
                     or not isinstance(record.repair_head_sha, str)
                     or not record.repair_head_sha
                 ):
-                    return False
+                    return CodexReviewFeedbackReadiness.WAITING
                 baselines.add(record.pre_send_turn_id)
             task = self.get_task(task_id)
             if not isinstance(task, CloudTask) or task.task_id != task_id or task.state is not CloudTaskState.COMPLETED:
-                return False
+                return CodexReviewFeedbackReadiness.WAITING
             wham = self.wham_client or CodexWhamClient()
+            unresolved_baselines = set()
             for baseline in sorted(baselines):
                 completed = wham.resolve_completed_assistant_turn_after(task_id, baseline)
                 if not isinstance(completed, str) or not turn_pattern.fullmatch(completed) or completed == baseline:
-                    return False
+                    unresolved_baselines.add(baseline)
+            readiness = CodexReviewFeedbackReadiness.COMPLETED
+            if unresolved_baselines:
+                from .codex_followup_causality import settled_current_task
+                from .codex_wham_client import _turn_created_at_key
+
+                current = wham.get_task(task_id)
+                if current is None:
+                    return CodexReviewFeedbackReadiness.WAITING
+                turns = wham.get_task_turns(task_id, require_complete=True)
+                # A present baseline whose work has not completed remains a
+                # wait. Recovery concerns omitted historical evidence only.
+                if unresolved_baselines.intersection(turn.id for turn in turns):
+                    return CodexReviewFeedbackReadiness.WAITING
+                assistant = settled_current_task(task_id, current, turns)
+                created_at = _turn_created_at_key(assistant) if assistant is not None else None
+                if created_at is None or not math.isfinite(created_at):
+                    return CodexReviewFeedbackReadiness.WAITING
+                for key in selected_keys:
+                    record = initial[key]
+                    if record.pre_send_turn_id not in unresolved_baselines:
+                        continue
+                    # This timestamp is an ordering guard, not proof that the
+                    # omitted request ran. A stale pre-send task cannot qualify.
+                    accepted_at = record.accepted_at
+                    if type(accepted_at) not in (int, float) or not math.isfinite(accepted_at) or accepted_at <= 0 or accepted_at >= created_at:
+                        return CodexReviewFeedbackReadiness.WAITING
+                if settled_current_task(task_id, wham.get_task(task_id), turns) != assistant:
+                    return CodexReviewFeedbackReadiness.WAITING
+                readiness = CodexReviewFeedbackReadiness.CURRENT_TASK_SETTLED
             # Another task may update this shared journal while provider reads
             # run. Only changes to this owning task invalidate its observation.
-            return read_owned_receipts() == initial
+            return readiness if read_owned_receipts() == initial else CodexReviewFeedbackReadiness.WAITING
         except Exception as exc:
             logger.warning("Completed review feedback could not be established for task {}: {}", task_id, type(exc).__name__)
-            return False
+            return CodexReviewFeedbackReadiness.WAITING
 
     def get_followup_remediation_baseline(self, task_id: str, logical_identities: tuple[str, ...]) -> str:
         """Return the pre-send assistant turn durably captured for a follow-up."""

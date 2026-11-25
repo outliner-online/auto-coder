@@ -138,6 +138,12 @@ preceding receipt-only repair event remains deferred, and the later validation,
 correction, closure and merge events keep their own meanings. See
 [Independent review-thread completion validation](independent-review-thread-completion-validation.md#first-current-head-review-after-completed-codex-feedback).
 
+When a selected historical pre-send turn is absent from complete native history,
+a separate [settled-current-task observation](settled-codex-task-review-reassessment.md)
+can admit the first independent current-head review. This does not claim that the
+missing historical request completed and does not change its consumed receipt.
+Its trace uses `effect=settled-cloud-task-reassessment`.
+
 ## Mixed native Codex delivery evidence
 
 Intake fences uncertain native journal identities as well as shared producer

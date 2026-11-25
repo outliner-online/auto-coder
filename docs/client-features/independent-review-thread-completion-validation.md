@@ -86,6 +86,17 @@ handoff, accepted closure or successful merge. Regression coverage is in
 `tests/test_completed_cloud_review_reassessment.py` and
 `tests/test_codex_completed_review_feedback.py`.
 
+## First current-head review with retained historical feedback
+
+A selected historical request can disappear from native task history even while
+its confirmed receipt remains. The separate
+[settled-current-task observation](settled-codex-task-review-reassessment.md)
+requires complete coherent current execution, stable ownership and receipts,
+and the existing first-review admission gates. It admits independent review
+without declaring the missing correction complete. Ordinary thread closure and
+merge restrictions remain unchanged. Its deferred trace uses
+`effect=settled-cloud-task-reassessment`.
+
 ## Reusable closure status reply
 
 Each independent `ADDRESSED` decision carries a deterministic binding to the
