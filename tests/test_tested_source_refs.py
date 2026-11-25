@@ -34,13 +34,13 @@ OTHER_SHA = "b" * 40
 TAG_OID = "c" * 40
 
 
-def test_pull_request_full_source_selection_checks_out_head_without_publishing() -> None:
+def test_pull_request_full_source_selection_checks_out_merge_without_publishing() -> None:
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / WORKFLOW_PATH).read_text())
     assert "pull_request" in workflow["on"]
     steps = workflow["jobs"]["complete-source-shard"]["steps"]
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
-    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
     command = next(step for step in steps if step.get("name") == "Run complete required source selection")["run"]
     assert command.startswith("uv run python -m pytest -p scripts.ci_shard_plugin -p scripts.source_ci_receipt_plugin")
     assert "-m 'not opencode_live'" in command
@@ -59,7 +59,7 @@ def test_unsuccessful_matrix_keeps_optional_diagnostic_prerequisites_available()
 
     for action in ("actions/checkout@", "astral-sh/setup-uv@", "actions/setup-python@"):
         assert any(str(step.get("uses", "")).startswith(action) for step in prerequisites), action
-    assert any(step.get("run") == "uv sync --locked" for step in prerequisites)
+    assert any(step.get("run") == "uv sync --locked --extra test" for step in prerequisites)
     assert any(step.get("name") == "Download current-attempt immutable source plan" for step in prerequisites)
     assert any(step.get("name") == "Download current-attempt native shard receipts and timing" for step in prerequisites)
     verification = next(i for i, step in enumerate(steps) if step.get("name") == "Verify exact current-attempt shard evidence")
@@ -75,18 +75,28 @@ def assert_required_workflow_profile(workflow: object) -> None:
     shard = jobs["complete-source-shard"]
     complete = jobs["complete-source-tests"]
     quality_runs = [step["run"] for step in quality["steps"] if isinstance(step, dict) and isinstance(step.get("run"), str)]
-    assert quality_runs == [
+    assert quality_runs[:7] == [
         "uv sync --locked --dev --extra test",
         'uv run python -c \'from auto_coder.build_identity import resolve_build_identity; r=resolve_build_identity("."); assert r.state == "clean" and r.source_revision == "${{ github.sha }}"\'\n',
-        "uv run black --check src/ tests/\nuv run isort --check-only src/ tests/\nuv run flake8 src/ tests/\nuv run mypy --config-file pyproject.toml -p auto_coder\n",
+        "scripts/check_repository_hygiene.py --source head --repo .",
+        "uv run black --check src/ tests/",
+        "uv run isort --check-only src/ tests/",
+        "uv run flake8 src/ tests/",
+        "uv run mypy --config-file pyproject.toml -p auto_coder",
     ]
+    assert len(quality_runs) == 8
+    assert "uv run auto-coder --help" in quality_runs[7]
+    assert "Usage:" in quality_runs[7] and "Auto-Coder" in quality_runs[7]
     plan = jobs["source-plan"]
     assert plan["name"] == PLAN_JOB_NAME
-    assert "scripts/plan_ci_shards.py" in next(step["run"] for step in plan["steps"] if step.get("name") == "Collect complete current source tests and immutable shard plan")
-    assert "-m 'not opencode_live'" in next(step["run"] for step in plan["steps"] if step.get("name") == "Collect complete current source tests and immutable shard plan")
+    collection = next(step for step in plan["steps"] if step.get("name") == "Collect complete current source tests and immutable shard plan")
+    assert "scripts/plan_ci_shards.py" in collection["run"]
+    assert "-m 'not opencode_live'" in collection["run"]
+    assert collection["env"]["COVERAGE_FILE"] == "${{ runner.temp }}/source-plan-coverage/coverage.db"
     assert shard["needs"] == ["source-plan"]
     assert shard["strategy"] == {"fail-fast": False, "matrix": "${{ fromJSON(needs.source-plan.outputs.matrix) }}"}
-    assert "runner.temp" not in str(shard.get("env", {}))
+    for job in jobs.values():
+        assert "runner.temp" not in str(job.get("env", {}))
     complete_steps = {step.get("name"): step for step in shard["steps"] if isinstance(step, dict) and step.get("name")}
     assert_conditional_chromium_install(complete_steps["Install Chromium"])
     assert complete_steps["Verify real headless Chromium"] == {"name": "Verify real headless Chromium", "run": "uv run python scripts/browser_preflight.py"}
@@ -94,6 +104,7 @@ def assert_required_workflow_profile(workflow: object) -> None:
     assert "--ci-plan=" in run and "--ci-shard=${{ matrix.shard }}" in run
     assert "--source-ci-receipt=" in run and "-m 'not opencode_live'" in run
     assert complete_steps["Run complete required source selection"]["env"]["AUTO_CODER_CI_TIMING_DIR"] == "${{ runner.temp }}/source-shard/timing"
+    assert complete_steps["Run complete required source selection"]["env"]["COVERAGE_FILE"] == "${{ runner.temp }}/source-shard/coverage/coverage.db"
     assert "--splitting-algorithm" not in run
     assert run.endswith('--junitxml "$RUNNER_TEMP/source-shard/results.xml"')
     assert "if" not in complete_steps["Run complete required source selection"]
@@ -104,11 +115,11 @@ def assert_required_workflow_profile(workflow: object) -> None:
     assert shard["env"]["AUTO_CODER_REQUIRE_BROWSER"] == "1"
     assert complete["name"] == "Complete source tests with Chromium"
     assert complete["if"] == "always()"
-    assert complete["needs"] == ["source-plan", "complete-source-shard"]
+    assert complete["needs"] == ["source-quality", "source-plan", "complete-source-shard"]
     dependency_rejection = next(step for step in complete["steps"] if step.get("name") == "Reject an unsuccessful matrix dependency")
     assert dependency_rejection == {
         "name": "Reject an unsuccessful matrix dependency",
-        "if": "needs.source-plan.result != 'success' || needs.complete-source-shard.result != 'success'",
+        "if": "needs.source-quality.result != 'success' || needs.source-plan.result != 'success' || needs.complete-source-shard.result != 'success'",
         "run": "exit 1",
     }
     aggregate = next(step for step in complete["steps"] if step.get("name") == "Verify exact current-attempt shard evidence")
@@ -255,7 +266,9 @@ def source_plan(path: Path) -> Path:
                 "run_id": "17",
                 "run_attempt": "2",
                 "planning_attempt": "source-plan-17-2",
-                "event_sha": OTHER_SHA,
+                "event_sha": SHA,
+                "event_name": "push",
+                "run_head_sha": SHA,
             },
         }
     )
@@ -284,8 +297,8 @@ class FakeShardEvidence:
         self.plan_path = source_plan(directory / "plan.json")
         self.artifacts_root = directory / "artifacts"
         self.run_attempt = 2
-        self.event_sha = OTHER_SHA
         self.source_sha = SHA
+        self.event_name = "push"
         self.jobs: list[dict[str, object]] = [
             {
                 "name": PLAN_JOB_NAME,
@@ -355,7 +368,7 @@ class FakeShardEvidence:
         assert method == "GET" and payload is None
         self.requests.append(path)
         if path == "actions/runs/17/attempts/2":
-            return GitDataResponse(200, {"id": 17, "run_attempt": self.run_attempt, "head_sha": self.source_sha, "path": WORKFLOW_PATH, "status": "in_progress", "run_started_at": _iso(0)})
+            return GitDataResponse(200, {"id": 17, "run_attempt": self.run_attempt, "head_sha": self.source_sha, "event": self.event_name, "path": WORKFLOW_PATH, "status": "in_progress", "run_started_at": _iso(0)})
         if path == "actions/runs/17/attempts/2/jobs?per_page=100":
             return GitDataResponse(self.jobs_status, {"total_count": self.total_count, "jobs": self.jobs})
         if path.startswith("actions/runs/17/attempts/2/jobs?per_page=100&page="):
@@ -436,6 +449,47 @@ def publish_from_actual_shard_gate(
 def test_source_shard_attempt_accepts_exact_complete_current_attempt(tmp_path: Path) -> None:
     remote = FakeShardEvidence(tmp_path)
     verify_source_shard_attempt(remote, 17, 2, SHA, plan_path=remote.plan_path, artifacts_root=remote.artifacts_root)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("event_name", ["pull_request", "workflow_dispatch"])
+def test_source_shard_attempt_binds_tested_event_commit_separately_from_pr_head(event_name: str, tmp_path: Path) -> None:
+    remote = FakeShardEvidence(tmp_path)
+    remote.event_name = event_name
+    remote.source_sha = OTHER_SHA if event_name == "pull_request" else SHA
+    payload = json.loads(remote.plan_path.read_text(encoding="utf-8"))
+    payload["origin"].update(event_name=event_name, run_head_sha=remote.source_sha)
+    remote.plan_path.write_bytes(_canonical(payload))
+
+    verify_source_shard_attempt(remote, 17, 2, SHA, plan_path=remote.plan_path, artifacts_root=remote.artifacts_root)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("defect", ["missing_head", "missing_event", "wrong_event_sha", "wrong_native_head", "wrong_native_event", "push_foreign_head", "dispatch_foreign_head", "pr_head_checkout"])
+def test_source_shard_attempt_rejects_wrong_event_or_head_binding(defect: str, tmp_path: Path) -> None:
+    remote = FakeShardEvidence(tmp_path)
+    payload = json.loads(remote.plan_path.read_text(encoding="utf-8"))
+    origin = payload["origin"]
+    if defect == "missing_head":
+        origin.pop("run_head_sha")
+    elif defect == "missing_event":
+        origin.pop("event_name")
+    elif defect == "wrong_event_sha":
+        origin["event_sha"] = OTHER_SHA
+    elif defect == "wrong_native_head":
+        origin["event_name"] = remote.event_name = "pull_request"
+        origin["run_head_sha"] = OTHER_SHA
+    elif defect == "wrong_native_event":
+        remote.event_name = "pull_request"
+    elif defect in {"push_foreign_head", "dispatch_foreign_head"}:
+        origin["event_name"] = remote.event_name = "push" if defect == "push_foreign_head" else "workflow_dispatch"
+        origin["run_head_sha"] = remote.source_sha = OTHER_SHA
+    else:
+        # Reusing the old PR-head checkout must not satisfy a merge-event plan.
+        origin.update(event_name="pull_request", event_sha=OTHER_SHA)
+        remote.event_name = "pull_request"
+    remote.plan_path.write_bytes(_canonical(payload))
+
+    with pytest.raises(SourceEvidenceError):
+        verify_source_shard_attempt(remote, 17, 2, SHA, plan_path=remote.plan_path, artifacts_root=remote.artifacts_root)  # type: ignore[arg-type]
 
 
 def test_actions_artifact_pagination_uses_all_pages(tmp_path: Path) -> None:
@@ -719,7 +773,7 @@ def test_workflows_keep_source_authority_independent_from_legacy_image_publish()
     assert "docker push" in legacy
     assert "uv run black --check src/ tests/" in source
     assert "uv run mypy --config-file pyproject.toml -p auto_coder" in source
-    assert "-m 'not opencode_live' -vv" in source
+    assert "-m 'not opencode_live' --cov=src/auto_coder --cov-report= -vv" in source
     assert 'AUTO_CODER_REQUIRE_BROWSER: "1"' in source
 
     narrowed = deepcopy(workflow)

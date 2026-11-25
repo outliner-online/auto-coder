@@ -4,6 +4,7 @@ name: Test Source for Runtime
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,22 +22,33 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
       - uses: astral-sh/setup-uv@v7
         with:
           version: "0.7.22"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: uv sync --locked --dev --extra test
+      - name: Install dependencies
+        run: uv sync --locked --dev --extra test
       - name: Establish exact clean source identity
         run: |
           uv run python -c 'from auto_coder.build_identity import resolve_build_identity; r=resolve_build_identity("."); assert r.state == "clean" and r.source_revision == "${{ github.sha }}"'
-      - name: Check source quality
+      - name: Check repository hygiene
+        run: scripts/check_repository_hygiene.py --source head --repo .
+      - name: Black (check)
+        run: uv run black --check src/ tests/
+      - name: isort (check)
+        run: uv run isort --check-only src/ tests/
+      - name: Flake8
+        run: uv run flake8 src/ tests/
+      - name: Mypy
+        run: uv run mypy --config-file pyproject.toml -p auto_coder
+      - name: Test CLI entry point
         run: |
-          uv run black --check src/ tests/
-          uv run isort --check-only src/ tests/
-          uv run flake8 src/ tests/
-          uv run mypy --config-file pyproject.toml -p auto_coder
+          output="$(uv run auto-coder --help 2>&1)"
+          printf '%s\n' "$output"
+          [[ "$output" == *"Usage:"* && "$output" == *"Auto-Coder"* ]]
 
   source-plan:
     name: Plan complete source tests
@@ -52,7 +64,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: astral-sh/setup-uv@v7
         with:
           version: "0.7.22"
@@ -72,12 +84,16 @@ jobs:
         run: >-
           uv run python scripts/source_ci_runtime.py --log-dir "$RUNNER_TEMP/source-plan/logs" context
           --repository '${{ github.repository }}'
-          --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+          --source-sha '${{ github.sha }}'
           --event-sha '${{ github.sha }}'
+          --run-head-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+          --event-name '${{ github.event_name }}'
           --run-id '${{ github.run_id }}'
           --run-attempt '${{ github.run_attempt }}'
           --output "$RUNNER_TEMP/source-plan/context.json"
       - name: Collect complete current source tests and immutable shard plan
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/source-plan-coverage/coverage.db
         run: >-
           uv run python scripts/plan_ci_shards.py
           --context "$RUNNER_TEMP/source-plan/context.json"
@@ -87,6 +103,7 @@ jobs:
           --bootstrap-duration-provenance tests/data/pr-test-durations.provenance.json
           --output "$RUNNER_TEMP/source-plan/plan.json"
           --log-dir "$RUNNER_TEMP/source-plan/logs" -- -m 'not opencode_live'
+          --cov=src/auto_coder --cov-report=
       - name: Export exact dynamic matrix
         id: matrix
         run: >-
@@ -118,7 +135,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: astral-sh/setup-uv@v7
         with:
           version: "0.7.22"
@@ -145,13 +162,14 @@ jobs:
         run: uv run python scripts/browser_preflight.py
       - name: Run complete required source selection
         env:
+          COVERAGE_FILE: ${{ runner.temp }}/source-shard/coverage/coverage.db
           AUTO_CODER_CI_TIMING_DIR: ${{ runner.temp }}/source-shard/timing
         run: >-
           uv run python -m pytest -p scripts.ci_shard_plugin -p scripts.source_ci_receipt_plugin
           --ci-plan="$RUNNER_TEMP/source-plan/plan.json"
           --ci-shard=${{ matrix.shard }}
           --source-ci-receipt="$RUNNER_TEMP/source-shard/receipt.json"
-          -m 'not opencode_live' -vv
+          -m 'not opencode_live' --cov=src/auto_coder --cov-report= -vv
           --junitxml "$RUNNER_TEMP/source-shard/results.xml"
       - name: Summarize shard timing
         if: always()
@@ -168,20 +186,20 @@ jobs:
   complete-source-tests:
     name: Complete source tests with Chromium
     if: always()
-    needs: [source-plan, complete-source-shard]
+    needs: [source-quality, source-plan, complete-source-shard]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: astral-sh/setup-uv@v7
         with:
           version: "0.7.22"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: uv sync --locked
+      - run: uv sync --locked --extra test
       - name: Download current-attempt immutable source plan
         uses: actions/download-artifact@v8
         with:
@@ -193,7 +211,7 @@ jobs:
           pattern: source-test-shard-${{ github.run_id }}-${{ github.run_attempt }}-*
           path: ${{ runner.temp }}/source-artifacts
       - name: Reject an unsuccessful matrix dependency
-        if: needs.source-plan.result != 'success' || needs.complete-source-shard.result != 'success'
+        if: needs.source-quality.result != 'success' || needs.source-plan.result != 'success' || needs.complete-source-shard.result != 'success'
         run: exit 1
       - name: Verify exact current-attempt shard evidence
         env:
@@ -203,9 +221,21 @@ jobs:
           --repository '${{ github.repository }}'
           --run-id '${{ github.run_id }}'
           --run-attempt '${{ github.run_attempt }}'
-          --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+          --source-sha '${{ github.sha }}'
           --plan "$RUNNER_TEMP/source-plan/plan.json"
           --artifacts "$RUNNER_TEMP/source-artifacts"
+      - name: Combine complete-source coverage
+        run: >-
+          uv run python scripts/combine_source_coverage.py
+          --plan "$RUNNER_TEMP/source-plan/plan.json"
+          --artifacts "$RUNNER_TEMP/source-artifacts"
+          --output "$RUNNER_TEMP/source-coverage"
+      - name: Upload combined source coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source-coverage/
+          if-no-files-found: error
       - name: Restore optional source duration history
         if: always()
         continue-on-error: true
@@ -241,7 +271,7 @@ jobs:
         run: >-
           uv run python scripts/source_ci_runtime.py --log-dir "$RUNNER_TEMP/source-duration-logs" report
           --repository '${{ github.repository }}'
-          --source-sha '${{ github.event.pull_request.head.sha || github.sha }}'
+          --source-sha '${{ github.sha }}'
           --run-id '${{ github.run_id }}'
           --run-attempt '${{ github.run_attempt }}'
           --plan "$RUNNER_TEMP/source-plan/plan.json"

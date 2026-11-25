@@ -512,7 +512,7 @@ def test_workflow_shadow_dispatch_preserves_full_native_and_ci_authority() -> No
     assert "${{ inputs.baseline_run_attempt }}" in download["with"]["pattern"]
     assert download["continue-on-error"] is True
     assert steps[-1]["uses"].startswith("actions/upload-artifact@")
-    for path in ("pr-tests.yml", "browser-tests.yml", "opencode-live-tests.yml"):
+    for path in ("test-source-for-runtime.yml", "browser-tests.yml", "opencode-live-tests.yml"):
         assert "report_test_impact" not in (ROOT / ".github/workflows" / path).read_text(encoding="utf-8")
     script = (ROOT / "scripts/report_test_impact.py").read_text(encoding="utf-8")
     assert 'subprocess.run(["gh"' not in script

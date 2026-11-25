@@ -19,7 +19,6 @@ def test_retired_native_management_workflows_are_not_scheduled() -> None:
 
 def test_development_and_mixed_supervisor_gates_remain() -> None:
     for filename in (
-        "pr-tests.yml",
         "browser-tests.yml",
         "opencode-live-tests.yml",
         "muse-live-tests.yml",

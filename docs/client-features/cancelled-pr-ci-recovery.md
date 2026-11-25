@@ -9,21 +9,29 @@ eligibility. A failed or timed-out job does not become a cancellation candidate.
 
 Recovery is disabled unless normal PR test workflows and their exact, unique
 native job names are configured. Use the existing repository-scoped `config.toml`
-overrides. For this repository's normal test workflow, an example is:
+overrides only for a compatible workflow with stable roots and pure aggregate
+reducers. The following is an illustrative configuration for such a workflow;
+its repository, path and job names are placeholders:
 
 ```toml
-[[repository."outliner-online/auto-coder".ci_cancellation_recovery.workflows]]
-workflow_path = ".github/workflows/pr-tests.yml"
-root_job_names = [
-  "Lint & Type Check",
-  "Tests with Coverage (1/4)",
-  "Tests with Coverage (2/4)",
-  "Tests with Coverage (3/4)",
-  "Tests with Coverage (4/4)",
-]
-aggregate_job_names = ["Tests with Coverage"]
-multi_root_verified = true
+[[repository."owner/example".ci_cancellation_recovery.workflows]]
+workflow_path = ".github/workflows/example-pr-tests.yml"
+root_job_names = ["Quality", "Tests (1/2)", "Tests (2/2)"]
+aggregate_job_names = ["Required tests"]
+multi_root_verified = false
 ```
+
+The canonical source workflow,
+`.github/workflows/test-source-for-runtime.yml`, has no supported selective
+recovery configuration. Its shard count is dynamic, its immutable plan and all
+receipts must belong to the same attempt, and its aggregate independently
+verifies source evidence and combines coverage. A selective rerun that retains
+successful shards from an earlier attempt cannot satisfy that contract. Keep
+selective recovery disabled for this workflow; retry it by rerunning the whole
+workflow. The former `pr-tests.yml` configuration must not be copied to the
+unified workflow by changing only the path or job names. This documentation does
+not modify runtime configuration or add a whole-workflow fallback to the
+recovery controller.
 
 A root entry declares a normal test or quality job eligible for selective
 recovery. Aggregate entries declare pure required-status reducers of those roots;

@@ -145,7 +145,7 @@ def test_runtime_target_correction_reuses_refreshed_canonical_ci(mock_check, moc
     manager = MagicMock()
     manager._last_session_id = "session"
     manager.continue_session.return_value = '{"result":"PASS","summary":"retry","dynamic_check_requested":"all"}'
-    facts = (_workflow("10", CIConclusion.SUCCESS, ".github/workflows/pr-tests.yml"),)
+    facts = (_workflow("10", CIConclusion.SUCCESS, ".github/workflows/test-source-for-runtime.yml"),)
     green = _ci_status("green", *facts)
     refreshed = iter((_ci_status("read-1", *facts), _ci_status("read-2", *facts), _ci_status("read-3", *facts)))
 
@@ -171,10 +171,10 @@ def test_corrected_pass_fails_closed_when_known_ci_observation_is_replaced(mock_
     manager = MagicMock()
     manager._last_session_id = "session"
     manager.continue_session.return_value = '{"result":"PASS","summary":"green CI proves execution","findings":[]}'
-    green = _ci_status("green", _workflow("10", CIConclusion.SUCCESS, ".github/workflows/pr-tests.yml"))
+    green = _ci_status("green", _workflow("10", CIConclusion.SUCCESS, ".github/workflows/test-source-for-runtime.yml"))
     replaced = _ci_status(
         "replacement",
-        _workflow("10", CIConclusion.SUCCESS, ".github/workflows/pr-tests.yml"),
+        _workflow("10", CIConclusion.SUCCESS, ".github/workflows/test-source-for-runtime.yml"),
         _workflow("11", CIConclusion.PENDING, ".github/workflows/other.yml"),
     )
     refreshes = iter((green, replaced))
@@ -209,8 +209,8 @@ def test_corrected_complete_pass_accepts_fresh_observer_identity_with_identical_
                         "head_sha": "b" * 40,
                         "status": "completed",
                         "conclusion": "success",
-                        "name": "PR Tests",
-                        "path": ".github/workflows/pr-tests.yml",
+                        "name": "Test Source for Runtime",
+                        "path": ".github/workflows/test-source-for-runtime.yml",
                     }
                 ]
             }

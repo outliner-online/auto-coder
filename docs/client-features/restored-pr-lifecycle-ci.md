@@ -1,9 +1,11 @@
 # Restored PR lifecycle CI
 
-The issue-2500 maintenance window is retired. Every pull request now enters the
-ordinary lint/type job and all four coverage shards, with the aggregate job
-failing when any shard does not succeed. There is no issue allowlist,
-retained-only route, skip/xfail, relaxed threshold, or maintenance selector.
+The issue-2500 maintenance window is retired. Every pull request now enters
+`Test Source for Runtime`, with source quality checks and an immutable dynamic
+shard plan for the complete source selection. Its required aggregate fails when
+quality, planning, any required shard, or combined coverage does not succeed.
+There is no issue allowlist, retained-only route, skip/xfail, relaxed threshold,
+or maintenance selector.
 The browser, OpenCode-live, Muse-live, and version workflows remain independent
 and retain their existing selections.
 
@@ -58,9 +60,10 @@ authority remain part of the test oracle after the lifecycle extraction.
 
 The bounded local verification commands and observed results are recorded in
 the implementing pull request. The pull request's GitHub check suite is the
-authority for current-head NORMAL CI run identifiers and the complete four-shard
-result. A post-merge Publish Beta run cannot exist during pre-merge verification;
-its eventual result is a separate main-push publication observation and is not
+authority for current-head NORMAL CI run identifiers and the complete planned
+source-shard result. A post-merge Publish Beta run cannot exist during pre-merge
+verification; its eventual result is a separate main-push publication observation
+and is not
 claimed here as a published artifact.
 
 This restoration changes workflow admission but not Auto-Coder runtime origins,

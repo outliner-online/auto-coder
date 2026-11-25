@@ -16,11 +16,11 @@ from loguru import logger
 from auto_coder.ci_duration_profile import BATCH_SCHEMA
 from auto_coder.ci_duration_profile import CONTEXT_SCHEMA as DURATION_CONTEXT_SCHEMA
 from auto_coder.ci_shard_plan import CONTEXT_SCHEMA, ShardContext, _canonical, read_plan
-from auto_coder.source_ci_evidence import SOURCE_JOB, WORKFLOW_NAME, SourceEvidenceError, _artifact_name, verify_current_source_attempt
+from auto_coder.source_ci_evidence import SOURCE_EVENTS, SOURCE_JOB, WORKFLOW_NAME, SourceEvidenceError, _artifact_name, verify_current_source_attempt
 from auto_coder.source_ci_metrics import build_report
 from auto_coder.util.gh_cache import GitHubGitDataClient
 
-SELECTORS = ("-m", "not opencode_live")
+SELECTORS = ("-m", "not opencode_live", "--cov=src/auto_coder", "--cov-report=")
 HARNESS = (
     "tests/conftest.py",
     "tests/ci_timing_plugin.py",
@@ -60,8 +60,10 @@ def _write_new(path: Path, data: dict[str, object]) -> None:
 
 def _context(args: argparse.Namespace) -> None:
     sha = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
-    if sha != args.source_sha:
-        raise ValueError("actual tested checkout is not the requested head/main SHA")
+    if sha != args.source_sha or sha != args.event_sha:
+        raise ValueError("actual tested checkout is not the requested event SHA")
+    if args.event_name != "pull_request" and sha != args.run_head_sha:
+        raise ValueError("non-PR source checkout must match the Actions run head SHA")
     origin: dict[str, object] = {
         "repository": args.repository,
         "workflow": WORKFLOW_NAME,
@@ -69,6 +71,8 @@ def _context(args: argparse.Namespace) -> None:
         "run_attempt": str(args.run_attempt),
         "planning_attempt": f"source-plan-{args.run_id}-{args.run_attempt}",
         "event_sha": args.event_sha,
+        "event_name": args.event_name,
+        "run_head_sha": args.run_head_sha,
     }
     value = {
         "schema_version": CONTEXT_SCHEMA,
@@ -170,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     context.add_argument("--repository", required=True)
     context.add_argument("--source-sha", required=True)
     context.add_argument("--event-sha", required=True)
+    context.add_argument("--event-name", required=True, choices=sorted(SOURCE_EVENTS))
+    context.add_argument("--run-head-sha", required=True)
     context.add_argument("--run-id", type=int, required=True)
     context.add_argument("--run-attempt", type=int, required=True)
     context.add_argument("--output", type=Path, required=True)

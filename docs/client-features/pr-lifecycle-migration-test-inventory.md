@@ -96,4 +96,6 @@ stale-head and newer-attempt barriers before the controlled merge effect.
 The completed integration and restoration inventory is maintained in
 `docs/client-features/restored-pr-lifecycle-ci.md`. The contract group remains
 permanent regression protection, but it no longer substitutes for ordinary CI:
-every pull request runs the normal four coverage shards and aggregate gate.
+every pull request runs `Test Source for Runtime`, including source quality,
+the complete selection assigned by its dynamic shard plan, and the required
+aggregate and combined coverage gate.

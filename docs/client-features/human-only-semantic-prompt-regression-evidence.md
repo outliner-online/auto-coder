@@ -8,4 +8,4 @@ reports are non-actionable only when an exact versioned identity from
 copied markers, unresolved provenance, ordinary CI, and human instructions keep
 their normal authority. The active selective evaluator publishes immutable,
 per-attempt human reports through trusted default-branch reporting code, while
-deterministic prompt tests continue to run and fail normally in PR Tests.
+deterministic prompt tests continue to run and fail normally in Test Source for Runtime.

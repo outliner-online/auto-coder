@@ -1,16 +1,20 @@
 # Tested source references
 
-Every successful `Test Source for Runtime` run on `main` can publish one immutable
-annotated tag named `auto-coder-tested-<full-source-SHA>`. This workflow is
-independent of Docker image publication. It uses Python 3.12 and the locked
-`uv.lock` input, checks Black and isort without rewriting, runs Flake8 and
-package-wide mypy, launches a real headless Chromium, and executes the complete
-pytest selection excluding only `opencode_live`.
+Every successful push-triggered `Test Source for Runtime` run on `main` can
+publish one immutable annotated tag named `auto-coder-tested-<full-source-SHA>`.
+This workflow is independent of Docker image publication and incorporates the
+quality, CLI smoke and coverage responsibilities of the retired `PR Tests`
+workflow. It uses Python 3.12 and the locked `uv.lock` input, checks repository
+hygiene, Black and isort without rewriting, runs Flake8 and package-wide mypy,
+checks `auto-coder --help`, launches real headless Chromium, and executes the
+complete pytest selection excluding only `opencode_live`.
 
-Pull requests also run that same complete selection against the exact PR head;
-the source-quality job checks GitHub's merge commit. PR runs provide validation
-evidence only and cannot publish a tested-source reference. Publication remains
-restricted to successful push runs on `main`.
+All jobs in a pull-request run check out and validate GitHub's simulated merge
+commit, `github.sha`. There is no separate PR-head test execution. Main pushes
+validate the pushed commit; manual runs validate the selected event revision.
+PR and manual runs provide validation evidence only and cannot publish a
+tested-source reference. Publication remains restricted to successful push
+runs on `main`.
 
 The tag annotation is bounded canonical JSON with schema version, repository,
 full source SHA, distribution version, lock hash, Python version, originating
@@ -44,9 +48,9 @@ run and attempt, both required job conclusions, `git/ref/tags/<name>`, and its
 `git/tags/<object-id>` object through the GitHub API. Do not delete or force-move
 the ref. Credentials and API response bodies are not placed in annotations or
 logs. The legacy `Publish Beta` image publication path and historical registry tags
-remain available for bootstrap and operator use. Both complete source-test paths
-prepare the locked Python-only management fixture before their unchanged test
-selection; this is not an OpenCode live-runtime preparation or image publication.
+remain available for bootstrap and operator use. Each complete source shard
+prepares the locked Python-only management fixture before its assigned tests;
+this is not an OpenCode live-runtime preparation or image publication.
 The fixture is exported only after immutable Docker ID and installed source/version
 readback match the clean checkout. Missing Docker, failed build or mismatched
 provenance blocks the gate rather than skipping its readonly-bind test.
@@ -80,10 +84,10 @@ worktree, so their generated files cannot falsely dirty the checkout.
 Nonfatal scheduled pytest diagnostics use an owned Python thread and the synchronous
 all-thread faulthandler API while holding the GIL. This avoids the demonstrated
 native watchdog race with freed code metadata on the supported Python runtime.
-The configured Source 60-second and ordinary-shard 30-second intervals, exit
-behavior, complete selections, assertions, retries and hard deadlines stay intact;
-workflow files and production code do not change. Native fatal-signal handling
-and the original pytest descriptor/handler restoration remain enabled.
+The unified Source workflow retains its 60-second interval, nonfatal dump
+behavior, complete selection, assertions, retries and hard deadlines. Native
+fatal-signal handling and the original pytest descriptor/handler restoration
+remain enabled.
 
 Each timer owns a duplicate output descriptor and is cancelled and joined before
 completion, interactive exceptions or debugger entry can release it. Diagnostic
@@ -117,8 +121,29 @@ indivisible 820-second case is not killed or skipped. Planning and execution
 retain Python 3.12, locked test dependencies and required browser/fixture
 inputs. Every shard prepares the verified Python-only management fixture,
 installs and launches real headless Chromium, and retains native diagnostics.
-The separate source-quality job retains all four Black/isort/Flake8/mypy
-commands on the PR merge checkout; source tests use the exact PR head/main SHA.
+The separate source-quality job runs repository hygiene, all four
+Black/isort/Flake8/mypy commands and the CLI smoke check on the same event
+checkout as planning, shards and aggregation.
+
+The source context binds the actual checkout SHA to `origin.event_sha` and
+records `origin.event_name` and `origin.run_head_sha`. On PR events,
+`event_sha` is the tested simulated merge commit, while `run_head_sha` is the
+PR branch head reported by the native Actions run. The current-attempt verifier
+checks the native run's event and head against those separate origin fields;
+it never treats the branch head as the tested merge commit. Push and manual
+runs require checkout, event and run-head SHA to match. Native receipt creation
+also checks the producing job's `GITHUB_SHA` and `GITHUB_EVENT_NAME`. Current
+source qualification requires all these bindings; historical publication
+readback retains its original recorded proof rules.
+
+Collection and execution both use the explicit arguments
+`-m 'not opencode_live' --cov=src/auto_coder --cov-report=`, and the context
+records the same exact arguments. Coverage instrumentation therefore belongs
+to the validated configuration fingerprint. It is not injected through
+`PYTEST_ADDOPTS` into nested pytest invocations. Coverage databases are written
+outside the worktree under each job's temporary directory, alongside the
+shard's receipt and diagnostics; the collection-only database is not a test
+coverage result.
 
 The plan artifact is immutable and unique to workflow run and planning attempt.
 Each shard downloads that exact plan, validates the full current post-selector
@@ -131,9 +156,11 @@ Native failure or teardown error cannot become success; legitimate prerequisite
 skips and xfails retain their native outcomes instead of being relabeled PASS.
 
 `Complete source tests with Chromium` remains the publication-facing aggregate.
-It fails unless complete paginated Actions jobs/artifacts contain the exact
-planning job, one native completed-success job with all mandatory steps per
-planned shard, and one matching immutable native receipt per shard. The gate
+It requires successful `source-quality`, `source-plan` and
+`complete-source-shard` dependencies. It fails unless complete paginated
+Actions jobs/artifacts contain the exact planning job, one native
+completed-success job with all mandatory steps per planned shard, and one
+matching immutable native receipt per shard. The gate
 compares actual source checkout, ordered inventory and digest, profile, plan
 digest, run, planning attempt, producing invocation and job timestamps. It
 rejects stale or foreign plans, missing/duplicated/failed/mixed-plan results,
@@ -141,6 +168,15 @@ and a latest API alias representing a previously produced successful job under
 a new attempt ID. Failed-only reruns cannot qualify if their plan or retained
 shards were produced in an earlier attempt: rerun the complete source workflow
 on one attempt. A failed current execution never borrows historical success.
+
+After native receipt verification, the aggregate requires readable, nonempty
+coverage data from every shard in that same plan and attempt. Missing, empty
+or invalid shard coverage fails the aggregate. It combines the data into a
+coverage database, HTML report, XML report and text summary, and uploads the
+required `source-coverage-<run>-<attempt>` artifact. Complete shard coverage
+means every planned shard contributes data; it does not assert 100% code
+coverage or introduce a percentage threshold. Coverage reports cannot replace
+successful native test receipts or quality checks.
 
 Historical eligible unsharded and fixed-four-shard annotations still require
 their originally recorded quality/aggregate Jobs and unchanged annotation
@@ -203,9 +239,10 @@ The source aggregate prepares its exact checkout, Python/uv environment and
 current-attempt plan/shard downloads before rejecting unsuccessful dependencies.
 This keeps the existing always-run optional timing diagnostics supplied with
 their required tools and inputs when a shard fails or is cancelled. The same
-dependency rejection remains before qualification; no failed, cancelled, skipped
-or missing shard can become a successful source check. Preparation failures also
-remain failures, and optional timing results never replace the source outcome.
+dependency rejection remains before qualification; failed, cancelled, skipped
+or missing quality, plan or shard results cannot become a successful source
+check. Preparation and required coverage failures also remain failures, and
+optional timing results never replace the source outcome.
 
 
 The urgent-label capacity-deferral regression waits for its synthetic worker's

@@ -1,7 +1,6 @@
 """Regression coverage for scripts/test.sh's package-wide mypy gate (issue #2015).
 
-These tests execute the *actual*, unmodified ``scripts/test.sh`` (and, for the
-supervisor scenario, the real ``scripts/run_pr_test_shard.py``) against
+These tests execute the *actual*, unmodified ``scripts/test.sh`` against
 disposable checkouts built from this repository's own production
 ``src/auto_coder`` tree, ``pyproject.toml`` and ``uv.lock``. They intentionally
 avoid mocking the check itself: a fake mypy process that returns a chosen
@@ -23,8 +22,7 @@ imports outside that slice) rather than the whole ~140-file package: `mypy
 seeded nested/otherwise-unimported submodule proves the same "package-wide,
 not import-driven" contract either way, while Black/Flake8 -- which have no
 cross-run cache -- scan an order of magnitude fewer real files per one of
-this suite's dozen full script invocations. This keeps the whole file's
-runtime well inside a single PR-Tests shard's attempt budget.
+this suite's full script invocations.
 """
 
 from __future__ import annotations
@@ -37,13 +35,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
 
 pytestmark = pytest.mark.usefixtures("_use_real_commands")
 
 ROOT = Path(__file__).parents[1]
 TEST_SH = ROOT / "scripts" / "test.sh"
-RUN_PR_TEST_SHARD = ROOT / "scripts" / "run_pr_test_shard.py"
 PYPROJECT = ROOT / "pyproject.toml"
 FLAKE8_CONFIG = ROOT / ".flake8"
 VENV_BIN = ROOT / ".venv" / "bin"
@@ -177,7 +173,7 @@ def _seed_fixture_repo(repo: Path, cache_dir: Path) -> None:
 
 
 def _provision_uv_venv(repo: Path) -> None:
-    """Mirror the real PR Tests workflow's own pre-sync ("uv sync --locked --dev --extra test")
+    """Mirror the source workflow's own pre-sync ("uv sync --locked --dev --extra test")
 
     that runs as a separate step before scripts/test.sh is ever invoked.
     """
@@ -511,53 +507,6 @@ def test_explicit_ci_tests_only_skips_quality_and_preserves_argv_and_status(fixt
     assert json.loads((fixture_repo / "collector-invocations.json").read_text()) == [argv]
 
 
-def test_workflow_shard_reaches_real_test_script_without_weakening_default(fixture_repo: Path) -> None:
-    """Exercise workflow -> bounded runner -> real test.sh -> collector."""
-    _provision_uv_venv(fixture_repo)
-    shutil.copy2(RUN_PR_TEST_SHARD, fixture_repo / "scripts/run_pr_test_shard.py")
-    _write(fixture_repo, "tests/data/pr-test-durations.json", '{"fixture": 1.0}\n')
-    _write(fixture_repo, "src/auto_coder/_workflow_leaf.py", 'value: int = "wrong"\n')
-    workflow = yaml.safe_load((ROOT / ".github/workflows/pr-tests.yml").read_text(encoding="utf-8"))
-    command = next(step["run"] for step in workflow["jobs"]["tests-shard"]["steps"] if step["name"].startswith("Run tests with coverage"))
-    command = command.replace("${{ matrix.group }}", "2")
-    command = command.replace("uv run python", str(fixture_repo / ".venv/bin/python"))
-    env = _uv_env(GITHUB_ACTIONS="true", STUB_COLLECTOR_EXIT_CODE="7")
-
-    shard = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", command],
-        cwd=fixture_repo,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-
-    expected = [
-        "--splits",
-        "4",
-        "--group",
-        "2",
-        "--splitting-algorithm",
-        "duration_based_chunks",
-        "--durations-path",
-        "pr-test-logs/shard-2/normalized-durations.json",
-        "-m",
-        "not browser and not opencode_live and not muse_live and not supervisor_integration",
-        "-vv",
-        "-o",
-        "faulthandler_timeout=30",
-    ]
-    assert shard.returncode != 0
-    assert "ordinary failure with status 7" in shard.stderr
-    assert "Running code quality checks" not in shard.stdout
-    assert json.loads((fixture_repo / "collector-invocations.json").read_text()) == [expected]
-
-    default = _run_test_script(fixture_repo, expected, ci=True, extra_env={"STUB_COLLECTOR_EXIT_CODE": "0"})
-    assert default.returncode != 0
-    assert "_workflow_leaf.py" in default.stdout + default.stderr
-    assert json.loads((fixture_repo / "collector-invocations.json").read_text()) == [expected]
-
-
 # ---------------------------------------------------------------------------
 # AS-005: the target-container failure reaches the caller
 # ---------------------------------------------------------------------------
@@ -566,9 +515,8 @@ def test_workflow_shard_reaches_real_test_script_without_weakening_default(fixtu
 def test_target_container_mypy_failure_reaches_outer_caller(tmp_path: Path, fixture_repo: Path, fake_docker: Path) -> None:
     _provision_uv_venv(fixture_repo)
     _write(fixture_repo, "src/auto_coder/_as005_leaf.py", 'value: int = "wrong"\n')
-    # The documented shard argument vector (scripts/run_pr_test_shard.py's own
-    # `command`), so a regression that drops the forwarded "$@" is caught
-    # here rather than only by tests that never pass arguments at all.
+    # Include both plain options and a marker expression with spaces, so a
+    # regression that drops or splits the forwarded "$@" is caught here.
     argv = ["--splits", "4", "--group", "3", "-m", "not browser and not opencode_live", "-vv", "-o", "faulthandler_timeout=30"]
 
     result = _run_outer_forwarding_script(tmp_path / "outer", fixture_repo, fake_docker, args=argv)
@@ -599,43 +547,3 @@ def test_docker_launch_failure_propagates_as_outer_nonzero(tmp_path: Path) -> No
     result = _run_outer_forwarding_script(tmp_path / "outer", tmp_path / "unused-target", bin_dir)
 
     assert result.returncode != 0
-
-
-# ---------------------------------------------------------------------------
-# AS-006: the production PR supervisor does not hide or retry a type failure
-# ---------------------------------------------------------------------------
-
-
-def test_shard_supervisor_does_not_retry_a_real_mypy_failure(fixture_repo: Path) -> None:
-    _provision_uv_venv(fixture_repo)
-    shutil.copy2(RUN_PR_TEST_SHARD, fixture_repo / "scripts/run_pr_test_shard.py")
-    _write(fixture_repo, "tests/data/pr-test-durations.json", '{"fixture": 1.0}')
-    _write(fixture_repo, "src/auto_coder/_as006_leaf.py", 'value: int = "wrong"\n')
-    log_dir = fixture_repo / "pr-test-logs/shard-2"
-
-    result = subprocess.run(
-        [
-            str(fixture_repo / ".venv/bin/python"),
-            "scripts/run_pr_test_shard.py",
-            "--group",
-            "2",
-            "--attempt-timeout",
-            "60",
-            "--termination-grace",
-            "5",
-            "--log-dir",
-            str(log_dir),
-        ],
-        cwd=fixture_repo,
-        env=_uv_env(GITHUB_ACTIONS="true"),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-
-    assert result.returncode != 0
-    assert "ordinary failure" in result.stderr
-    assert "starting retry" not in result.stderr
-    assert "_as006_leaf.py" in (log_dir / "attempt-1.stdout.log").read_text()
-    assert not (log_dir / "attempt-2.stdout.log").exists()
-    assert not (fixture_repo / "collector-invocations.json").exists()

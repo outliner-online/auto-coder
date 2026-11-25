@@ -238,7 +238,7 @@ $RUN flake8 src/ tests/
 
 # Run mypy
 echo "[CHECK] Running mypy..."
-# Canonical package-wide check: matches the PR Tests "Lint & Type Check" job
+# Canonical package-wide check: matches the "Source identity and quality" job
 # and the mypy pre-commit hook exactly. This recursively analyzes the
 # checked-out src/auto_coder package (including new/otherwise-unimported
 # submodules) under root pyproject.toml's [tool.mypy] configuration. Do not
@@ -249,7 +249,7 @@ $RUN mypy --config-file pyproject.toml -p auto_coder
 echo "[OK] All code quality checks passed!"
 echo ""
 else
-  echo "[INFO] Explicit CI test-only mode: quality checks run in the PR quality job."
+  echo "[INFO] Explicit CI test-only mode: quality checks run in the workflow quality job."
 fi
 
 # -----------------------------------------------------------------------------
