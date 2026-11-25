@@ -29,6 +29,8 @@ def _hold_owner(storage_path, acquired, release):
             raise RuntimeError("Test owner holder was not released")
 
 
+# Real owner-lock contention needs the production retry backoff.
+@pytest.mark.usefixtures("_use_real_sleep")
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize("change", ["unchanged", "head", "decision", "source_unavailable", "ambiguous_bookkeeping", "accepted_bookkeeping"])
 def test_scoped_production_entry_rechecks_after_actual_owner_lock_wait(ordinary, change):
