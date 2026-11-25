@@ -739,7 +739,19 @@ def _closure_discussion_binding(repo_name: str, pr_number: int, inputs: TwoTierG
     registered = inputs.gate.closure_evidence().attempts.get(newer.attempt_id)
     if registered is None or (registered.sequence, registered.pr_number, registered.head_sha, registered.status) != (newer.attempt_sequence, pr_number, source.head_sha, "PASS"):
         return original
-    expected_sources = {source_identity_for(source.round_id, item.finding_id) for item in source.dispositions}
+    # A closure can include findings inherited from earlier Strong rounds.
+    # Preserve each finding's accepted producer rather than assigning all of
+    # them to the most recent round that owns this closure.
+    snapshot = inputs.gate.state.snapshot(pr_number)
+    expected_sources: Set[str] = set()
+    for disposition in source.dispositions:
+        findings = [finding for finding in snapshot.findings if finding.finding_id == disposition.finding_id]
+        if len(findings) != 1:
+            return original
+        owners = [record for record in snapshot.strong_rounds if record.claim_id == findings[0].origin_round_id and disposition.finding_id in record.finding_ids]
+        if len(owners) != 1:
+            return original
+        expected_sources.add(source_identity_for(owners[0].round_id, disposition.finding_id))
     if not expected_sources <= set(newer.accepted_sources):
         return original
     result = newer.restore()
@@ -7010,6 +7022,21 @@ def _coordinate_pr_review(
                     if not recovery_admitted:
                         _record_review_wait(repo_name, pr_number, head_sha, actions, processing_status, "the versioned legacy recovery has already been admitted")
                         return actions
+                    if reuse_assessment.recovery_key.startswith("discussion-binding-recovery-v1:"):
+                        retained_discussion = EffectiveDecisionStore(repo_name).load(pr_number)
+                        _record_pr_stage(
+                            pr_number,
+                            "pr.adversarial-validation",
+                            f"pr#{pr_number} adversarial validation",
+                            Outcome.DEFERRED,
+                            {
+                                "effect": "saved-discussion-binding-recovery",
+                                "examined_head": head_sha,
+                                "thread_ids": retained_discussion.discussion_revalidation_thread_ids if retained_discussion is not None else [],
+                                "requires_reassessment": True,
+                                "reason": reuse_assessment.reason,
+                            },
+                        )
                 attempt = AdversarialValidationAttempt(retained_reuse.attempt_id, retained_reuse.attempt_sequence) if retained_reuse is not None else attempt_repository.start(pr_number, head_sha)
                 runtime.active_attempt_id = attempt.attempt_id
                 runtime.decision_attempt_repository = attempt_repository

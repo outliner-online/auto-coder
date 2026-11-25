@@ -362,6 +362,36 @@ def _saved_repair_has_current_evidence(ports, retained: Optional[RetainedDecisio
     return retained is not None and retained.head_sha == head_sha and (retained.next_action in repair_actions) and ({record.source_identity for record in outstanding} <= set(retained.source_identities + retained.pending_closure_source_identities + retained.pending_reconciliation_source_identities))
 
 
+def _assess_spent_discussion_revalidation(ports: Any, retained: RetainedDecision, projection: AcceptedFindingProjection, recovery_key: str, saved_status: Optional[str]) -> SavedReviewAssessment:
+    """Recover a completed review whose normalized discussion binding was lost.
+
+    A published PASS cannot replace the missing input binding. It only permits
+    one fresh independent review after the original admission was consumed.
+    The recovery allowance belongs to the target and discussion, never to an
+    attempt number, so another incomplete result cannot renew it indefinitely.
+    """
+    waiting = SavedReviewAssessment(ports.SAVED_REVIEW_WAIT, "independent review was already admitted for this changed discussion", projection)
+    target = projection.target
+    if saved_status != "PASS" or retained.ordinary_correction is not None or retained.status != "PASS" or retained.publication != ports.PUBLICATION_CONFIRMED or retained.next_action != ports.EffectiveNextAction.NONE.value:
+        return waiting
+    if (retained.repository, retained.pr_number, retained.head_sha, retained.base_sha, retained.reopen_epoch) != (target.repository, target.pr_number, target.head_sha, target.base_sha, projection.open_epoch):
+        return waiting
+    binding_key = "discussion-binding-recovery-v1:" + recovery_key.split(":", 1)[1]
+    if binding_key in retained.reconciliation_attempts:
+        return waiting
+    try:
+        attempts = ports.AdversarialValidationAttemptRepository(target.repository)
+        with attempts.serialized_transition():
+            registered = attempts.get(retained.attempt_id)
+            if registered is None or (registered.pr_number, registered.head_sha, registered.sequence, registered.status) != (target.pr_number, target.head_sha, retained.attempt_sequence, "PASS"):
+                return waiting
+            if attempts.latest_sequence(target.pr_number, target.head_sha) != retained.attempt_sequence or attempts.latest_published_sequence(target.pr_number, target.head_sha) != retained.attempt_sequence:
+                return waiting
+    except (RuntimeError, ValueError, OSError) as exc:
+        return SavedReviewAssessment(ports.SAVED_REVIEW_WAIT, f"completed discussion review authority is unavailable: {exc}", projection)
+    return SavedReviewAssessment(ports.SAVED_REVIEW_REVALIDATE, "a completed independent review lost its retained discussion binding; one bounded current-input recovery is required", projection, binding_key)
+
+
 def assess_saved_review_state(ports, repo_name: str, pr_data: Dict[str, Any], head_sha: str, saved_status: Optional[str], claimed_review_threads: Sequence[Any], force: bool, github_client: Any = None, config: Optional[AutomationConfig] = None) -> SavedReviewAssessment:
     """Re-acquire accepted-finding applicability before consuming a saved verdict.
 
@@ -372,7 +402,15 @@ def assess_saved_review_state(ports, repo_name: str, pr_data: Dict[str, Any], he
     identical model or repair work.
     """
     if saved_status not in {"PASS", "BLOCKED", "NEEDS_FIX", "NEEDS_TESTS"}:
-        return SavedReviewAssessment()
+        try:
+            pending = ports.EffectiveDecisionStore(repo_name).load(int(pr_data["number"]))
+        except (ports.DecisionRetentionError, RuntimeError, ValueError, OSError) as exc:
+            return SavedReviewAssessment(ports.SAVED_REVIEW_WAIT, f"retained discussion recovery state is unreadable: {exc}")
+        # A failed recovery must retain its spent allowance even when ERROR is
+        # otherwise eligible for an ordinary retry. New discussion still gets
+        # its own evidence-bound assessment below.
+        if pending is None or not pending.discussion_revalidation_thread_ids or not any(key.startswith("discussion-binding-recovery-v1:") for key in pending.reconciliation_attempts):
+            return SavedReviewAssessment()
     try:
         bridge, target = ports._accepted_state_inputs(repo_name, pr_data, head_sha)
         inputs = None
@@ -402,7 +440,7 @@ def assess_saved_review_state(ports, repo_name: str, pr_data: Dict[str, Any], he
             return SavedReviewAssessment(ports.SAVED_REVIEW_WAIT, "changed discussion identities are not completely observable", projection)
         recovery_key = "discussion-revalidation-v1:" + ports.hashlib.sha256(json.dumps([head_sha, target.base_sha, revision, discussion], sort_keys=True).encode()).hexdigest()
         if not force and recovery_key in retained.reconciliation_attempts:
-            return SavedReviewAssessment(ports.SAVED_REVIEW_WAIT, "independent review was already admitted for this changed discussion", projection)
+            return _assess_spent_discussion_revalidation(ports, retained, projection, recovery_key, saved_status)
         return SavedReviewAssessment(ports.SAVED_REVIEW_REVALIDATE, "retained discussion changed and requires an independent current-input decision", projection, "" if force else recovery_key)
     if changed_ordinary_inputs:
         if not ports.closure_projection_readable(projection):

@@ -41,3 +41,34 @@ and merge gates retain their existing authority. Production emits
 `effect=saved-discussion-reassessment`, the exact `thread_ids`, `examined_head`,
 `saved_verdict`, `requires_reassessment=true`, and a bounded reason. This records
 an input obligation, not successful review or delivery.
+
+### Recovering a completed review with a missing discussion binding
+
+A completed, published same-head PASS can leave a pending discussion input when
+an older closure effect discarded the normalized producing result. The consumed
+review-admission key alone must not leave that PR waiting forever. When the
+retained record still identifies the latest registered and published PASS for
+the current repository, PR, head, base and opening, and its normalized ordinary
+result is absent, the coordinator admits one independent binding-recovery review.
+The additional admission key is stable for the same target and complete
+substantive discussion; it does not contain an attempt number or a timestamp.
+Both admission keys survive reconstruction, and a failed, interrupted or
+incomplete recovery cannot repeatedly invoke the reviewer on unchanged input.
+Missing discussion, unreadable authority, an unpublished result, a newer attempt
+or a different target remains blocked.
+
+This recovery supplies no approval or closure authority. The fresh review must
+retain the complete current discussion and exact canonical concern scope before
+the existing closure and publication gates can consume its result. Historical
+closure payloads and effect identities remain unchanged, so confirmation resumes
+the original pending effect instead of publishing a duplicate review. If a
+closure contains findings introduced by multiple Strong rounds, each finding
+must be matched to its actual originating round. Assigning every finding to the
+latest round would reject an otherwise valid new discussion binding.
+
+After the durable admission succeeds, production emits
+`pr.adversarial-validation` / `Deferred` with
+`effect=saved-discussion-binding-recovery`, `examined_head`, the selected
+`thread_ids`, `requires_reassessment=true`, and `reason`. This event records
+admission only; the subsequent review, publication and merge events record the
+actual result. The existing dashboard stage and fact rendering is unchanged.
