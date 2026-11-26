@@ -125,6 +125,37 @@ def test_producer_reclamation_is_provider_neutral_and_failure_is_hourly(tmp_path
     assert live_workspace.parent.is_dir()
 
 
+def test_due_reclamation_survives_repeated_provider_maintenance_failure(tmp_path: Path, monkeypatch, _use_real_commands) -> None:
+    store, finalized, _ = _published(tmp_path, 2892)
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    engine._next_local_job_workspace_reclamation = 0.0
+    monkeypatch.setattr(engine, "_check_and_handle_closed_branch", lambda *_: True)
+    monkeypatch.setattr(engine, "_get_local_job_store", lambda: store)
+    real_reclaim = reclaim_finalized_workspaces
+    monkeypatch.setattr(
+        "auto_coder.local_job_workspace_cleanup.reclaim_finalized_workspaces",
+        lambda local_store: real_reclaim(local_store, retention_seconds=0, issue_root=tmp_path / "workspaces"),
+    )
+    failures = []
+
+    def fail_provider(*_args):
+        failures.append(1)
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("auto_coder.speculative_jules_lifecycle.consume_due_speculative_work", fail_provider)
+
+    async def stop_after_two_failures(_seconds):
+        if len(failures) == 2:
+            raise KeyboardInterrupt("done")
+
+    monkeypatch.setattr("auto_coder.automation_engine.asyncio.sleep", stop_after_two_failures)
+    with pytest.raises(KeyboardInterrupt, match="done"):
+        asyncio.run(engine._producer_loop("owner/repo"))
+
+    assert len(failures) == 2
+    assert not finalized.workspace.parent.exists()
+
+
 def test_issue_producer_binds_external_ownership_evidence(tmp_path: Path, _use_real_commands) -> None:
     store, checkpoint, _ = _published(tmp_path)
     record = store.get(checkpoint.job_id)

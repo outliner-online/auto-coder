@@ -3681,6 +3681,24 @@ class AutomationEngine:
         while True:
             try:
                 iteration += 1
+                if self._claim_local_job_workspace_reclamation():
+                    from .local_job_workspace_cleanup import reclaim_finalized_workspaces
+
+                    try:
+                        await self._run_local_critical(
+                            "local job workspace reclamation",
+                            reclaim_finalized_workspaces,
+                            self._get_local_job_store(),
+                        )
+                    except Exception as exc:
+                        # The claimed deadline intentionally remains advanced:
+                        # report the failed opportunity, then let unrelated
+                        # producer maintenance run and retry on the next cycle.
+                        logger.opt(exception=True).error("Local job workspace reclamation failed: {}", exc)
+
+                    if self.is_draining:
+                        return
+
                 # This targeted durable consumer runs immediately on startup and
                 # at the 60-second maintenance cadence. It never calls the
                 # account-wide Jules listing used by the separate hourly cycle.
@@ -3701,24 +3719,6 @@ class AutomationEngine:
                 await self._run_local_critical("update check", check_for_updates_and_restart)
                 if self.is_draining:
                     return
-
-                if self._claim_local_job_workspace_reclamation():
-                    from .local_job_workspace_cleanup import reclaim_finalized_workspaces
-
-                    try:
-                        await self._run_local_critical(
-                            "local job workspace reclamation",
-                            reclaim_finalized_workspaces,
-                            self._get_local_job_store(),
-                        )
-                    except Exception as exc:
-                        # The claimed deadline intentionally remains advanced:
-                        # report the failed opportunity, then let unrelated
-                        # producer maintenance run and retry on the next cycle.
-                        logger.opt(exception=True).error("Local job workspace reclamation failed: {}", exc)
-
-                    if self.is_draining:
-                        return
 
                 if not skip_jules_sessions and self._claim_jules_session_list_refresh():
                     # All list-dependent maintenance shares this cycle's fresh listing.
