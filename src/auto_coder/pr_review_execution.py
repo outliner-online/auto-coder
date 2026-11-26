@@ -203,7 +203,12 @@ def _review_correction_basis(
         if len(set(finding.requirement_ids)) != len(finding.requirement_ids):
             return None, "Strong correction repeats a Requirement binding"
         for requirement_id, text in zip(finding.requirement_ids, finding.requirement_texts):
-            if requirement_id not in manifest or " ".join(text.split()) != " ".join(manifest[requirement_id].split()):
+            authoritative_text = manifest.get(requirement_id)
+            if authoritative_text is None:
+                return None, "Strong correction does not match a current explicit Requirement"
+            requirement_body = " ".join(authoritative_text.split())
+            declaration = f"{requirement_id.rsplit('/', 1)[1]}: {requirement_body}"
+            if " ".join(text.split()) not in {requirement_body, declaration}:
                 return None, "Strong correction does not match a current explicit Requirement"
         evidence = finding.evidence
         if finding.is_regression_gap:
@@ -211,7 +216,9 @@ def _review_correction_basis(
         blockers.append(
             ReviewCorrectionBlocker(
                 requirement_ids=finding.requirement_ids,
-                requirement_texts=finding.requirement_texts,
+                # Preserve the portable finding while retaining authoritative bodies
+                # for the independent publication and recovery Requirements check.
+                requirement_texts=tuple(manifest[requirement_id] for requirement_id in finding.requirement_ids),
                 boundary=finding.affected_boundary,
                 evidence=evidence,
                 counterexample=finding.counterexample,

@@ -140,7 +140,7 @@ def _strong_correction_response(prompt: str) -> str:
             {
                 "finding_id": "incorrect-greeting",
                 "requirement_ids": ["#99/REQ-001"],
-                "requirement_texts": ["greet() returns the string hello."],
+                "requirement_texts": ["REQ-001: greet() returns the string hello."],
                 "counterexample": "Calling greet() at the admitted HEAD must return hello but returns incorrect.",
                 "expected_behavior": "greet() returns hello.",
                 "actual_behavior": "greet() returns incorrect.",
@@ -468,6 +468,7 @@ def test_ordinary_pass_still_allows_strong_defect_correction_without_self_approv
         PR_NUMBER,
         inputs,
         publication_authority=lambda sha, ref: flow.head() == sha and ref == "feature-branch",
+        correction_basis_check=lambda basis: pr_processor._review_correction_requirements_current(flow.client, REPO_NAME, PR_NUMBER, basis),
     )
 
     assert not accepted, reason
@@ -480,6 +481,52 @@ def test_ordinary_pass_still_allows_strong_defect_correction_without_self_approv
     assert snapshot.completion is None
     flow.publication.assert_not_called()
     flow.merge.assert_not_called()
+    assert _caller_snapshot(flow.repository) == before
+
+
+@pytest.mark.parametrize(
+    "requirement_id,requirement_text",
+    [
+        ("#99/REQ-001", "REQ-002: greet() returns the string hello."),
+        ("#99/REQ-001", "REQ-001: greet() returns the string goodbye."),
+        ("#100/REQ-001", "REQ-001: greet() returns the string hello."),
+    ],
+)
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
+def test_strong_declaration_mismatch_cannot_publish_correction(flow, monkeypatch, requirement_id, requirement_text):
+    from auto_coder import local_review_repair
+
+    inputs = _pending_strong_inputs(flow)
+    before = _caller_snapshot(flow.repository)
+    flow.reviewer.mutation = _edit_source
+
+    def response(prompt):
+        payload = json.loads(_strong_correction_response(prompt))
+        payload["findings"][0].update(requirement_ids=[requirement_id], requirement_texts=[requirement_text])
+        return json.dumps(payload)
+
+    flow.reviewer.response_factory = response
+    commit = Mock(wraps=local_review_repair.git_commit_with_retry)
+    push = Mock(wraps=local_review_repair.git_push)
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", commit)
+    monkeypatch.setattr(local_review_repair, "git_push", push)
+
+    accepted, reason = pr_processor._execute_pending_strong_audit(
+        REPO_NAME,
+        PR_NUMBER,
+        inputs,
+        publication_authority=lambda sha, ref: flow.head() == sha and ref == "feature-branch",
+        correction_basis_check=lambda basis: pr_processor._review_correction_requirements_current(flow.client, REPO_NAME, PR_NUMBER, basis),
+    )
+
+    assert not accepted
+    assert "Strong correction does not match a current explicit Requirement" in reason
+    assert flow.head() == flow.initial_head
+    commit.assert_not_called()
+    push.assert_not_called()
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert inputs.gate.state.snapshot(PR_NUMBER).completion is None
     assert _caller_snapshot(flow.repository) == before
 
 

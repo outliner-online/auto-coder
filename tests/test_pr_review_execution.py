@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -271,9 +272,12 @@ def _correction_payload(expected: ReviewExecutionInput) -> dict:
 
 
 @pytest.mark.parametrize("regression_gap", [False, True])
-def test_strong_correction_retains_complete_current_requirement_evidence(regression_gap):
+@pytest.mark.parametrize("declaration", [False, True])
+def test_strong_correction_retains_complete_current_requirement_evidence(regression_gap, declaration):
     expected = replace(_input(), contract=ContractSnapshot(("#2101",), "Issue #2101 REQ-007: Verify every outstanding finding."))
     payload = _correction_payload(expected)
+    if declaration:
+        payload["findings"][0]["requirement_texts"] = ["REQ-007: Verify every outstanding finding."]
     if regression_gap:
         payload["findings"][0].update(
             is_regression_gap=True,
@@ -292,6 +296,8 @@ def test_strong_correction_retains_complete_current_requirement_evidence(regress
     assert basis.verdict == "FINDINGS"
     blocker = basis.blockers[0]
     assert blocker.requirement_ids == ("#2101/REQ-007",)
+    assert blocker.requirement_texts == ("Verify every outstanding finding.",)
+    assert result.findings[0].requirement_texts == tuple(payload["findings"][0]["requirement_texts"])
     assert blocker.actual_behavior == payload["findings"][0]["actual_behavior"]
     assert blocker.kind == ("TEST_ORACLE" if regression_gap else "IMPLEMENTATION")
     if regression_gap:
@@ -299,7 +305,9 @@ def test_strong_correction_retains_complete_current_requirement_evidence(regress
         assert payload["findings"][0]["material_consequence"] in blocker.evidence
 
 
-@pytest.mark.parametrize("invalid", ["pass", "inconclusive", "malformed", "stale_head", "unknown_requirement", "changed_requirement_text", "duplicate_requirement", "missing_counterexample", "optional_test", "invalid_gap_type"])
+@pytest.mark.parametrize(
+    "invalid", ["pass", "inconclusive", "malformed", "stale_head", "unknown_requirement", "changed_requirement_text", "mismatched_declaration_id", "changed_declaration_text", "unrelated_issue_same_text", "duplicate_requirement", "missing_counterexample", "optional_test", "invalid_gap_type"]
+)
 def test_strong_correction_requires_pre_edit_finding_bound_to_current_contract(invalid):
     expected = _input()
     payload = _correction_payload(expected)
@@ -311,6 +319,16 @@ def test_strong_correction_requires_pre_edit_finding_bound_to_current_contract(i
         payload["findings"][0]["requirement_ids"] = ["#2101/REQ-999"]
     elif invalid == "changed_requirement_text":
         payload["findings"][0]["requirement_texts"] = ["Add optional coverage for every naming variant."]
+    elif invalid == "mismatched_declaration_id":
+        expected = replace(expected, contract=ContractSnapshot(("#2101",), "REQ-007: Verify every outstanding finding.\nREQ-008: Verify every outstanding finding."))
+        payload.update(_identity(expected))
+        payload["findings"][0]["requirement_texts"] = ["REQ-008: Verify every outstanding finding."]
+    elif invalid == "changed_declaration_text":
+        payload["findings"][0]["requirement_texts"] = ["REQ-007: Add optional coverage for every naming variant."]
+    elif invalid == "unrelated_issue_same_text":
+        expected = replace(expected, repository_evidence="Parent Issue #99 declares REQ-007: Verify every outstanding finding.")
+        payload["findings"][0]["requirement_ids"] = ["#99/REQ-007"]
+        payload["findings"][0]["requirement_texts"] = ["REQ-007: Verify every outstanding finding."]
     elif invalid == "duplicate_requirement":
         payload["findings"][0]["requirement_ids"] *= 2
         payload["findings"][0]["requirement_texts"] *= 2
@@ -327,3 +345,41 @@ def test_strong_correction_requires_pre_edit_finding_bound_to_current_contract(i
 
     assert basis is None
     assert refusal
+
+
+def test_captured_strong_declaration_retains_canonical_correction_basis():
+    """Replay the portable final response refused by PR #2944's Strong audit."""
+    capture = json.loads((Path(__file__).parent / "data" / "pr2944_strong_requirement_declaration.json").read_text())
+    payload = capture["response"]
+    expected = ReviewExecutionInput(
+        mode=ReviewMode.STRONG_AUDIT,
+        round_id=payload["round_id"],
+        attempt_id=payload["attempt_id"],
+        head_sha=payload["head_sha"],
+        base_sha=payload["base_sha"],
+        contract=ContractSnapshot(tuple(capture["contract"]["issue_ids"]), capture["contract"]["requirements_text"]),
+        policy=StrongPolicyIdentity(**capture["policy"]),
+        repository_evidence="Captured target PR #2944 at its admitted input revision.",
+        diff_evidence="The response's finding remains about the admitted input HEAD.",
+        repository=payload["repository"],
+        pr_number=payload["pr_number"],
+        open_epoch=payload["open_epoch"],
+        attempt_sequence=payload["attempt_sequence"],
+        finding_set_revision=payload["finding_set_revision"],
+        audited_head_sha=payload["audited_head_sha"],
+    )
+    result = parse_review_result(json.dumps(payload), expected, "codex/gpt-6.1-terra")
+
+    basis, refusal = _review_correction_basis(expected, result)
+
+    assert result.is_complete, result.diagnostic
+    assert refusal == ""
+    assert basis is not None
+    assert basis.head_sha == payload["head_sha"]
+    assert basis.contract_identity == payload["contract_identity"]
+    assert basis.verdict == "FINDINGS"
+    (blocker,) = basis.blockers
+    assert blocker.kind == "TEST_ORACLE"
+    assert blocker.requirement_ids == ("#2894/REQ-006",)
+    assert blocker.requirement_texts == (capture["expected_requirement_body"],)
+    assert result.findings[0].requirement_texts == tuple(payload["findings"][0]["requirement_texts"])

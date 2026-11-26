@@ -68,6 +68,15 @@ and closure rules. This deterministic check verifies the structured evidence
 contract; the reviewer remains responsible for the semantic truth and bounded
 scope of its evidence. Prompt-regression evaluation remains advisory.
 
+Strong findings quote complete `REQ-NNN: ...` declarations in
+`requirement_texts`. Correction eligibility accepts that exact declaration only
+for its matching qualified Requirement ID and current body; the existing
+body-only representation also remains valid. A different declaration ID, changed
+body, or Requirement outside the current explicit contract refuses publication.
+The portable finding keeps its original quotation, while the controller-owned
+correction basis retains the authoritative body for the unchanged live
+publication and recovery recheck.
+
 ## Source changes and review evidence
 
 A production editable review starts from the exact clean admitted PR commit.
