@@ -761,7 +761,6 @@ def _resolve_jules_session_ownership(
                     resolution.blocked = True
                     resolution.blocked_reason = f"Unsupported provider {binding.provider!r} in CloudManager " f"for owner {owner.key}"
                     resolution.collection_reason = RetirementCollectionReason(CollectionReasonKind.UNSUPPORTED_PROVIDER, "cloud-manager-binding", str(binding.provider))
-                    return resolution
                 if binding.task_id:
                     cm_session = binding.task_id
         except Exception as exc:
@@ -785,7 +784,6 @@ def _resolve_jules_session_ownership(
                     resolution.blocked = True
                     resolution.blocked_reason = f"Non-Jules provider {provider!r} found in CloudRun " f"for owner {owner.key}"
                     resolution.collection_reason = RetirementCollectionReason(CollectionReasonKind.UNSUPPORTED_PROVIDER, "cloud-run-provider", str(provider))
-                    return resolution
                 # Include pending CloudRun sessions not yet in slot's session array
                 if task_id and task_id not in slot_sessions:
                     slot_sessions.append(task_id)

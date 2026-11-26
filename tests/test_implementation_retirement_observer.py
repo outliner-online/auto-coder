@@ -1692,3 +1692,31 @@ def test_unknown_retry_keeps_cloud_manager_session_attributable(tmp_path, monkey
     assert observed is not None
     assert [(session.provider, session.session_id, session.state) for session in observed.provider_sessions] == [("jules", "known-jules", SessionTerminalState.UNKNOWN)]
     assert observed.collection_reasons[0].boundary == "retry-dispatch:retry"
+
+
+def test_mixed_cloud_bindings_preserve_all_session_attribution(tmp_path, monkeypatch):
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    slots = _setup_slots(tmp_path)
+    execution = slots.start_execution(ISSUE_100, generation="mixed-generation")
+    assert execution is not None
+    assert slots.record_implementation_pr(ISSUE_100, 201)
+    slots.finish_execution(ISSUE_100, execution)
+    manager = CloudManager(REPO)
+    assert manager.add_session(100, "codex-task", provider="codex-cloud")
+    runs = CloudRunRepository(REPO, storage_path=tmp_path / "runs.json")
+    assert runs.save(CloudRun(REPO, 100, 1, "codex-cloud", task_id="other-codex"))
+    assert runs.save(CloudRun(REPO, 100, 2, "jules", task_id="jules-task"))
+
+    observed = collect_retirement_observation(ISSUE_100, slots, _make_github_client(), cloud_manager=manager, cloud_run_store=runs)
+
+    assert observed is not None
+    assert {(s.provider, s.session_id, s.state) for s in observed.provider_sessions} == {
+        ("codex-cloud", "codex-task", SessionTerminalState.UNKNOWN),
+        ("codex-cloud", "other-codex", SessionTerminalState.UNKNOWN),
+        ("jules", "jules-task", SessionTerminalState.UNKNOWN),
+    }
+    assert slots.retire_owner(observed).status is RetirementStatus.RETAINED_UNKNOWN
