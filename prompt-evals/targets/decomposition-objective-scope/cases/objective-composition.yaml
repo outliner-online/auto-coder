@@ -22,7 +22,8 @@
     - type: is-json
     - type: javascript
       value: |
-        const r = JSON.parse(output); return r.verdict === 'READY' && r.remediation === 'NONE' && r.findings.length === 0;
+        const r = JSON.parse(output);
+        return r.verdict === 'READY' && r.remediation === 'NONE' && r.findings.length === 0;
 
 - description: Narrow owning-child correction closes aggregate gap
   vars:
@@ -34,4 +35,5 @@
     - type: is-json
     - type: javascript
       value: |
-        const r = JSON.parse(output); return r.verdict === 'READY' && r.remediation === 'NONE' && r.findings.length === 0;
+        const r = JSON.parse(output);
+        return r.verdict === 'READY' && r.remediation === 'NONE' && r.findings.length === 0;

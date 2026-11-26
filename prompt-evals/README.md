@@ -25,6 +25,12 @@ base and head revisions. Declaring the same shared key for multiple targets
 therefore fans a shared change out only to those targets. Changes beneath a
 target's config path or matching one of its case globs also select it.
 
+Write JavaScript assertions containing statements as literal multiline YAML
+blocks, with a newline before the top-level return. Promptfoo treats a
+single-line value as an expression; a one-line statement body can therefore
+produce an assertion execution error. Expression-only predicates can remain
+single-line.
+
 Selected targets with no executable cases are reported as `NOT_RUN` before
 credentials are needed or Promptfoo is invoked. Selected targets with cases run
 their own config using `promptfoo@latest`; a complete
