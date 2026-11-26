@@ -1331,8 +1331,6 @@ class GitHubClient:
         """Enumerate every open PR from live REST pages, bypassing caches."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=100"
         result: List[Dict[str, Any]] = []
         visited: set[str] = set()
@@ -1340,6 +1338,9 @@ class GitHubClient:
             if url in visited or len(visited) >= 1000:
                 raise RuntimeError("GitHub open-PR pagination did not terminate safely")
             visited.add(url)
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
             response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
             response.raise_for_status()
             page = response.json()
@@ -3292,7 +3293,7 @@ class GitHubClient:
         """Update an existing comment."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
             api.issues.update_comment(owner, repo, comment_id, body=body)
             logger.info(f"Updated comment {comment_id} in {repo_name}")
         except Exception as e:

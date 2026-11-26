@@ -784,3 +784,57 @@ def test_merge_entry_and_rejection_recheck_use_installation_pr_reads(tmp_path):
 
     assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == ["Bearer installation-one", "Bearer installation-two"]
     assert provider.requests == [("owner/repo", {"pull_requests": "read"})] * 2
+
+
+def test_strict_open_pr_discovery_renews_credentials_on_each_page():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    sent = []
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls")
+    responses = iter(
+        [
+            httpx.Response(200, json=[{"number": 1}], headers={"Link": '<https://api.github.com/repos/owner/repo/pulls?page=2>; rel="next"'}, request=request),
+            httpx.Response(200, json=[{"number": 2}], request=request),
+        ]
+    )
+
+    def send(*args, **kwargs):
+        sent.append(kwargs["headers"].get("Authorization"))
+        return next(responses)
+
+    with patch("auto_coder.util.gh_cache._strict_request", side_effect=send):
+        assert client.get_open_pull_requests_strict("owner/repo") == [{"number": 1}, {"number": 2}]
+    assert sent == ["Bearer installation-one", "Bearer installation-two"]
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"})] * 2
+
+
+def test_issue_comment_update_uses_scoped_credential():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("PATCH", "https://api.github.com/repos/owner/repo/issues/comments/9")
+    transport.request.return_value = httpx.Response(200, json={"id": 9}, request=request)
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        client.update_comment_for_issue("owner/repo", 9, "updated")
+    assert transport.request.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-one"
+    assert provider.requests == [("owner/repo", {"issues": "write"})]
+
+
+def test_codex_observation_uses_scoped_open_pr_discovery(tmp_path, monkeypatch):
+    from auto_coder.codex_observation import PullRequestPresence
+    from tests.test_codex_observation import make_service, wham_response
+
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls")
+    response = httpx.Response(200, json=[], request=request)
+    with (
+        patch.object(client, "get_issue_dispatch_snapshot_strict", return_value={"number": 1863, "state": "open"}),
+        patch.object(client, "get_issue_timeline_strict", return_value=[]),
+        patch("auto_coder.util.gh_cache._strict_request", return_value=response) as send,
+    ):
+        result, _ = make_service(tmp_path, client, wham_response())
+    assert result.pull_request.presence is PullRequestPresence.NO_MATCHING_PR
+    assert send.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-one"
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"})]
