@@ -8,7 +8,7 @@ from multiprocessing import Event, Process
 from pathlib import Path
 from threading import Event as ThreadEvent
 from threading import Thread
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from loguru import logger
@@ -86,6 +86,35 @@ def _record_settled_observation(store, record, workspace: Path, executor: str) -
         readiness=MuseContinuationReadiness.CONTROLLER_READY,
     )
     assert persist_muse_observation(store, record.job_id, executor, observation)
+
+
+def test_startup_reclamation_failure_does_not_block_reconciliation(monkeypatch) -> None:
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    engine._pr_local_job_runner = None
+    slots = MagicMock()
+    monkeypatch.setattr(engine, "_get_implementation_slots", lambda _repo: slots)
+    monkeypatch.setattr(engine, "_resume_local_issue_publications", lambda *_: None)
+    monkeypatch.setattr(engine, "_get_local_job_store", lambda: object())
+    monkeypatch.setattr(engine, "_reconcile_open_github_entities", AsyncMock())
+    monkeypatch.setattr(engine, "_recover_issue_review_reruns", MagicMock())
+    recover = MagicMock()
+    monkeypatch.setattr("auto_coder.automation_engine.recover_obligations_at_startup", recover)
+
+    def fail_cleanup(*_args):
+        raise OSError("cleanup unavailable")
+
+    monkeypatch.setattr("auto_coder.local_job_workspace_cleanup.reclaim_finalized_workspaces", fail_cleanup)
+    errors = []
+    sink = logger.add(lambda message: errors.append(str(message)), level="ERROR")
+    try:
+        asyncio.run(engine._attempt_startup_reconciliation("owner/repo"))
+    finally:
+        logger.remove(sink)
+
+    recover.assert_called_once_with(slots)
+    engine._reconcile_open_github_entities.assert_awaited_once_with("owner/repo")
+    engine._recover_issue_review_reruns.assert_called_once_with("owner/repo")
+    assert any("Startup local job workspace reclamation failed" in message and "cleanup unavailable" in message for message in errors)
 
 
 def test_producer_reclamation_is_provider_neutral_and_failure_is_hourly(tmp_path: Path, monkeypatch, _use_real_commands) -> None:
