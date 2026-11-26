@@ -37,9 +37,19 @@ while the other processed the remaining independent cases; both workers were
 active until the end of the session. The independent call durations total much
 more than the longest indivisible test, so adding one in-job worker can
 redistribute measured work while retaining the single prepared image. It does
-not alter queueing, setup, retry, selection, or failure semantics. A comparable
-after measurement must come from the changed GitHub Actions job; this source
-change does not represent an estimated schedule as measured latency.
+not alter queueing, setup, retry, selection, or failure semantics.
+
+The changed pull-request run `45906998276`, job `140206007459`, measured queue
+3 seconds, job 675 seconds, image preparation 71 seconds, test step 577 seconds,
+and native pytest 572.97 seconds with three workers. It passed all 32 selected
+cases. Compared with the qualifying run, the job was 21 seconds shorter and the
+test step was 30 seconds shorter despite the intervening checkout having five
+additional selected cases and producing passes rather than nine upstream-related
+skips. Both measurements used one `ubuntu-latest` job, Python 3.12, pinned uv
+0.7.22, pinned OpenCode 1.18.31, one prepared image, and the load scheduler with
+unit-sized maximum chunks. Queue, checkout contents, selection size/outcomes,
+image-preparation time, and worker count are therefore material differences; the
+result is a measured run of this change, not a universal latency guarantee.
 
 Issue #2871's cited run `44867758076`, job `136735160868`, used one runner and two
 workers: queue 2 seconds, job 750 seconds, image preparation 79 seconds, test step
