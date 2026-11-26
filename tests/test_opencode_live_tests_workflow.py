@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OPENCODE_LIVE_WORKFLOW = ROOT / ".github/workflows/opencode-live-tests.yml"
 SOURCE_WORKFLOW = ROOT / ".github/workflows/test-source-for-runtime.yml"
 PREPARE_SCRIPT = ROOT / "scripts/prepare_opencode_image.py"
+SCHEDULING_REPORT = ROOT / "docs/client-features/opencode-live-test-scheduling.md"
 
 MIGRATED_CONTAINER_SCENARIOS = {
     "test_codex_private_repository_checkpoint_uses_production_worker_boundary",
@@ -45,6 +46,14 @@ STATIC_CONTAINER_RUNTIME_TESTS = {
 
 def _workflow(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def test_scheduling_report_includes_measured_workflow_durations():
+    report = SCHEDULING_REPORT.read_text(encoding="utf-8")
+    baseline = report.split("Issue #2911's qualifying run", 1)[1].split("The changed pull-request run", 1)[0]
+    changed = report.split("The changed pull-request run", 1)[1].split("Issue #2871's cited run", 1)[0]
+    assert "45330611896" in baseline and "workflow 717 seconds" in baseline
+    assert "45906998276" in changed and "679 seconds" in changed and "measured workflow" in changed
 
 
 def test_opencode_live_workflow_contract_and_limits():

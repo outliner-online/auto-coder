@@ -29,7 +29,7 @@ even when completeness validation succeeds.
 ## Evidence and remaining measurement
 
 Issue #2911's qualifying run `45330611896`, job `138230761660`, used one runner
-and two workers: queue 2 seconds, job 696 seconds, image preparation 63 seconds,
+and two workers: workflow 717 seconds, queue 2 seconds, job 696 seconds, image preparation 63 seconds,
 test step 607 seconds, and native pytest 602.92 seconds (18 passed, 9 skipped).
 The native duration report identifies a 236.62-second longest indivisible test.
 One worker remained occupied by that test and its following 85.66-second case,
@@ -39,8 +39,8 @@ more than the longest indivisible test, so adding one in-job worker can
 redistribute measured work while retaining the single prepared image. It does
 not alter queueing, setup, retry, selection, or failure semantics.
 
-The changed pull-request run `45906998276`, job `140206007459`, measured queue
-3 seconds, job 675 seconds, image preparation 71 seconds, test step 577 seconds,
+The changed pull-request run `45906998276`, job `140206007459`, measured workflow
+679 seconds, queue 3 seconds, job 675 seconds, image preparation 71 seconds, test step 577 seconds,
 and native pytest 572.97 seconds with three workers. It passed all 32 selected
 cases. Compared with the qualifying run, the job was 21 seconds shorter and the
 test step was 30 seconds shorter despite the intervening checkout having five
@@ -50,6 +50,8 @@ skips. Both measurements used one `ubuntu-latest` job, Python 3.12, pinned uv
 unit-sized maximum chunks. Queue, checkout contents, selection size/outcomes,
 image-preparation time, and worker count are therefore material differences; the
 result is a measured run of this change, not a universal latency guarantee.
+Workflow elapsed time is measured from the Actions run start to its updated
+completion timestamp; it includes scheduling and is distinct from job duration.
 
 Issue #2871's cited run `44867758076`, job `136735160868`, used one runner and two
 workers: queue 2 seconds, job 750 seconds, image preparation 79 seconds, test step
@@ -77,10 +79,8 @@ with exactly the same node IDs as the cited CI log (no missing or added nodes).
 The local unchanged production-image preparation failed after 15.449 seconds
 because the Docker build could not reach Debian package repositories. The pinned
 host OpenCode install also failed with an incompatible platform-package selection.
-No live baseline or after run is therefore available. Representative before/after
-job and step timings, native phase/retry attribution, and a passing complete live
-run remain required before claiming the Issue's latency acceptance criterion.
-No Actions run was dispatched for this investigation.
+That earlier investigation had no live baseline or after run and dispatched no
+Actions run; the subsequent measured runs are reported above.
 
 This changes test orchestration only. Production processing origins, admission
 gates, provider routing, structured trace events, and dashboard projections are
