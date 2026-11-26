@@ -4809,7 +4809,12 @@ def _get_mergeable_state(
     return {"mergeable": mergeable, "merge_state_status": merge_state_status}
 
 
-def _start_mergeability_remediation(pr_number: int, merge_state_status: Optional[str], repo_name: str = "") -> PRActionList:
+def _start_mergeability_remediation(
+    pr_number: int,
+    merge_state_status: Optional[str],
+    repo_name: str = "",
+    github_client: Optional[GitHubClient] = None,
+) -> PRActionList:
     """Implement mergeability remediation flow for non-mergeable PRs.
 
     This function handles the end-to-end flow for non-mergeable PRs:
@@ -4823,6 +4828,8 @@ def _start_mergeability_remediation(pr_number: int, merge_state_status: Optional
     Args:
         pr_number: PR number
         merge_state_status: Current merge state status from GitHub
+        repo_name: Repository containing the pull request
+        github_client: Repository-bound client from the ordinary PR handler
 
     Returns:
         List of action strings describing what was done
@@ -4834,11 +4841,12 @@ def _start_mergeability_remediation(pr_number: int, merge_state_status: Optional
         exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number)
         if exhaustion_info and exhaustion_info.is_exhausted:
             actions.append(f"Mergeability remediation stopped for PR #{pr_number}: repair allowance exhausted for open blocker(s): {', '.join(exhaustion_info.exhausted_blocker_ids)}")
-            client = None
-            try:
-                client = GitHubClient.get_instance()
-            except Exception:
-                pass
+            client = github_client
+            if client is None:
+                try:
+                    client = GitHubClient.get_instance()
+                except Exception:
+                    pass
             publish_exhaustion_comment_deduped(client, repo_name, pr_number, exhaustion_info)
             return actions
 
@@ -4849,8 +4857,8 @@ def _start_mergeability_remediation(pr_number: int, merge_state_status: Optional
 
         # Step 1: Get PR details to determine the base branch and head branch
         try:
-            token = GitHubClient.get_instance().token
-            api = get_ghapi_client(token)
+            client = github_client or GitHubClient.get_instance()
+            api = client.api_for(repo_name, required_permissions={"pull_requests": "read"}) if vars(client).get("auth_provider") is not None else get_ghapi_client(client.token)
             owner, repo = repo_name.split("/")
 
             pr_details = api.pulls.get(owner, repo, pull_number=pr_number)
@@ -4870,13 +4878,14 @@ def _start_mergeability_remediation(pr_number: int, merge_state_status: Optional
             head = pr_details.get("head") or {}
             base = pr_details.get("base") or {}
             durable_snapshot = bool(head.get("sha") and head.get("ref") and (head.get("repo") or {}).get("full_name") and base.get("sha") and base.get("ref") and (base.get("repo") or {}).get("full_name"))
-            selected_local = not (_is_codex_or_claude_pr(pr_details) or _is_jules_pr(pr_details) or _is_dependabot_pr(pr_details))
+            controller_identity = client.get_authenticated_controller_identity(repo_name)
+            selected_local = not (_is_codex_or_claude_pr(pr_details) or _is_jules_pr(pr_details) or _is_dependabot_pr(pr_details, controller_identity))
             if durable_snapshot and selected_local:
                 admission = _offer_selected_local_pr_repair(
                     repo_name,
                     {**pr_details, "number": pr_number},
                     RepairKind.MERGE_CONFLICT,
-                    GitHubClient.get_instance(),
+                    client,
                     conflict_eligible=True,
                 )
                 if admission is not None:
@@ -5684,7 +5693,10 @@ def is_current_head_adversarial_review_blocked(
     consults generic GitHub review state or human review threads (REQ-004):
     only the dedicated reviewer App's own marker-scoped verdict counts.
     """
-    if not _is_pr_adversarial_validation_enabled(config, repo_name) or _is_dependabot_pr(pr_data):
+    if not _is_pr_adversarial_validation_enabled(config, repo_name):
+        return False
+    controller_identity = github_client.get_authenticated_controller_identity(repo_name)
+    if _is_dependabot_pr(pr_data, controller_identity):
         return False
     pr_number = pr_data.get("number")
     if not isinstance(pr_number, int):
@@ -8901,7 +8913,7 @@ def _handle_pr_merge(
             return actions
 
         if progress.route is ProgressRoute.REMEDIATE_CONFLICT:
-            remediation = _start_mergeability_remediation(pr_number, merge_state_status, repo_name)
+            remediation = _start_mergeability_remediation(pr_number, merge_state_status, repo_name, github_client)
             actions.extend(remediation)
             actions.repair_result = remediation.repair_result
             actions.quota_deferred = remediation.quota_deferred

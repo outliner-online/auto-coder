@@ -4,7 +4,7 @@ This module contains tests to verify that backend switching occurs correctly
 during PR processing, specifically in the _fix_pr_issues_with_testing function.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
 
@@ -994,3 +994,58 @@ def test_controller_branch_origin_reaches_definitive_merge_conflict_route():
         )
 
     local_offer.assert_called_once()
+
+
+def test_controller_branch_origin_reaches_durable_mergeability_remediation():
+    from src.auto_coder.github_controller_auth import ControllerIdentity
+    from src.auto_coder.pr_processor import (
+        PRRepairResult,
+        RepairDisposition,
+        _start_mergeability_remediation,
+    )
+
+    client = Mock(token="unused-personal-token")
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    api = Mock()
+    api.pulls.get.return_value = {
+        "number": 128,
+        "user": {"login": "auto-coder[bot]", "id": 101},
+        "body": "",
+        "head": {
+            "ref": "issue-123",
+            "sha": "d" * 40,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "base": {
+            "ref": "main",
+            "sha": "e" * 40,
+            "repo": {"full_name": "owner/repo"},
+        },
+    }
+    admitted = PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, reason="queued")
+
+    with (
+        patch("src.auto_coder.pr_processor.check_pr_repair_exhaustion", return_value=None),
+        patch("src.auto_coder.pr_processor.get_ghapi_client", return_value=api),
+        patch("src.auto_coder.pr_processor.GitHubClient.get_instance") as singleton,
+        patch(
+            "src.auto_coder.pr_processor._offer_selected_local_pr_repair",
+            return_value=admitted,
+        ) as local_offer,
+    ):
+        actions = _start_mergeability_remediation(
+            128,
+            "DIRTY",
+            "owner/repo",
+            client,
+        )
+
+    singleton.assert_not_called()
+    local_offer.assert_called_once_with(
+        "owner/repo",
+        {**api.pulls.get.return_value, "number": 128},
+        ANY,
+        client,
+        conflict_eligible=True,
+    )
+    assert actions.repair_result is admitted
