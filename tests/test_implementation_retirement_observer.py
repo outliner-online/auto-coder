@@ -1668,3 +1668,29 @@ def test_retry_only_mixed_providers_keep_each_attributed_identity(tmp_path):
         ("codex-cloud", "codex-retry", SessionTerminalState.UNKNOWN),
     }
     assert observed.collection_reasons[0].provider == "codex-cloud"
+
+
+def test_unknown_retry_keeps_cloud_manager_session_attributable(tmp_path, monkeypatch):
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.issue_stage_routing import ImplementationRetryRequest
+    from auto_coder.retry_dispatch import RetryDispatchRepository
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    slots = _setup_slots(tmp_path)
+    execution = slots.start_execution(ISSUE_100, generation="generation")
+    assert execution is not None
+    assert slots.record_implementation_pr(ISSUE_100, 201)
+    slots.finish_execution(ISSUE_100, execution)
+    request = ImplementationRetryRequest("retry", REPO, 100, "generation", "attempt", "owned", "execution")
+    RetryDispatchRepository(REPO).claim(request, "jules", "jules", {})
+    manager = CloudManager(REPO)
+    assert manager.add_session(100, "known-jules", provider="jules")
+
+    observed = collect_retirement_observation(ISSUE_100, slots, _make_github_client(), cloud_manager=manager)
+
+    assert observed is not None
+    assert [(session.provider, session.session_id, session.state) for session in observed.provider_sessions] == [
+        ("jules", "known-jules", SessionTerminalState.UNKNOWN)
+    ]
+    assert observed.collection_reasons[0].boundary == "retry-dispatch:retry"

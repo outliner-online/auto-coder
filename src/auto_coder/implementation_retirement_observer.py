@@ -642,6 +642,7 @@ class _JulesOwnershipResolution:
 
     # Session IDs positively attributed to this owner (via CloudManager/CloudRun)
     attributed_sessions: List[str] = field(default_factory=list)
+    attributed_providers: Dict[str, str] = field(default_factory=dict)
     retry_sessions: Tuple[ProviderSessionObservation, ...] = ()
     # Whether ownership resolution is blocked (unsupported/mixed/conflicting)
     blocked: bool = False
@@ -730,13 +731,11 @@ def _resolve_jules_session_ownership(
         resolution.blocked = True
         resolution.blocked_reason = "Retained retry ownership is unavailable"
         resolution.collection_reason = retry_evidence.collection_reasons[0]
-        return resolution
     for session in retry_evidence.sessions:
-        if session.provider != "jules":
+        if session.provider != "jules" and not resolution.blocked:
             resolution.blocked = True
             resolution.blocked_reason = f"Unsupported retry provider {session.provider!r} for owner {owner.key}"
             resolution.collection_reason = RetirementCollectionReason(CollectionReasonKind.UNSUPPORTED_PROVIDER, "retry-dispatch-binding", session.provider)
-            return resolution
 
     if not cloud_provider_stores_available:
         resolution.blocked = True
@@ -753,8 +752,10 @@ def _resolve_jules_session_ownership(
         try:
             binding = cloud_manager.get_binding(owner.number)
             if binding is not None:
-                if binding.task_id and binding.task_id not in resolution.attributed_sessions:
-                    resolution.attributed_sessions.append(binding.task_id)
+                if binding.task_id:
+                    resolution.attributed_providers[binding.task_id] = binding.provider or "unknown"
+                    if binding.task_id not in resolution.attributed_sessions:
+                        resolution.attributed_sessions.append(binding.task_id)
                 if binding.provider and binding.provider.lower() not in ("jules", ""):
                     # Non-Jules provider: blocks this early-release path (REQ-004)
                     resolution.blocked = True
@@ -776,8 +777,10 @@ def _resolve_jules_session_ownership(
             for run in runs:
                 provider = getattr(run, "provider", "") or ""
                 task_id = getattr(run, "task_id", "") or ""
-                if task_id and task_id not in resolution.attributed_sessions:
-                    resolution.attributed_sessions.append(task_id)
+                if task_id:
+                    resolution.attributed_providers[task_id] = provider or "unknown"
+                    if task_id not in resolution.attributed_sessions:
+                        resolution.attributed_sessions.append(task_id)
                 if provider.lower() not in ("jules", ""):
                     resolution.blocked = True
                     resolution.blocked_reason = f"Non-Jules provider {provider!r} found in CloudRun " f"for owner {owner.key}"
@@ -1230,7 +1233,7 @@ def collect_retirement_observation(
             tuple(
                 ProviderSessionObservation(
                     session_id=session_id,
-                    provider=reason.provider or "unknown",
+                    provider=jules_resolution.attributed_providers.get(session_id, reason.provider or "unknown"),
                     state=SessionTerminalState.UNKNOWN,
                 )
                 for session_id in jules_resolution.attributed_sessions

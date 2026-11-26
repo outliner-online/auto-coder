@@ -58,7 +58,8 @@ Reclamation reads the exact repository/Issue retry journal without creating or
 migrating it. Remote accepted receipts remain attributable even when a process
 stopped before CloudManager, CloudRun, or slot membership was projected. A
 claimed or indeterminate remote submission without a session receipt remains
-explicitly unknown. Captured remote predecessors remain evidence even when the
+explicitly unknown. An uncertain retry alone does not stop collection of available CloudManager
+and CloudRun session attribution. Captured remote predecessors remain evidence even when the
 successor used a local backend or definitely did not start.
 
 Historical Jules evidence stays unknown on both the ordinary and Codex
