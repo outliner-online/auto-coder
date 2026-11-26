@@ -206,7 +206,7 @@ from .runtime_locks import LockAcquisitionTimeout, ensure_lock_directory, file_l
 from .security_utils import redact_string
 from .shutdown_context import new_work_allowed
 from .speculative_jules_lifecycle import get_speculative_jules_lifecycle
-from .stale_jules_recovery import capture_stale_jules_recovery, current_stale_jules_recovery_context, publish_recovery_attempt_comment, stale_jules_recovery_context
+from .stale_jules_recovery import stale_jules_recovery_context
 from .test_log_utils import extract_all_failed_tests, extract_first_failed_test, extract_important_errors
 from .test_result import TestResult
 from .trace_logger import get_trace_logger
@@ -4668,12 +4668,6 @@ def _close_stale_jules_pr(
     result = StaleJulesPRResult()
     pr_number = int(pr_data["number"])
 
-    if stage_routing is None:
-        ambient = current_stale_jules_recovery_context()
-        if ambient is not None:
-            stage_routing = ambient.stage_routing
-            implementation_slots = ambient.implementation_slots
-
     try:
         from .llm_backend_config import is_jules_mode_enabled
 
@@ -4735,24 +4729,7 @@ def _close_stale_jules_pr(
             if resolved_issue:
                 issue_numbers = [resolved_issue]
 
-        # Durably record the automatic recovery identity (R) for every linked
-        # issue whose current Implementation generation (G) can be
-        # established, strictly before closing the PR or publishing any
-        # attempt effect (Issue #2286 REQ-001). A conflict (this exact PR
-        # already bound to a different, now-stale generation) or an
-        # unresolvable G silently falls back to the historical unlinked
-        # attempt increment for that one issue below.
-        recoveries: Dict[int, ImplementationRetryRequest] = {}
-        if stage_routing is not None:
-            for issue_number in issue_numbers:
-                generation = _resolve_current_implementation_generation(stage_routing, implementation_slots, repo_name, issue_number)
-                if generation is None:
-                    continue
-                authority = capture_stale_jules_recovery(stage_routing, repo_name, issue_number, pr_number, generation)
-                if authority is not None:
-                    recoveries[issue_number] = authority
-
-        close_comment = f"Auto-Coder: Closing this PR because Jules did not get CI to pass within {config.JULES_PR_CI_TIMEOUT_HOURS} hours after the PR was created. The linked issue(s) will be retried with an incremented attempt count."
+        close_comment = f"Auto-Coder: Closing this PR because Jules did not get CI to pass within {config.JULES_PR_CI_TIMEOUT_HOURS} hours after the PR was created. Automatic Jules retry is retired; no replacement attempt will be started."
         client = github_client or GitHubClient.get_instance()
         client.close_pr(repo_name, pr_number, close_comment)
         _remove_reviewer_sessions_for_closed_pr(repo_name, pr_number)
@@ -4766,33 +4743,9 @@ def _close_stale_jules_pr(
             details={"timeout_hours": config.JULES_PR_CI_TIMEOUT_HOURS, "linked_issues": issue_numbers},
         )
 
-        if not issue_numbers:
-            logger.warning(f"No linked issue found for closed Jules PR #{pr_number}, cannot increment attempt")
-            result.actions.append(f"No linked issue found for PR #{pr_number} to increment attempt")
-            return result
-
-        for issue_number in issue_numbers:
-            recovery = recoveries.get(issue_number)
-            if recovery is not None:
-                try:
-                    new_attempt = publish_recovery_attempt_comment(client, repo_name, issue_number, recovery.request_id)
-                except Exception as e:
-                    logger.error(f"Failed to publish stale-Jules recovery attempt for issue #{issue_number}: {e}")
-                    result.actions.append(f"Failed to publish stale-Jules recovery attempt for issue #{issue_number}: {e}")
-                else:
-                    if new_attempt is not None:
-                        result.actions.append(f"Recorded stale-Jules recovery for issue #{issue_number} (request={recovery.request_id}, attempt={new_attempt})")
-                    else:
-                        result.actions.append(f"Stale-Jules recovery for issue #{issue_number} recorded (request={recovery.request_id}); attempt comment deferred pending readable prior evidence")
-            else:
-                try:
-                    new_attempt = increment_attempt(repo_name, issue_number)
-                    result.actions.append(f"Incremented attempt for issue #{issue_number} to {new_attempt}")
-                except Exception as e:
-                    logger.error(f"Failed to increment attempt for issue #{issue_number}: {e}")
-                    result.actions.append(f"Failed to increment attempt for issue #{issue_number}: {e}")
-
-            result.issue_numbers.append(issue_number)
+        # Linked Issues are intentionally not returned for candidate requeue.
+        # Historical retry rows remain untouched and inspectable, but Jules
+        # staleness no longer creates or dispatches replacement work.
 
     except Exception as e:
         logger.error(f"Error handling stale Jules PR #{pr_number}: {e}")

@@ -52,9 +52,9 @@ class TestCloseStaleJulesPR:
         assert close_args[0] == "owner/repo"
         assert close_args[1] == 4643
         assert "12 hours" in close_args[2]
-        mock_increment.assert_called_once_with("owner/repo", 4636)
+        mock_increment.assert_not_called()
         assert any("Closed stale Jules PR #4643" in action for action in actions)
-        assert any("Incremented attempt for issue #4636 to 3" in action for action in actions)
+        assert not any("Incremented attempt" in action for action in actions)
 
     @patch("src.auto_coder.pr_processor.increment_attempt")
     def test_keeps_pr_open_before_timeout(self, mock_increment):
@@ -197,139 +197,8 @@ class TestCloseStaleJulesPR:
         actions = result.actions
 
         mock_resolve.assert_called_once_with("owner/repo", pr_data, github_client)
-        mock_increment.assert_called_once_with("owner/repo", 4636)
+        mock_increment.assert_not_called()
         assert any("Closed stale Jules PR #4643" in action for action in actions)
-
-
-class TestCloseStaleJulesPrAutomaticRecovery:
-    """Issue #2286: closing a stale Jules PR captures a durable recovery
-    identity (R) instead of a bare, unlinked attempt-counter increment,
-    whenever a current Implementation generation for the linked issue is
-    available."""
-
-    @staticmethod
-    def _routing_with_generation(tmp_path, issue_number: int, generation: str) -> IssueStageRoutingStore:
-        routing = IssueStageRoutingStore(tmp_path / "routing.sqlite3")
-        routing.reconcile(
-            implementation_classification(
-                "owner/repo",
-                issue_number,
-                generation,
-                priority=0,
-                admitted=True,
-                requirements=(),
-            )
-        )
-        return routing
-
-    @patch("src.auto_coder.pr_processor._remove_reviewer_sessions_for_closed_pr")
-    def test_captures_recovery_identity_instead_of_bare_increment(self, _mock_remove_sessions, tmp_path):
-        routing = self._routing_with_generation(tmp_path, 4636, "generation-a")
-        github_client = Mock()
-        github_client.get_pr_review_threads_strict.return_value = []
-        github_client.get_issue_comments.return_value = []
-        config = AutomationConfig()
-        config.JULES_PR_CI_TIMEOUT_HOURS = 12
-        pr_data = _jules_pr_data(hours_old=13)
-        checks = MagicMock(spec=GitHubActionsStatusResult, success=False, in_progress=False)
-
-        result = _close_stale_jules_pr(github_client, "owner/repo", pr_data, config, checks, stage_routing=routing)
-
-        github_client.close_pr.assert_called_once()
-        expected_request_id = recovery_request_id("owner/repo", 4636, 4643)
-        authority = routing.retry_request(expected_request_id)
-        assert authority is not None
-        assert authority.status == "pending"
-        assert authority.repository == "owner/repo"
-        assert authority.target_number == 4636
-        assert authority.generation == "generation-a"
-
-        github_client.add_comment_to_issue.assert_called_once()
-        posted_body = github_client.add_comment_to_issue.call_args[0][2]
-        assert "Auto-Coder Attempt: 1" in posted_body
-        assert expected_request_id in posted_body
-        assert any(f"request={expected_request_id}" in action for action in result.actions)
-
-    @patch("src.auto_coder.pr_processor._remove_reviewer_sessions_for_closed_pr")
-    def test_reprocessing_reuses_the_same_recovery_and_never_reposts(self, _mock_remove_sessions, tmp_path):
-        """REQ-001/REQ-002: a restart or duplicate wake over the same stale
-        PR/issue pair must reuse the same durable R and never publish a
-        second attempt comment for it."""
-        routing = self._routing_with_generation(tmp_path, 4636, "generation-a")
-        github_client = Mock()
-        github_client.get_pr_review_threads_strict.return_value = []
-        posted_comments: list = []
-        github_client.get_issue_comments.side_effect = lambda *_a, **_k: list(posted_comments)
-
-        def _record_comment(_repo, _issue, body):
-            posted_comments.append({"body": body, "created_at": "2020-01-01T00:00:00Z"})
-
-        github_client.add_comment_to_issue.side_effect = _record_comment
-        config = AutomationConfig()
-        config.JULES_PR_CI_TIMEOUT_HOURS = 12
-        pr_data = _jules_pr_data(hours_old=13)
-        checks = MagicMock(spec=GitHubActionsStatusResult, success=False, in_progress=False)
-
-        _close_stale_jules_pr(github_client, "owner/repo", pr_data, config, checks, stage_routing=routing)
-        assert github_client.add_comment_to_issue.call_count == 1
-
-        # Re-observe the same (now-closed) PR on a later cycle: the PR is
-        # already closed so the function returns immediately, exactly as it
-        # does today for any already-closed PR.
-        closed_pr_data = dict(pr_data)
-        closed_pr_data["state"] = "closed"
-        second = _close_stale_jules_pr(github_client, "owner/repo", closed_pr_data, config, checks, stage_routing=routing)
-        assert second.closed is False
-        assert github_client.add_comment_to_issue.call_count == 1
-
-        expected_request_id = recovery_request_id("owner/repo", 4636, 4643)
-        assert routing.retry_requests("owner/repo", 4636) == (routing.retry_request(expected_request_id),)
-
-    @patch("src.auto_coder.pr_processor._remove_reviewer_sessions_for_closed_pr")
-    @patch("src.auto_coder.pr_processor.increment_attempt")
-    def test_falls_back_to_legacy_increment_when_generation_is_unresolvable(self, mock_increment, _mock_remove_sessions, tmp_path):
-        """No Implementation lane item and no started owner: G cannot be
-        established, so this preserves today's unlinked-increment behavior
-        rather than guessing a generation (Issue #2286 REQ-001)."""
-        routing = IssueStageRoutingStore(tmp_path / "routing.sqlite3")
-        github_client = Mock()
-        github_client.get_pr_review_threads_strict.return_value = []
-        config = AutomationConfig()
-        config.JULES_PR_CI_TIMEOUT_HOURS = 12
-        pr_data = _jules_pr_data(hours_old=13)
-        checks = MagicMock(spec=GitHubActionsStatusResult, success=False, in_progress=False)
-        mock_increment.return_value = 1
-
-        result = _close_stale_jules_pr(github_client, "owner/repo", pr_data, config, checks, stage_routing=routing)
-
-        mock_increment.assert_called_once_with("owner/repo", 4636)
-        assert routing.retry_requests("owner/repo", 4636) == ()
-        assert any("Incremented attempt for issue #4636 to 1" in action for action in result.actions)
-
-    @patch("src.auto_coder.pr_processor._remove_reviewer_sessions_for_closed_pr")
-    def test_conflicting_generation_withholds_grant_and_falls_back(self, _mock_remove_sessions, tmp_path):
-        """REQ-005: a durable R already bound to a different generation for
-        this exact PR must not silently rebind; the issue falls back to a
-        legacy increment instead of receiving a second, conflicting grant."""
-        routing = self._routing_with_generation(tmp_path, 4636, "generation-a")
-        expected_request_id = recovery_request_id("owner/repo", 4636, 4643)
-        routing.accept_retry_request(expected_request_id, "owner/repo", 4636, "generation-stale")
-
-        github_client = Mock()
-        github_client.get_pr_review_threads_strict.return_value = []
-        config = AutomationConfig()
-        config.JULES_PR_CI_TIMEOUT_HOURS = 12
-        pr_data = _jules_pr_data(hours_old=13)
-        checks = MagicMock(spec=GitHubActionsStatusResult, success=False, in_progress=False)
-
-        with patch("src.auto_coder.pr_processor.increment_attempt", return_value=1) as mock_increment:
-            result = _close_stale_jules_pr(github_client, "owner/repo", pr_data, config, checks, stage_routing=routing)
-
-        mock_increment.assert_called_once_with("owner/repo", 4636)
-        stored = routing.retry_request(expected_request_id)
-        assert stored is not None
-        assert stored.generation == "generation-stale"
-        assert any("Incremented attempt for issue #4636 to 1" in action for action in result.actions)
 
 
 class TestHandlePrMergeJulesPR:
@@ -377,7 +246,7 @@ class TestHandlePrMergeJulesPR:
         actions = _handle_pr_merge(github_client, "owner/repo", pr_data, config, {})
 
         github_client.close_pr.assert_called_once()
-        mock_increment.assert_called_once_with("owner/repo", 4636)
+        mock_increment.assert_not_called()
         mock_send_feedback.assert_not_called()
         mock_fix_issues.assert_not_called()
         mock_checkout.assert_not_called()
@@ -460,7 +329,7 @@ class TestStaleJulesPRWithAutoCoderLabel:
         result = process_pull_request(github_client, config, "owner/repo", pr_data)
 
         github_client.close_pr.assert_called_once()
-        mock_increment.assert_called_once_with("owner/repo", 4636)
+        mock_increment.assert_not_called()
         assert any("Closed stale Jules PR #4643" in action for action in result.actions_taken)
         assert not any("already being processed" in action for action in result.actions_taken)
 
@@ -487,7 +356,7 @@ class TestStaleJulesPRWithAutoCoderLabel:
             candidates = engine._get_candidates("owner/repo")
 
         github_client.close_pr.assert_called_once()
-        mock_increment.assert_called_once_with("owner/repo", 4636)
+        mock_increment.assert_not_called()
         assert all(candidate.data.get("number") != 4643 for candidate in candidates)
 
     @patch("src.auto_coder.pr_processor.increment_attempt")
@@ -512,7 +381,7 @@ class TestStaleJulesPRWithAutoCoderLabel:
             result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
         github_client.close_pr.assert_called_once()
-        mock_increment.assert_called_once_with("owner/repo", 4636)
+        mock_increment.assert_not_called()
         mock_process.assert_not_called()
         assert result.success is True
         assert any("Closed stale Jules PR #4643" in action for action in result.actions)
@@ -538,7 +407,7 @@ class TestUnlockAndRetryLinkedIssue:
         result = _close_stale_jules_pr(github_client, "owner/repo", pr_data, config, checks)
 
         github_client.remove_labels.assert_not_called()
-        assert result.issue_numbers == [4636]
+        assert result.issue_numbers == []
         assert not any("Removed @auto-coder" in action for action in result.actions)
 
     @patch("src.auto_coder.pr_processor.increment_attempt")
@@ -555,7 +424,7 @@ class TestUnlockAndRetryLinkedIssue:
         result = _close_stale_jules_pr(github_client, "owner/repo", pr_data, config, checks)
 
         github_client.remove_labels.assert_not_called()
-        assert result.issue_numbers == [4636]
+        assert result.issue_numbers == []
 
     def test_single_candidate_continuation_ignores_source_issue_processing_label(self, tmp_path):
         """The real stale-PR handoff admits identical source Issues with either label state."""
@@ -609,9 +478,8 @@ class TestUnlockAndRetryLinkedIssue:
             ):
                 result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
-            take_issue.assert_called_once()
-            assert take_issue.call_args.args[1] == issue_data
-            increment.assert_called_once_with("owner/repo", 4636)
+            take_issue.assert_not_called()
+            increment.assert_not_called()
             github_client.remove_labels.assert_not_called()
             outcomes.append(
                 (
@@ -622,8 +490,7 @@ class TestUnlockAndRetryLinkedIssue:
             )
 
         assert outcomes[0] == outcomes[1]
-        assert any("Started a new attempt for issue #4636" in action for action in outcomes[0][0])
-        assert any("Created branch issue-4636/attempt-4" in action for action in outcomes[0][0])
+        assert not any("Started a new attempt" in action for action in outcomes[0][0])
 
     @patch("src.auto_coder.pr_processor.increment_attempt")
     @patch("src.auto_coder.pr_processor._check_github_actions_status")

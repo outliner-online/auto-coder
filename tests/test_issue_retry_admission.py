@@ -3,7 +3,6 @@
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.issue_retry_admission import IssueRetryAdmissionService, IssueRetryDisposition, IssueRetryOrigin
 from auto_coder.issue_stage_routing import IssueStageRoutingStore
-from auto_coder.stale_jules_recovery import capture_stale_jules_recovery
 
 REPOSITORY = "owner/repository"
 
@@ -46,42 +45,13 @@ def test_competing_manual_request_cannot_pass_unresolved_request(tmp_path):
     assert slots.active_execution_ids(ImplementationOwner("issue", 7)) == ()
 
 
-def test_stale_jules_wait_resumes_same_request_without_capacity_bypass(tmp_path):
-    service, routing, slots = _service(tmp_path, capacity=1)
-    owner = ImplementationOwner("issue", 7)
-    predecessor = slots.start_execution(owner, generation="generation-a")
-    assert predecessor is not None
-    assert slots.record_provider_session(owner, "stale-session")
-    slots.finish_execution(owner, predecessor)
-    authority = capture_stale_jules_recovery(routing, REPOSITORY, 7, 91, "generation-a")
-    assert authority is not None
-
-    waiting = service.admit(REPOSITORY, 7, "generation-a", authority.request_id, IssueRetryOrigin.STALE_JULES)
-    assert waiting.disposition is IssueRetryDisposition.DEFERRED
-    assert routing.retry_request(authority.request_id) == authority
-
-    assert slots.finish_provider_session(owner, "stale-session")
-    blocker = ImplementationOwner("issue", 8)
-    assert slots.start_execution(blocker, generation="other") is not None
-    capacity_wait = service.admit(REPOSITORY, 7, "generation-a", authority.request_id, IssueRetryOrigin.STALE_JULES)
-    assert capacity_wait.disposition is IssueRetryDisposition.DEFERRED
-    assert capacity_wait.authority is not None and capacity_wait.authority.request_id == authority.request_id
-
-    for execution in slots.active_execution_ids(blocker):
-        slots.finish_execution(blocker, execution)
-    assert slots.release_unbound_idle_owner(blocker)
-    resumed = service.admit(REPOSITORY, 7, "generation-a", authority.request_id, IssueRetryOrigin.STALE_JULES)
-    assert resumed.disposition is IssueRetryDisposition.OWNED
-    assert resumed.authority is not None and resumed.authority.attempt_id == authority.attempt_id
-
-
-def test_stale_jules_generation_mismatch_never_acquires(tmp_path):
+def test_stale_jules_origin_is_retired_without_mutating_history(tmp_path):
     service, routing, slots = _service(tmp_path)
-    authority = capture_stale_jules_recovery(routing, REPOSITORY, 7, 91, "generation-a")
-    assert authority is not None
+    authority = routing.accept_retry_request("stale-jules-recovery-history", REPOSITORY, 7, "generation-a")
 
-    stale = service.admit(REPOSITORY, 7, "generation-b", authority.request_id, IssueRetryOrigin.STALE_JULES)
+    retired = service.admit(REPOSITORY, 7, "generation-a", authority.request_id, IssueRetryOrigin.STALE_JULES)
 
-    assert stale.disposition is IssueRetryDisposition.STALE
-    assert stale.authority == authority
+    assert retired.disposition is IssueRetryDisposition.DEFERRED
+    assert retired.authority == authority
+    assert routing.retry_request(authority.request_id) == authority
     assert slots.active_execution_ids(ImplementationOwner("issue", 7)) == ()

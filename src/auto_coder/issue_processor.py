@@ -1470,6 +1470,11 @@ def handle_stale_jules_issue_sessions(
     Returns:
         StaleJulesIssueResult describing which issues were handled.
     """
+    # Jules no-PR timeouts are historical observations only. They must not
+    # stop/release an old execution in a way that admits a successor, publish
+    # an attempt comment, or submit replacement provider work.
+    return StaleJulesIssueResult()
+
     result = StaleJulesIssueResult()
     timeout_hours = config.JULES_ISSUE_PR_TIMEOUT_HOURS
 

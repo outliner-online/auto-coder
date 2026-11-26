@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator, List, Optional
 
 from .attempt_manager import ATTEMPT_TRIGGER_PREFIX, extract_attempt_number, extract_attempt_trigger, format_attempt_comment
-from .issue_stage_routing import ImplementationRetryRequest, IssueStageRoutingStore, RetryRequestConflict
+from .issue_stage_routing import ImplementationRetryRequest, IssueStageRoutingStore
 from .logger_config import get_logger
 
 logger = get_logger(__name__)
@@ -118,21 +118,13 @@ def capture_stale_jules_recovery(
     pr_number: int,
     generation: str,
 ) -> Optional[ImplementationRetryRequest]:
-    """Durably record recovery identity ``R`` before any PR-close or attempt effect.
+    """Return no authority: stale-Jules automatic recovery is retired.
 
-    Idempotent: reprocessing the same (repository, Issue, PR) triple returns
-    the same durable record. Returns ``None`` when a durable ``R`` for this
-    exact triple already exists bound to a *different* Implementation
-    generation -- the Issue's specification changed underneath an
-    unconsumed grant, which permanently disqualifies it from an automatic
-    retry (REQ-005); a fresh stale PR would be required to try again.
+    The function remains importable while older integrations are upgraded,
+    but it deliberately performs no store mutation. Existing rows remain
+    readable through :class:`IssueStageRoutingStore` for attribution.
     """
-    request_id = recovery_request_id(repo_name, issue_number, pr_number)
-    try:
-        return routing.accept_retry_request(request_id, repo_name, issue_number, generation)
-    except RetryRequestConflict:
-        logger.warning(f"Stale-Jules recovery {request_id} for issue #{issue_number} is already bound to a " "different Implementation generation than the one observed now; withholding an " "automatic retry grant for this PR")
-        return None
+    return None
 
 
 def find_pending_stale_jules_recovery(
@@ -140,16 +132,7 @@ def find_pending_stale_jules_recovery(
     repo_name: str,
     issue_number: int,
 ) -> Optional[ImplementationRetryRequest]:
-    """Return this Issue's pending automatic stale-Jules recovery request, if any.
-
-    Only a ``pending`` request is returned: an ``owned`` request has already
-    acquired its successor attempt (nothing left to admit), and an
-    ``invalidated`` one is permanently disqualified (REQ-005) and must never
-    be treated as authorizing a fresh start.
-    """
-    for request in routing.retry_requests(repo_name, issue_number):
-        if request.status == "pending" and is_recovery_request_id(request.request_id):
-            return request
+    """Never expose historical stale-Jules rows as pending authority."""
     return None
 
 
