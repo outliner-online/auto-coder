@@ -90,6 +90,18 @@ class RenewableProvider:
         return None
 
 
+def test_ci_authority_namespace_is_stable_across_token_renewal():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+
+    first = client.authority_key_for("owner/repo", required_permissions={"actions": "read", "checks": "read"})
+    second = client.authority_key_for("owner/repo", required_permissions={"checks": "read", "actions": "read"})
+
+    assert first == second
+    assert "installation-one" not in first
+    assert "installation-two" not in second
+
+
 def test_linked_pr_reconciliation_uses_installation_for_both_reads(monkeypatch):
     provider = RenewableProvider()
     client = GitHubClient(auth_provider=provider, repository="owner/repo")

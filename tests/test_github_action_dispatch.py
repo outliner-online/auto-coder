@@ -9,12 +9,11 @@ from auto_coder.util.github_action import trigger_workflow_dispatch
 
 
 class TestTriggerWorkflowDispatch(unittest.TestCase):
-    @patch("auto_coder.util.github_action.get_ghapi_client")
     @patch("auto_coder.util.github_action.GitHubClient")
-    def test_trigger_workflow_dispatch_arguments(self, mock_gh_client_cls, mock_get_ghapi):
+    def test_trigger_workflow_dispatch_arguments(self, mock_gh_client_cls):
         # Setup
         mock_api = MagicMock()
-        mock_get_ghapi.return_value = mock_api
+        mock_gh_client_cls.get_instance.return_value.api_for.return_value = mock_api
 
         repo_name = "owner/repo"
         workflow_id = "ci.yml"
@@ -39,12 +38,11 @@ class TestTriggerWorkflowDispatch(unittest.TestCase):
         # Ensure it was NOT passed positionally (should only be 3 args)
         self.assertEqual(len(args), 3, "Should not have 4th positional argument")
 
-    @patch("auto_coder.util.github_action.get_ghapi_client")
     @patch("auto_coder.util.github_action.GitHubClient")
-    def test_trigger_workflow_dispatch_fallback(self, mock_gh_client_cls, mock_get_ghapi):
+    def test_trigger_workflow_dispatch_fallback(self, mock_gh_client_cls):
         # Setup
         mock_api = MagicMock()
-        mock_get_ghapi.return_value = mock_api
+        mock_gh_client_cls.get_instance.return_value.api_for.return_value = mock_api
 
         repo_name = "owner/repo"
         workflow_id = "ci.yml"
@@ -92,12 +90,11 @@ class TestTriggerWorkflowDispatch(unittest.TestCase):
         new_content_decoded = base64.b64decode(call_kwargs["content"]).decode("utf-8")
         self.assertIn("workflow_dispatch:", new_content_decoded)
 
-    @patch("auto_coder.util.github_action.get_ghapi_client")
     @patch("auto_coder.util.github_action.GitHubClient")
-    def test_trigger_workflow_dispatch_duplicate_fix(self, mock_gh_client_cls, mock_get_ghapi):
+    def test_trigger_workflow_dispatch_duplicate_fix(self, mock_gh_client_cls):
         # Setup
         mock_api = MagicMock()
-        mock_get_ghapi.return_value = mock_api
+        mock_gh_client_cls.get_instance.return_value.api_for.return_value = mock_api
 
         repo_name = "owner/repo"
         workflow_id = "ci.yml"
@@ -134,12 +131,11 @@ class TestTriggerWorkflowDispatch(unittest.TestCase):
         new_content_decoded = base64.b64decode(call_kwargs["content"]).decode("utf-8")
         self.assertEqual(new_content_decoded.count("workflow_dispatch:"), 1)
 
-    @patch("auto_coder.util.github_action.get_ghapi_client")
     @patch("auto_coder.util.github_action.GitHubClient")
-    def test_trigger_workflow_dispatch_definite_rejection(self, mock_gh_client_cls, mock_get_ghapi):
+    def test_trigger_workflow_dispatch_definite_rejection(self, mock_gh_client_cls):
         """A completed 4xx response (not a 422) is a definite rejection (REQ-005)."""
         mock_api = MagicMock()
-        mock_get_ghapi.return_value = mock_api
+        mock_gh_client_cls.get_instance.return_value.api_for.return_value = mock_api
 
         rejection = Exception("404 Not Found")
         rejection.status_code = 404
@@ -150,12 +146,11 @@ class TestTriggerWorkflowDispatch(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(result.outcome, DispatchOutcome.REJECTED)
 
-    @patch("auto_coder.util.github_action.get_ghapi_client")
     @patch("auto_coder.util.github_action.GitHubClient")
-    def test_trigger_workflow_dispatch_indeterminate_on_transport_error(self, mock_gh_client_cls, mock_get_ghapi):
+    def test_trigger_workflow_dispatch_indeterminate_on_transport_error(self, mock_gh_client_cls):
         """A transport-level failure (no HTTP status) is indeterminate, not rejected (REQ-005)."""
         mock_api = MagicMock()
-        mock_get_ghapi.return_value = mock_api
+        mock_gh_client_cls.get_instance.return_value.api_for.return_value = mock_api
 
         mock_api.actions.create_workflow_dispatch.side_effect = ConnectionResetError("connection reset by peer")
 
@@ -164,15 +159,14 @@ class TestTriggerWorkflowDispatch(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(result.outcome, DispatchOutcome.INDETERMINATE)
 
-    @patch("auto_coder.util.github_action.get_ghapi_client")
     @patch("auto_coder.util.github_action.GitHubClient")
-    def test_trigger_workflow_dispatch_ignores_misleading_status_text_in_transport_error(self, mock_gh_client_cls, mock_get_ghapi):
+    def test_trigger_workflow_dispatch_ignores_misleading_status_text_in_transport_error(self, mock_gh_client_cls):
         """A transport-level exception (no structured HTTP status) must never be
         classified from its free-form text, even when that text happens to
         embed a misleading 'NNN <Reason>'-shaped substring (e.g. from a
         corrupted response header) that looks like an HTTP status line."""
         mock_api = MagicMock()
-        mock_get_ghapi.return_value = mock_api
+        mock_gh_client_cls.get_instance.return_value.api_for.return_value = mock_api
 
         transport_error = ConnectionError("illegal header line: bytearray(b'X-Error: 404 Not Found\\x00')")
         mock_api.actions.create_workflow_dispatch.side_effect = transport_error
@@ -182,14 +176,13 @@ class TestTriggerWorkflowDispatch(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(result.outcome, DispatchOutcome.INDETERMINATE)
 
-    @patch("auto_coder.util.github_action.get_ghapi_client")
     @patch("auto_coder.util.github_action.GitHubClient")
-    def test_trigger_workflow_dispatch_misleading_422_text_does_not_trigger_fallback(self, mock_gh_client_cls, mock_get_ghapi):
+    def test_trigger_workflow_dispatch_misleading_422_text_does_not_trigger_fallback(self, mock_gh_client_cls):
         """A transport-level exception whose message merely contains '422' text
         (no structured status) must not enter the workflow-file repair
         fallback or resend the dispatch."""
         mock_api = MagicMock()
-        mock_get_ghapi.return_value = mock_api
+        mock_gh_client_cls.get_instance.return_value.api_for.return_value = mock_api
 
         transport_error = ConnectionError("illegal header line: bytearray(b'X-Error: 422 Unprocessable Entity\\x00')")
         mock_api.actions.create_workflow_dispatch.side_effect = transport_error
@@ -216,9 +209,8 @@ class TestTriggerWorkflowDispatchRealHttpAdapter(unittest.TestCase):
         with (
             patch("auto_coder.util.gh_cache.get_caching_client", side_effect=_fake_get_caching_client),
             patch("auto_coder.util.github_action.GitHubClient") as mock_gh_client_cls,
-            patch("auto_coder.util.github_action.get_ghapi_client", side_effect=get_ghapi_client),
         ):
-            mock_gh_client_cls.get_instance.return_value.token = "test-token"
+            mock_gh_client_cls.get_instance.return_value.api_for.side_effect = lambda *_args, **_kwargs: get_ghapi_client("test-token")
             return trigger_workflow_dispatch(repo_name, workflow_id, ref)
 
     def test_503_with_numeric_repo_name_is_indeterminate_not_rejected(self):

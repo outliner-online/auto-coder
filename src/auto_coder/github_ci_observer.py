@@ -6,7 +6,6 @@ approval) consume its immutable output at a separate boundary.
 
 from __future__ import annotations
 
-import hashlib
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -150,17 +149,13 @@ def is_current_ci_observation(snapshot: CIObservationSnapshot) -> bool:
         return snapshot.invalidation_epoch == phase.epoch and any(cached is snapshot for cached in phase.cache.values())
 
 
-def _credential_identity(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
-
-
-def observe_ci(api: Any, token: str, repository: str, pr_number: int, head_sha: str, api_origin: str = "https://api.github.com") -> CIObservationSnapshot:
+def observe_ci(api: Any, authority_key: str, repository: str, pr_number: int, head_sha: str, api_origin: str = "https://api.github.com") -> CIObservationSnapshot:
     """Read every targeted checks/runs page and return fail-closed facts."""
     if hasattr(api, "headers") and isinstance(api.headers, dict):
         api.headers.setdefault("Cache-Control", "no-cache")
     phase = getattr(_local, "phase", None) or _Phase()
     owner, repo = repository.split("/", 1)
-    credential = _credential_identity(token)
+    credential = authority_key
     key = (api_origin, repository, pr_number, head_sha, credential)
     subject = ObservationSubject(api_origin, repository, pr_number, head_sha)
     request = ObservationRequest("github-actions", f"checks+workflows;head={head_sha};per_page={_PAGE_SIZE};auth={credential}")
@@ -236,10 +231,10 @@ def observe_ci(api: Any, token: str, repository: str, pr_number: int, head_sha: 
         return snapshot
 
 
-def approve_waiting_deployment(api: Any, token: str, repository: str, run_id: int, run_attempt: int, head_sha: str) -> bool | None:
+def approve_waiting_deployment(api: Any, authority_key: str, repository: str, run_id: int, run_attempt: int, head_sha: str) -> bool | None:
     """Freshly revalidate and approve one authoritative waiting execution."""
     owner, repo = repository.split("/", 1)
-    credential = _credential_identity(token)
+    credential = authority_key
     lock_key = (repository, run_id)
     with _approval_guard:
         lock = _approval_locks.setdefault(lock_key, threading.Lock())

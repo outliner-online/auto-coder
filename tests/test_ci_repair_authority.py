@@ -78,8 +78,9 @@ def test_authority_binds_open_exact_head_and_observation():
         "head": {"sha": "head"},
     }
     observed = snapshot(workflow("2", 2, CIConclusion.FAILURE))
+    client.api_for.return_value = MagicMock()
+    client.authority_key_for.return_value = "controller-authority"
     with (
-        patch("auto_coder.ci_repair_authority.get_ghapi_client"),
         patch("auto_coder.ci_repair_authority.observe_ci", return_value=observed),
         patch(
             "auto_coder.ci_repair_authority.ci_observation_merge_authority",
