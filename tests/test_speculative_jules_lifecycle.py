@@ -343,7 +343,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         },
         50: {
             "number": 50,
-            "state": "closed",
+            "state": "open",
             "body": "",
             "changed_files": 1,
             "user": {"login": "octocat", "type": "User"},
@@ -383,16 +383,34 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         ordinary_result = process_pull_request(github, AutomationConfig(), repository, strict_prs[50])
         assert all("Speculative Jules" not in action for action in ordinary_result.actions_taken)
 
-        api = Mock()
-        api.pulls.get.return_value = strict_prs[41]
+        from auto_coder.merge_operation_state import MergeOperationStore
+
+        metadata_api = Mock()
+        metadata_api.pulls.get.side_effect = lambda _owner, _repo, number: strict_prs[number]
+        outbound_api = Mock()
+        outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged-sha"}
+        merge_store = MergeOperationStore(db_path=tmp_path / "merge-operations.db")
         with (
-            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api),
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=merge_store),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
+            patch("auto_coder.pr_processor._close_linked_issues"),
+            patch("auto_coder.pr_processor._archive_jules_session"),
         ):
             github.get_issue.return_value = {"state": "open", "body": "requirements-v1"}
+            # Both historical artifacts reach the real final entry and are
+            # refused before the durable adapter can dispatch a mutation.
+            assert _merge_pr(repository, 42, {}, AutomationConfig(), github_client=github) is False
             assert _merge_pr(repository, 41, {}, AutomationConfig(), github_client=github) is False
-        api.pulls.merge.assert_not_called()
+            outbound_api.pulls.merge.assert_not_called()
+
+            # The proven-unrelated control traverses the same final gate and
+            # reaches the actual durable merge adapter transport exactly once.
+            assert _merge_pr(repository, 50, {}, AutomationConfig(), github_client=github) is True
+
+        outbound_api.pulls.merge.assert_called_once_with("owner", "repo", 50, merge_method="squash", sha="head-50")
     finally:
         configure_speculative_jules_lifecycle(None)
 
