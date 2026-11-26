@@ -1914,6 +1914,9 @@ class GitHubClient:
             items: list[object] = []
             page = 1
             while True:
+                if self._auth_provider is not None:
+                    credential = self._credential_for(repo_name, {"issues": "read"})
+                    headers["Authorization"] = f"Bearer {credential.token}"
                 response = _caching_request(
                     client,
                     "GET",

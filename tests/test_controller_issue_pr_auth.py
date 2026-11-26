@@ -90,6 +90,29 @@ def test_issue_comments_use_controller_credentials_at_each_page():
     ]
 
 
+def test_issue_authority_read_renews_repository_credential_on_each_page():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues/1/sub_issues")
+    transport.request.side_effect = [
+        httpx.Response(200, json=[{"number": n} for n in range(2, 102)], request=request),
+        httpx.Response(200, json=[{"number": 102}], request=request),
+    ]
+    sent = []
+
+    def capture(*args, **kwargs):
+        sent.append(kwargs["headers"]["Authorization"])
+        return transport.request(*args, **kwargs)
+
+    with patch("auto_coder.util.gh_cache.get_caching_client") as factory:
+        factory.return_value.request.side_effect = capture
+        result = client.get_direct_sub_issues_strict("owner/repo", 1)
+
+    assert len(result) == 101
+    assert sent == ["Bearer installation-one", "Bearer installation-two"]
+
+
 def test_same_local_marker_only_exempts_proven_controller_actor():
     identity = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
     body = "<!-- auto-coder:local-llm -->\n\nCloses #2876"
