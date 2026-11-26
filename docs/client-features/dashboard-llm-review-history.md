@@ -317,3 +317,14 @@ retry deadline while retaining the native verdict. If GitHub accepted the review
 before local acknowledgment was interrupted, exact native-publication
 reconciliation appends a confirmed effect without another POST; audit records
 remain non-authorizing. See [deferred PR validation results](deferred-pr-validation-results.md).
+
+Retained editable-review supersession appears as
+`effect=reviewer-correction-superseded` in the ordinary adversarial stage,
+with `local_phase=superseded`, `published=false` and a deferred retry.
+The reason identifies the retained attempt and replacement head. These facts
+describe evidence-only release of a previous blocker; they add no reviewer
+interaction, publication attribution, approval or merge. Refused reconciliation
+keeps the recovery wait and its specific evidence category. The next ordinary
+pass still owns CI and fresh independent review of the current head. The
+production-entry regression is
+`tests/test_editable_pr_review_flow.py::test_legacy_retained_correction_supersession_still_requires_new_ci_and_independent_review`.

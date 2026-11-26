@@ -24,6 +24,27 @@ publication state, and absence of approval/merge from the editing invocation.
 `tests/test_editable_review.py` covers the durable publisher's exact-commit,
 destination, concurrent-update and interruption boundaries.
 
+Evidence-only retained-review supersession uses the same
+`pr.adversarial-validation` stage with `Outcome.DEFERRED`,
+`effect=reviewer-correction-superseded`, `local_phase=superseded`,
+`published=false`, `review_disposition=RECONCILIATION_WAIT` and the existing
+bounded retry deadline. Its reason names the retained attempt and independently
+observed replacement head. This is the release of one old blocker, not a new
+review execution, successful publication, approval or merge. The following
+ordinary pass must acquire its own CI and review evidence. Failed supersession
+retains the existing recovery-wait event with a specific evidence category in
+`reason`; it never reports a corrective publication.
+
+Run `bash scripts/test.sh tests/test_review_supersession.py
+tests/test_review_supersession_store.py tests/test_editable_pr_review_flow.py`.
+`test_legacy_retained_correction_supersession_still_requires_new_ci_and_independent_review` exercises the
+actual PR processor and TraceCollector, verifies the supersession facts and
+absence of approval/merge, then checks pending CI and subsequent independent
+review. The real-Git resumption tests reproduce local identity failure and
+cover exact incorporation, restart, concurrent evaluation, partial or changed
+content, missing ownership/history and potentially started publication. The
+store regressions verify atomic provenance and stale-writer fencing.
+
 PR `Worker` diagnostics distinguish admission `skipped`, processing `deferred`,
 and an error-free `evaluated` observation. A successful function return alone
 does not mean completed business effects; the evaluated row explicitly carries

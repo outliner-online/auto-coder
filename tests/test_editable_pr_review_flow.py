@@ -572,3 +572,86 @@ def test_accepted_push_with_lost_acknowledgement_resumes_without_another_reviewe
     assert resumed.facts["review_disposition"] == "CORRECTIVE_HANDOFF"
     assert second_actions.retry_not_before == resumed.facts["retry_not_before"]
     assert flow.last_status.retry_not_before == second_actions.retry_not_before
+
+
+def test_legacy_retained_correction_supersession_still_requires_new_ci_and_independent_review(flow, tmp_path, monkeypatch):
+    from auto_coder import editable_review, local_review_repair
+    from auto_coder.local_review_repair import LocalReviewRepairRequest, LocalReviewRepairStore, local_review_repair_db_path
+    from tests.test_review_supersession import missing_git_identity, retain_legacy_shape
+
+    before = _caller_snapshot(flow.repository)
+    flow.reviewer.mutation = _edit_source
+    with missing_git_identity(flow.repository, monkeypatch):
+        first_actions = flow.run()
+    assert flow.head() == flow.initial_head, first_actions
+    assert flow.reviewer.calls == ["fresh"]
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    store = LocalReviewRepairStore(local_review_repair_db_path(REPO_NAME))
+    lookup = LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, "", "", (), "")
+    old = store.get_unfinished(lookup, feedback_prefix=editable_review.REVIEW_OUTPUT_PREFIX)
+    assert old is not None and old.phase == "indeterminate" and not old.result_sha
+    assert "identity" in old.reason.lower() or "email" in old.reason.lower()
+    request = LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, old.head_ref, old.head_sha, old.feedback_identities, "", expected_push_url=old.expected_push_url)
+    retain_legacy_shape(store, request)
+    retained_workspace = Path(old.workspace_path)
+    retained_contents = (retained_workspace / "sample.py").read_bytes()
+
+    peer = tmp_path / "independent-owner"
+    _git(["clone", "--branch", "feature-branch", str(flow.remote), str(peer)], tmp_path)
+    _git(["config", "user.name", "Independent Owner"], peer)
+    _git(["config", "user.email", "owner@example.com"], peer)
+    (peer / "sample.py").write_bytes(retained_contents)
+    (peer / "independent.txt").write_text("independent owner work\n", encoding="utf-8")
+    _git(["add", "-A"], peer)
+    _git(["commit", "-m", "Independently incorporate the full reviewer correction"], peer)
+    _git(["push", "origin", "HEAD:feature-branch"], peer)
+    replacement_head = flow.head()
+    assert replacement_head != flow.initial_head
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("supersession must not resend or reproduce the old reviewer output")
+
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", forbidden)
+    monkeypatch.setattr(local_review_repair, "git_push", forbidden)
+    monkeypatch.setattr(editable_review, "execute_local_review_repair", forbidden)
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+    supersession_actions = flow.run()
+    assert flow.reviewer.calls == ["fresh"], supersession_actions
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert store.get(request).phase == "superseded"
+    assert store.get_supersession(request).replacement_head == replacement_head
+    events = [event for event in get_trace_collector().get_snapshot().events if event.sequence > trace_start and (event.facts or {}).get("effect") == "reviewer-correction-superseded"]
+    assert len(events) == 1
+    assert events[0].stage_id == "pr.adversarial-validation"
+    assert events[0].outcome == "deferred"
+    assert events[0].facts["local_phase"] == "superseded"
+    assert events[0].facts["published"] is False
+    assert events[0].facts["review_disposition"] == "RECONCILIATION_WAIT"
+    assert flow.last_status.outcome is PRProcessingOutcome.DEFERRED
+    from auto_coder.dashboard_detail import evidence_rows
+
+    display = evidence_rows(events)
+    assert len(display) == 1 and display[0]["outcome"] == "deferred"
+    assert "effect: reviewer-correction-superseded" in display[0]["facts"]
+    assert "local_phase: superseded" in display[0]["facts"]
+    assert "published: false" in display[0]["facts"]
+    assert "review_disposition: RECONCILIATION_WAIT" in display[0]["facts"]
+
+    monkeypatch.setattr(pr_processor, "_check_github_actions_status", authoritative_ci_status(success=False, ids=[20], in_progress=True))
+    flow.run()
+    assert flow.reviewer.calls == ["fresh"]
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+
+    monkeypatch.setattr(pr_processor, "_check_github_actions_status", authoritative_ci_status(success=True, ids=[21]))
+    final_actions = flow.run()
+    assert flow.reviewer.calls == ["fresh", "fresh"], final_actions
+    assert [head for _, head, _ in flow.seen] == [flow.initial_head, replacement_head]
+    flow.publication.assert_called_once()
+    flow.merge.assert_called_once()
+    assert retained_workspace.is_dir()
+    assert (retained_workspace / "sample.py").read_bytes() == retained_contents
+    assert _git(["rev-parse", "HEAD"], retained_workspace) == flow.initial_head
+    assert _caller_snapshot(flow.repository) == before

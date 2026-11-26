@@ -78,3 +78,42 @@ verdict cannot approve their own correction. If a later reviewer makes another
 source correction, its verdict is likewise withheld for the resulting candidate.
 Existing accepted findings, ordinary closure rules and Strong Audit requirements
 are not replaced by successful publication or a passing test command.
+
+## Evidence-only supersession of retained corrections
+
+Ordinary review resumption can release an old `indeterminate` correction only
+when a newer head of the same open PR already contains its complete retained
+output. It never creates a commit, pushes, resends a publication, or invokes the
+old reviewer to establish this disposition.
+
+New captured-output commit failures retain an immutable pre-push evidence
+checkpoint. Legacy records require corroboration from the same durable attempt,
+owner, registered detached Git worktree, original-only HEAD reflog, and a
+nonempty fully staged correction. The worktree must have no unstaged/untracked
+content or unfinished Git operation. The retained index, affected file contents
+and modes, and control-file metadata must still match the settled failure;
+post-failure modifications, even equal content restaged later, are insufficient.
+A candidate, publication-entry checkpoint, missing ownership/history evidence,
+or conflicting origin retains the blocker. Git inspection disables optional
+index refreshes so observing a legacy record does not invalidate its evidence.
+
+The controller reads current PR metadata without caches and independently
+checks the remote branch. The replacement must be a changed descendant of the
+original head on the same repository and branch. Every affected path must
+match the retained Git blob and mode exactly, including additions, deletions,
+executable bits and symlinks. Unrelated changes elsewhere are allowed; partial
+or merely similar replacements are not accepted.
+
+Settlement rechecks target and retained evidence while atomically comparing
+the full attempt identity in SQLite. A unique supersession record retains the
+replacement head and proof; the original error, attempt and worktree are
+preserved. Concurrent evaluators and restart reuse that disposition, and stale
+writers cannot replace it. A process exit after a new pre-push checkpoint
+preserves the indeterminate output instead of admitting another execution.
+
+Supersession is neither approval nor publication attribution. The current PR
+processing pass defers, so even a head change during reconciliation cannot
+reuse CI accepted for a previous head. The next ordinary pass applies normal
+CI, independent review and merge gates. Current-head recovery and ambiguous
+publication continue to use their existing rules. A precise evidence category
+is exposed in the retained wait reason when reconciliation cannot proceed.
