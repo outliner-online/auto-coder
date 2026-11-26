@@ -128,15 +128,31 @@ def _run(environment):
         )
 
 
-def _edited_response(environment, monkeypatch, response, *, continuation=False):
+def _edited_response(environment, monkeypatch, response, *, followup="initial"):
     def edit_and_respond(*_args, **_kwargs):
         (environment.root / "source.py").write_text("def accept_request(value):\n    return bool(value)\n")
         return response
 
-    if continuation:
+    if followup != "initial":
         initial = _response("INCONCLUSIVE", dynamic_check_requested="tests/test_source.py")
-        prompt = Mock(return_value=initial)
-        environment.manager.continue_session.side_effect = edit_and_respond
+        if followup == "retained":
+            environment.manager.has_retained_local_session.return_value = True
+            prompt = Mock(return_value=initial)
+            environment.manager.continue_session.side_effect = edit_and_respond
+        else:
+            assert followup == "fresh"
+            fresh_calls = 0
+
+            def initial_then_edit(*_args, **_kwargs):
+                nonlocal fresh_calls
+                fresh_calls += 1
+                if fresh_calls == 1:
+                    return initial
+                assert fresh_calls == 2
+                environment.manager._last_session_id = "fresh-review-session"
+                return edit_and_respond()
+
+            prompt = Mock(side_effect=initial_then_edit)
         monkeypatch.setattr(validator, "run_exact_head_dynamic_check", Mock(return_value=validator.DynamicCheckExecution(success=True, executed_sha=environment.head)))
     else:
         prompt = Mock(side_effect=edit_and_respond)
@@ -144,11 +160,13 @@ def _edited_response(environment, monkeypatch, response, *, continuation=False):
     with pytest.raises(ReviewChangesProduced) as captured:
         _run(environment)
     assert _git(environment.root, "rev-parse", "HEAD") == environment.head
-    environment.manager.release_local_session.assert_any_call("review-session")
-    prompt.assert_called_once()
-    if continuation:
+    environment.manager.release_local_session.assert_any_call("fresh-review-session" if followup == "fresh" else "review-session")
+    assert prompt.call_count == (2 if followup == "fresh" else 1)
+    if followup == "retained":
+        environment.manager.authorize_retained_local_session_reuse.assert_called_once_with("review-session")
         environment.manager.continue_session.assert_called_once()
     else:
+        environment.manager.authorize_retained_local_session_reuse.assert_not_called()
         environment.manager.continue_session.assert_not_called()
     return captured.value
 
@@ -161,10 +179,10 @@ def test_clean_pass_keeps_the_admitted_source(review_environment, monkeypatch):
     review_environment.manager.release_local_session.assert_not_called()
 
 
-@pytest.mark.parametrize("continuation", [False, True])
+@pytest.mark.parametrize("followup", ["initial", "retained", "fresh"])
 @pytest.mark.parametrize("verdict", ["PASS", "INCONCLUSIVE", "BLOCKED"])
-def test_noncorrective_raw_decisions_cannot_publish_edits_even_with_findings(review_environment, monkeypatch, verdict, continuation):
-    changed = _edited_response(review_environment, monkeypatch, _response(verdict, findings=[_finding()]), continuation=continuation)
+def test_noncorrective_raw_decisions_cannot_publish_edits_even_with_findings(review_environment, monkeypatch, verdict, followup):
+    changed = _edited_response(review_environment, monkeypatch, _response(verdict, findings=[_finding()]), followup=followup)
     assert changed.correction_basis is None
     assert "pre-edit NEEDS_FIX or NEEDS_TESTS" in changed.refusal_reason
 
@@ -176,9 +194,9 @@ def test_pass_optional_edits_and_malformed_evidence_are_refused(review_environme
     assert changed.refusal_reason
 
 
-@pytest.mark.parametrize("continuation", [False, True])
-def test_demonstrated_requirement_fix_retains_current_input_evidence(review_environment, monkeypatch, continuation):
-    changed = _edited_response(review_environment, monkeypatch, _response("NEEDS_FIX", findings=[_finding()]), continuation=continuation)
+@pytest.mark.parametrize("followup", ["initial", "retained", "fresh"])
+def test_demonstrated_requirement_fix_retains_current_input_evidence(review_environment, monkeypatch, followup):
+    changed = _edited_response(review_environment, monkeypatch, _response("NEEDS_FIX", findings=[_finding()]), followup=followup)
     basis = changed.correction_basis
     assert basis is not None
     assert changed.refusal_reason == ""

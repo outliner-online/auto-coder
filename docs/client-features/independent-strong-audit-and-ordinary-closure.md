@@ -41,7 +41,11 @@ head corrective diff.
 
 Strong findings preserve their stable ID, exact Requirement references and
 text, reachable counterexample, expected and actual behavior, evidence,
-production boundary, consequence, and focused regression oracle. A regression
+production boundary, consequence, and focused regression oracle. Complete
+`REQ-NNN: ...` quotations remain in those portable findings. Before an editable
+correction can be published, the controller verifies the matching qualified ID
+and exact current body and retains that canonical body in its separate
+correction basis; publication and recovery still recheck the live contract. A regression
 gap also records the incorrect implementation admitted by existing tests and why
 those tests remain green. Ordinary closure must return exactly one evidence-backed
 `FIXED`, `INVALID`, `OPEN`, or `INCONCLUSIVE` disposition for every accepted

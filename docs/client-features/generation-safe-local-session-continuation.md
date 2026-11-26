@@ -16,12 +16,19 @@ an explicit continuation is never replaced by a fresh task or another backend.
 
 The manager retains the provider session, invocation identity, private root,
 caller identity, and preceding turn evidence together. Before each later turn
-(including same-run adversarial-review continuations such as changed-file
-evidence completion, dynamic-check target correction, dynamic-check follow-up,
-and test-oracle-gap completion) it requires positive writer settlement and
+selected as an explicit continuation (including same-run adversarial-review
+continuations such as changed-file evidence completion, dynamic-check target
+correction, dynamic-check follow-up, and test-oracle-gap completion) it requires positive writer settlement and
 consumes an exact generation-specific live-root reuse decision. Missing,
 denied, stale, mismatched, released, or concurrently active state fails closed.
 Path equality and a session string are not substitutes for the retained binding.
+
+Dynamic-check target correction and result follow-up may instead select a fresh,
+self-contained reviewer invocation before requesting continuation when a local
+adapter has no retained workspace. This does not resume or reuse the old root,
+and it does not recover from a refused explicit continuation. See
+[lifecycle-selected incremental review](lifecycle-selected-incremental-pr-review.md)
+for the supplied context and unchanged review gates.
 
 Every admitted continuation creates a new local execution boundary and resolves
 its effective edit mode again. Its own provider completion, session identity, and

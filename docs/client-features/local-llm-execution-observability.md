@@ -70,3 +70,12 @@ The explicit local completion regression also mounts the production dashboard
 Issue detail route and asserts that local completion, publication finalization,
 and their actual outcomes reach its diagram. Refused entry displays Deferred
 without a publication-finalization stage.
+
+Dynamic-check target correction and result follow-up use this same transport
+observation. When the controller selects a fresh local call because the previous
+private workspace is no longer retained, the emitted invocation mode is `fresh`.
+An admitted retained-session call remains `continuation`; a refusal cannot be
+reported as a completed continuation. Validation evidence fingerprints
+the actual complete prompt submitted by the selected transport; review audit
+retains its existing interaction metadata. No event schema
+or dashboard projection changes are needed.

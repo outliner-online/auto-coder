@@ -1,0 +1,52 @@
+{
+  "captured_at": "2026-11-26T10:24:56.485055+00:00",
+  "contract": {
+    "issue_ids": [
+      "#2894"
+    ],
+    "requirements_text": "Issue #2894 REQ-001: Supported Codex Cloud and local PR-backed owners must remain eligible for scheduled terminal-slot reclamation without constructing, invoking, or requiring JulesClient or the Jules API.\nIssue #2894 REQ-002: Historical Jules or mixed-provider bindings in durable slot, CloudManager, CloudRun, and retry state must remain attributable; missing or unsupported terminal evidence must produce an explicit retained UNKNOWN, not an empty session set or falsely terminal state.\nIssue #2894 REQ-003: Strict GitHub PR candidate discovery, repository identity checks, incomplete-discovery refusal, local execution state, and continuing obligations must remain authoritative when determining retirement.\nIssue #2894 REQ-004: Actual retirement must still preserve generation-start tombstones and durable retired ownership history before freeing capacity, and refuse stale incarnation/activity_revision at the transaction boundary.\nIssue #2894 REQ-005: One unrelated historical Jules owner with unavailable evidence must not globally block independently eligible non-Jules owners or cause external provider, PR, or Issue mutations.\nIssue #2894 REQ-006: Add regression tests through scheduled production reclamation from observer through the retirement transaction: verify supported terminal owners retire without JulesClient, ambiguous historical ownership remains UNKNOWN without blocking an independent owner, and incomplete GitHub evidence or a changed activity revision refuses the affected retirement without freeing capacity."
+  },
+  "policy": {
+    "strong_route": "backend_strong_pr_adversarial_validation",
+    "model_options": "{\"backend_type\": null, \"default\": \"codex\", \"model\": null, \"options\": [], \"route\": [\"codex\"]}",
+    "protocol_version": "v1"
+  },
+  "expected_requirement_body": "Add regression tests through scheduled production reclamation from observer through the retirement transaction: verify supported terminal owners retire without JulesClient, ambiguous historical ownership remains UNKNOWN without blocking an independent owner, and incomplete GitHub evidence or a changed activity revision refuses the affected retirement without freeing capacity.",
+  "response": {
+    "round_id": "8f81b97895de4a4bb67cf0258f17862c",
+    "attempt_id": "0:1",
+    "head_sha": "69d6d8984181db87cc768b323adbd4722c2ce277",
+    "base_sha": "e52bd56de52834a53ea75f1d3eb611708ea769f2",
+    "contract_identity": "840de38649142c63e84e3de7d0d37e0a77e08c86cb06d2e382ab8c82739ff778",
+    "policy_identity": "ede85c056a568b89e377a7525ad1db6bf0b939d110de8ee693e665c7903b5a1c",
+    "finding_set_revision": 0,
+    "audited_head_sha": "69d6d8984181db87cc768b323adbd4722c2ce277",
+    "repository": "outliner-online/auto-coder",
+    "pr_number": 2944,
+    "open_epoch": 0,
+    "attempt_sequence": 0,
+    "result": "FINDINGS",
+    "findings": [
+      {
+        "finding_id": "scheduled-reclamation-revision-regression-missing",
+        "requirement_ids": [
+          "#2894/REQ-006"
+        ],
+        "requirement_texts": [
+          "REQ-006: Add regression tests through scheduled production reclamation from observer through the retirement transaction: verify supported terminal owners retire without JulesClient, ambiguous historical ownership remains UNKNOWN without blocking an independent owner, and incomplete GitHub evidence or a changed activity revision refuses the affected retirement without freeing capacity."
+        ],
+        "counterexample": "At the admitted HEAD, an owner's activity revision can change after scheduled observation and before retirement, but no regression test drives that race through scheduled reclamation and checks capacity retention.",
+        "expected_behavior": "A scheduled production regression must verify that the changed revision refuses retirement and does not free capacity.",
+        "actual_behavior": "Existing revision-race tests exercise lower-level retirement directly; the scheduled tests do not cover this required race.",
+        "evidence": "tests/test_implementation_retirement_observer.py tests stale observations directly, while tests/test_implementation_reclamation_scheduler.py lacks a scheduled observer-to-transaction activity-revision race at the admitted HEAD.",
+        "affected_boundary": "Scheduled reclamation from evidence collection through the retirement transaction.",
+        "material_consequence": "A scheduler regression that loses or replaces the observed revision could free capacity for an owner with newer activity without failing the existing lower-level revision tests.",
+        "focused_regression_scenario": "Schedule an eligible local owner, collect its terminal observation, advance its activity revision before the transaction, and assert stale refusal, retained ownership, unavailable capacity, and a pending obligation.",
+        "is_regression_gap": true,
+        "plausible_incorrect_implementation": "The scheduler refreshes or replaces the observation's activity revision after collection and passes that revision to retirement.",
+        "why_tests_admit_it": "Direct retirement tests retain their stale observation and would still pass, while the existing scheduled tests do not change the revision between observation and retirement."
+      }
+    ],
+    "summary": "Post-edit: added the focused scheduled regression in tests/test_implementation_reclamation_scheduler.py. With a temporary Git shim and AUTO_CODER_RUNTIME_ROOT under .agent-tmp, CI=true bash scripts/test.sh --ci-tests-only tests/test_implementation_reclamation_scheduler.py::test_scheduled_reclamation_refuses_changed_activity_revision passed (1 test). An earlier execution of that test failed before the scenario because the default runtime lock directory was unwritable. Two earlier wrapper attempts stopped before pytest because the local origin could not be parsed; the initial multi-file attempt was interrupted during dependency setup. No full suite was run. The correction is uncommitted and requires independent review and CI."
+  }
+}

@@ -1309,6 +1309,27 @@ pr:
     violation, allow the rereview to PASS. These incremental rules apply only to
     rereviews; the initial validation remains a full-coverage, fail-closed review.
 
+  adversarial_validation_fresh_followup: |-
+    Complete the controller-selected focused step of an existing adversarial
+    review using the full record below. This is a fresh provider conversation:
+    no previous workspace or conversation memory is available. It is not a new
+    discovery round and does not renew any review, recovery, or correction budget.
+
+    Original review instructions and current-target evidence:
+    $original_prompt
+
+    Prior response for the same validation snapshot (context, not approval):
+    $prior_response
+
+    Current focused step and its authoritative evidence:
+    $followup_prompt
+
+    Perform only that focused step under the original review permissions, current
+    Requirements, accepted-finding scope, and response schema. Reassess decisions
+    affected by the supplied evidence; preserve unrelated known obligations and
+    completed evidence. Do not infer success from an earlier verdict or from the
+    fresh transport. Return the complete requested structured response.
+
   adversarial_validation_target_correction: |-
     Your requested dynamic-check target was rejected before any test process ran.
 
