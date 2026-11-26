@@ -76,7 +76,8 @@ def test_opencode_live_workflow_contract_and_limits():
     assert test_step["timeout-minutes"] == 30, "Live pytest execution must have a 30-minute step limit"
     assert test_step["env"]["AUTO_CODER_REQUIRE_OPENCODE_LIVE"] == "1"
     assert "-m opencode_live" in test_step["run"]
-    assert "-n 2" in test_step["run"], "Dedicated live pytest must execute with two xdist workers"
+    assert "-n 3" in test_step["run"], "Dedicated live pytest must execute with three xdist workers"
+    assert "-n 2" not in test_step["run"]
     assert "bash scripts/test.sh --ci-tests-only" in test_step["run"]
     assert "--dist load --maxschedchunk 1" in test_step["run"]
     assert "--durations=0" in test_step["run"]
@@ -128,6 +129,7 @@ def test_live_step_preserves_exact_selection_and_native_failure(tmp_path, bounde
     # An additional native test failure must fail even though completeness passes.
     assert "FAIL-CLOSED VALIDATION FAILED" not in result.stdout + result.stderr
     assert "LoadScheduling" in result.stdout
+    assert "3 workers" in result.stdout
     if native_failure:
         assert "native-live-failure-oracle" in result.stdout
 

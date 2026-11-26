@@ -61,9 +61,9 @@ jobs:
           AUTOCODER_OPENCODE_VERBOSE_DEBUG: "1"
           AUTO_CODER_REQUIRE_OPENCODE_LIVE: "1"
         run: |
-          # Share one prepared image between two workers; limit reserved work
-          # without changing the load scheduler's retry/failure policy.
-          bash scripts/test.sh --ci-tests-only -m opencode_live -vv -n 2 --dist load --maxschedchunk 1 -ra --durations=0 --junitxml=opencode-live-logs/junit.xml
+          # Share one prepared image between three workers. The third worker
+          # redistributes independent live cases without duplicating job setup.
+          bash scripts/test.sh --ci-tests-only -m opencode_live -vv -n 3 --dist load --maxschedchunk 1 -ra --durations=0 --junitxml=opencode-live-logs/junit.xml
 
       - name: Print git-wrapper debug log (non-read-only decisions only)
         if: always()

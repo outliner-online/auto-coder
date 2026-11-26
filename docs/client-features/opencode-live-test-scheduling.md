@@ -2,7 +2,7 @@
 
 The dedicated `OpenCode Live Tests` check runs the complete `opencode_live`
 marker selection through `bash scripts/test.sh --ci-tests-only`. Its existing
-two pytest workers share one production image prepared from the exact checkout.
+three pytest workers share one production image prepared from the exact checkout.
 The load scheduler uses `--maxschedchunk 1` to reduce reserved work behind long
 tests. Xdist still retains its required current/next item lookahead; the option
 does not guarantee that only one item is assigned to a worker.
@@ -10,7 +10,8 @@ does not guarantee that only one item is assigned to a worker.
 Marker discovery, parameterized profiles, the fail-closed container-scenario
 validator, native pytest exit codes, existing host retry/skip policy, pinned
 Python/uv/Node/OpenCode/Codex prerequisites, and job/step timeouts are preserved.
-There are no additional jobs or image builds. The explicit test-only script mode
+There are no additional jobs or image builds, so the third worker does not
+duplicate dependency installation or runtime-image preparation. The explicit test-only script mode
 matches the previous workflow's direct pytest invocation, which also did not run
 the script's quality provisioning stage. Ordinary local script calls retain their
 complete gate.
@@ -26,6 +27,19 @@ an actual assertion failure outside the mandatory container scenarios returns 1
 even when completeness validation succeeds.
 
 ## Evidence and remaining measurement
+
+Issue #2911's qualifying run `45330611896`, job `138230761660`, used one runner
+and two workers: queue 2 seconds, job 696 seconds, image preparation 63 seconds,
+test step 607 seconds, and native pytest 602.92 seconds (18 passed, 9 skipped).
+The native duration report identifies a 236.62-second longest indivisible test.
+One worker remained occupied by that test and its following 85.66-second case,
+while the other processed the remaining independent cases; both workers were
+active until the end of the session. The independent call durations total much
+more than the longest indivisible test, so adding one in-job worker can
+redistribute measured work while retaining the single prepared image. It does
+not alter queueing, setup, retry, selection, or failure semantics. A comparable
+after measurement must come from the changed GitHub Actions job; this source
+change does not represent an estimated schedule as measured latency.
 
 Issue #2871's cited run `44867758076`, job `136735160868`, used one runner and two
 workers: queue 2 seconds, job 750 seconds, image preparation 79 seconds, test step
