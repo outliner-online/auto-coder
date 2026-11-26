@@ -1,5 +1,6 @@
 """Real Git regressions for settled editable-review output and publication."""
 
+import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +19,7 @@ from auto_coder.editable_review import (
     review_workspace_changed,
 )
 from auto_coder.local_review_repair import LocalReviewRepairRequest, LocalReviewRepairStore
+from auto_coder.review_correction_policy import ReviewCorrectionBasis, ReviewCorrectionBlocker, validate_review_correction_basis_json
 from auto_coder.utils import CommandResult
 from auto_coder.worktree_utils import WorkspaceHandoffError
 
@@ -50,12 +52,33 @@ def repository(tmp_path: Path) -> tuple[Path, Path, str]:
     return root, remote, head
 
 
+def _basis(head: str) -> ReviewCorrectionBasis:
+    return ReviewCorrectionBasis(
+        head,
+        "requirements-snapshot-42",
+        "NEEDS_FIX",
+        (
+            ReviewCorrectionBlocker(
+                ("#42/REQ-001",),
+                ("The exported value must equal 2.",),
+                "source.py:value",
+                "source.py:1 at the admitted head assigns value = 1.",
+                "Import source.value at the admitted head; it equals 1.",
+                "The exported value equals 2.",
+                "The exported value equals 1.",
+                "Import source.value and assert it equals 2.",
+            ),
+        ),
+    )
+
+
 def _publish(snapshot, store, **kwargs):
+    kwargs.setdefault("correction_basis", _basis(snapshot.head_sha))
     return publish_review_changes(snapshot, repository="owner/repo", pr_number=42, head_repository="owner/repo", head_ref="review-head", review_identity="ordinary:attempt-7", store=store, **kwargs)
 
 
 def _request(head: str) -> LocalReviewRepairRequest:
-    return LocalReviewRepairRequest("owner/repo", 42, "owner/repo", "review-head", head, ("review-output:ordinary:attempt-7",), "")
+    return LocalReviewRepairRequest("owner/repo", 42, "owner/repo", "review-head", head, ("review-output:ordinary:attempt-7",), "", review_correction_basis_json=_basis(head).to_json())
 
 
 def test_guard_uses_final_source_contents_and_restores_binding(repository):
@@ -169,7 +192,9 @@ def test_lost_push_response_reconciles_without_copy_model_or_second_push(reposit
     published = _git(remote, "rev-parse", "refs/heads/review-head")
     assert published != head
     monkeypatch.setattr(editable_review, "execute_local_review_repair", lambda *_a, **_kw: pytest.fail("recovery must not repeat the copier or invoke a model"))
-    restored = resume_pending_review_publication(repository="owner/repo", pr_number=42, root=str(root), store=store, authority_check=lambda *_: pytest.fail("confirmed publication needs no new push authority"))
+    restored = resume_pending_review_publication(
+        repository="owner/repo", pr_number=42, root=str(root), store=store, authority_check=lambda *_: pytest.fail("confirmed publication needs no new push authority"), correction_basis_check=lambda _: pytest.fail("candidate readback needs no new correction authority")
+    )
     assert (restored.phase, restored.published) == ("awaiting_validation", True)
     assert len(pushed) == 1
     assert resume_pending_review_publication(repository="owner/repo", pr_number=42, root=str(root), store=store) is None
@@ -192,6 +217,9 @@ def test_pre_send_deferral_recovers_original_ref_and_commit_without_repeating_re
     retained = store.get(_request(head)).result_sha
     assert _git(remote, "rev-parse", "refs/heads/review-head") == head
     (root / "source.py").write_text("value = 999\n", encoding="utf-8")
+    refused = resume_pending_review_publication(repository="owner/repo", pr_number=42, root=str(root), store=store, authority_check=lambda *_: True, correction_basis_check=lambda _: False)
+    assert refused.phase == "publication_pending" and not refused.published
+    assert _git(remote, "rev-parse", "refs/heads/review-head") == head
     monkeypatch.setattr(local_review_repair, "git_push", real_push)
     checks = []
     result = resume_pending_review_publication(repository="owner/repo", pr_number=42, root=str(root), store=store, authority_check=lambda sha, ref: checks.append((sha, ref)) or True)
@@ -331,3 +359,45 @@ def test_lost_publication_checkpoint_ownership_never_pushes(repository, tmp_path
     record = store.get(_request(head))
     assert Path(record.workspace_path).is_dir()
     assert _git(Path(record.workspace_path), "rev-parse", "HEAD") != head
+
+
+@pytest.mark.parametrize("invalid", ["missing", "pass", "inconclusive", "wrong_head", "no_blockers", "no_evidence"])
+def test_source_delta_without_pre_edit_blocker_never_enters_publication(repository, tmp_path, invalid):
+    root, remote, head = repository
+    snapshot = capture_review_workspace(str(root), head)
+    (root / "source.py").write_text("value = 2\n", encoding="utf-8")
+    basis = _basis(head)
+    if invalid == "missing":
+        basis = None
+    elif invalid == "pass":
+        basis = replace(basis, verdict="PASS")
+    elif invalid == "inconclusive":
+        basis = replace(basis, verdict="INCONCLUSIVE")
+    elif invalid == "wrong_head":
+        basis = replace(basis, head_sha="0" * 40)
+    elif invalid == "no_blockers":
+        basis = replace(basis, blockers=())
+    else:
+        basis = replace(basis, blockers=(replace(basis.blockers[0], evidence=""),))
+    store = LocalReviewRepairStore(tmp_path / "repairs.sqlite3")
+
+    result = _publish(snapshot, store, correction_basis=basis)
+
+    assert (result.phase, result.executed, result.published) == ("not_started", False, False)
+    assert result.reason.startswith("reviewer correction refused:")
+    assert store.get(_request(head)) is None
+    assert _git(remote, "rev-parse", "refs/heads/review-head") == head
+    assert _git(root, "rev-parse", "HEAD") == head
+    assert (root / "source.py").read_text() == "value = 2\n"
+
+
+@pytest.mark.parametrize("field", ["verdict", "kind", "requirement_ids", "evidence"])
+def test_malformed_retained_basis_is_refused_without_an_exception(field):
+    head = "a" * 40
+    payload = json.loads(_basis(head).to_json())
+    if field == "verdict":
+        payload[field] = []
+    else:
+        payload["blockers"][0][field] = {"unexpected": True}
+
+    assert validate_review_correction_basis_json(json.dumps(payload), head)

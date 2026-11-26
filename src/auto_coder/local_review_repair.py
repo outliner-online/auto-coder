@@ -28,6 +28,7 @@ from .git_info import parse_github_repo_from_url
 from .llm_backend_config import TASK_ONLY_BACKEND_TYPES, active_repo_context, get_llm_config
 from .logger_config import get_logger
 from .process_identity import ProcessIdentity, process_is_dead, read_process_identity
+from .review_correction_policy import validate_review_correction_basis_json
 from .utils import bind_command_execution_cwd, reset_command_execution_cwd
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ class LocalReviewRepairRequest:
     feedback_identities: tuple[str, ...]
     prompt: str
     expected_push_url: str = ""
+    review_correction_basis_json: str = ""
 
     @property
     def attempt_id(self) -> str:
@@ -82,6 +84,14 @@ class LocalReviewRepairRecord:
     pre_push_evidence_json: str = ""
     publication_started: bool = False
     publication_send_state: str = "unknown"
+    review_correction_basis_json: str = ""
+
+
+def review_correction_basis_refusal(value: LocalReviewRepairRequest | LocalReviewRepairRecord) -> str:
+    """Require retained pre-edit evidence only for captured reviewer output."""
+    if not any(identity.startswith("review-output:") for identity in value.feedback_identities):
+        return ""
+    return validate_review_correction_basis_json(value.review_correction_basis_json, value.head_sha)
 
 
 @dataclass(frozen=True)
@@ -269,6 +279,10 @@ class LocalReviewRepairStore:
                 connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN expected_push_url TEXT NOT NULL DEFAULT ''")
             if "pre_push_evidence_json" not in columns:
                 connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN pre_push_evidence_json TEXT NOT NULL DEFAULT ''")
+            if "review_correction_basis_json" not in columns:
+                # Existing output keeps its provenance, but gains no new
+                # correction authority merely by upgrading the store.
+                connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN review_correction_basis_json TEXT NOT NULL DEFAULT ''")
             if "publication_started" not in columns:
                 connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN publication_started INTEGER NOT NULL DEFAULT 0")
             if "publication_send_state" not in columns:
@@ -316,8 +330,8 @@ class LocalReviewRepairStore:
                         return LocalReviewRepairClaim(False, str(active[1]), str(active[0]))
                     incarnation = time.time_ns()
                     connection.execute(
-                        "UPDATE local_review_repair_attempts SET phase='executing', reason='', invocation_entered=0, local_job_id='', publication_send_state='not_entered', updated_at=?, incarnation=? " "WHERE repository=? AND pr_number=? AND attempt_id=?",
-                        (time.time(), incarnation, request.repository, request.pr_number, request.attempt_id),
+                        "UPDATE local_review_repair_attempts SET phase='executing', reason='', invocation_entered=0, local_job_id='', publication_send_state='not_entered', review_correction_basis_json=?, updated_at=?, incarnation=? " "WHERE repository=? AND pr_number=? AND attempt_id=?",
+                        (request.review_correction_basis_json, time.time(), incarnation, request.repository, request.pr_number, request.attempt_id),
                     )
                     self._set_owner(connection, request)
                     connection.commit()
@@ -334,8 +348,8 @@ class LocalReviewRepairStore:
             incarnation = int(time.time_ns())
             connection.execute(
                 "INSERT INTO local_review_repair_attempts "
-                "(repository, pr_number, attempt_id, head_sha, head_ref, feedback_json, phase, result_sha, reason, updated_at, incarnation, workspace_path, expected_push_url, publication_send_state) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'executing', '', '', ?, ?, '', ?, 'not_entered')",
+                "(repository, pr_number, attempt_id, head_sha, head_ref, feedback_json, phase, result_sha, reason, updated_at, incarnation, workspace_path, expected_push_url, publication_send_state, review_correction_basis_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'executing', '', '', ?, ?, '', ?, 'not_entered', ?)",
                 (
                     request.repository,
                     request.pr_number,
@@ -346,6 +360,7 @@ class LocalReviewRepairStore:
                     time.time(),
                     incarnation,
                     request.expected_push_url,
+                    request.review_correction_basis_json,
                 ),
             )
             self._set_owner(connection, request)
@@ -449,7 +464,7 @@ class LocalReviewRepairStore:
         row = connection.execute(
             "SELECT attempt_id, head_sha, head_ref, phase, result_sha, reason, incarnation, workspace_path, "
             "invocation_entered, local_job_id, feedback_json, expected_push_url, updated_at, "
-            "owner_pid, owner_boot_id, owner_start_ticks, pre_push_evidence_json, publication_started, publication_send_state "
+            "owner_pid, owner_boot_id, owner_start_ticks, pre_push_evidence_json, publication_started, publication_send_state, review_correction_basis_json "
             "FROM local_review_repair_attempts WHERE repository=? AND pr_number=? AND attempt_id=?",
             (request.repository, request.pr_number, attempt_id),
         ).fetchone()
@@ -475,6 +490,7 @@ class LocalReviewRepairStore:
             pre_push_evidence_json=str(row[16]),
             publication_started=bool(row[17]),
             publication_send_state=str(row[18]),
+            review_correction_basis_json=str(row[19]),
         )
 
     def get(self, request: LocalReviewRepairRequest, attempt_id: Optional[str] = None) -> Optional[LocalReviewRepairRecord]:
@@ -854,6 +870,9 @@ def _send_pending_publication(
     """Enter one send, retaining ambiguity independently of candidate creation."""
     if record.publication_send_state != "not_entered":
         return LocalReviewRepairOutcome("publication_pending", f"publication send disposition is {record.publication_send_state}; awaiting authoritative candidate readback without another push", executed=True)
+    basis_refusal = review_correction_basis_refusal(record)
+    if basis_refusal:
+        return LocalReviewRepairOutcome("publication_pending", f"reviewer correction publication refused: {basis_refusal}", executed=True)
     if not store.mark_publication_send_entered(request, record):
         return LocalReviewRepairOutcome("publication_pending", "publication send checkpoint lost attempt ownership; no push was started", executed=True)
     claim = LocalReviewRepairClaim(False, record.phase, record.attempt_id, record.incarnation)
@@ -902,6 +921,14 @@ def execute_local_review_repair(
         return LocalReviewRepairOutcome("not_admitted", "foreign-head pull requests are not eligible")
     repo_root = (root or Path.cwd()).resolve()
     store = store or LocalReviewRepairStore(local_review_repair_db_path(request.repository))
+    basis_refusal = review_correction_basis_refusal(request)
+    if basis_refusal:
+        retained = store.get_publication_pending(request)
+        if retained is not None and (resume_other_attempts or retained.attempt_id == request.attempt_id):
+            # Legacy attempts can still observe an already published candidate;
+            # the send boundary independently requires the stored basis.
+            return _resume_publication(request, store, retained, repo_root, publication_authorizer=publication_authorizer)
+        return LocalReviewRepairOutcome("not_admitted", f"reviewer correction refused: {basis_refusal}")
     if executor is None and accepted_claim is None:
         retained = store.get_publication_pending(request)
         if retained is not None:
@@ -926,6 +953,11 @@ def execute_local_review_repair(
                 return outcome
         return LocalReviewRepairOutcome(claim.phase, f"retained local correction phase: {claim.phase}")
     assert executor is not None
+    if any(identity.startswith("review-output:") for identity in request.feedback_identities):
+        claimed = store.get(request)
+        basis_refusal = "the retained correction attempt is unavailable" if claimed is None else review_correction_basis_refusal(claimed)
+        if basis_refusal:
+            return LocalReviewRepairOutcome("not_admitted", f"reviewer correction refused: {basis_refusal}")
 
     _ensure_head_commit_available(repo_root, request)
     worktree = tempfile.mkdtemp(prefix=f"auto_coder_review_{request.pr_number}_")
@@ -1026,6 +1058,14 @@ def execute_local_review_repair(
                 store.transition(request, claim, "indeterminate", reason=reason, workspace_path=worktree)
                 preserve_worktree = True
                 return LocalReviewRepairOutcome("indeterminate", reason, executed=True)
+        if any(identity.startswith("review-output:") for identity in request.feedback_identities):
+            retained = store.get(request)
+            basis_refusal = "the retained correction attempt is unavailable" if retained is None else review_correction_basis_refusal(retained)
+            if basis_refusal:
+                reason = f"reviewer correction commit refused: {basis_refusal}"
+                store.transition(request, claim, "indeterminate", reason=reason, workspace_path=worktree)
+                preserve_worktree = True
+                return LocalReviewRepairOutcome("indeterminate", reason, executed=True)
         if commit_env is not None:
             commit = git_commit_with_retry(commit_message, cwd=worktree, allow_repair=False, commit_env=commit_env)
         else:
@@ -1111,6 +1151,9 @@ def recover_confirmed_local_review_repair(
             "local correction completed with no change; independent validation is required",
             executed=True,
         )
+    basis_refusal = review_correction_basis_refusal(record)
+    if basis_refusal:
+        return LocalReviewRepairOutcome("indeterminate", f"reviewer correction commit refused: {basis_refusal}", executed=True)
     stage = subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True, text=True)
     if stage.returncode != 0:
         return LocalReviewRepairOutcome("indeterminate", f"corrective output could not be staged: {stage.stderr}")

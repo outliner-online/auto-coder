@@ -1,12 +1,13 @@
 # Editable PR reviewers
 
 Controller-designated ordinary PR adversarial reviews and Strong Audit may edit
-code, add focused regression tests, and run the commands needed to verify or
-correct the supplied explicit Requirements. They use the existing supported
-synchronous local backends and private workspaces. The dedicated Strong route
-remains independent of ordinary routing, and automatic implementation-session
-resumption stays disabled. Issue/specification reviewers and explicitly no-edit
-verification remain read-only.
+code and add focused regression tests only for a demonstrated input-head defect
+within the supplied explicit Requirements. They may run the commands needed to
+establish that defect or verify its bounded correction. They use the existing
+supported synchronous local backends and private workspaces. The dedicated
+Strong route remains independent of ordinary routing, and automatic
+implementation-session resumption stays disabled. Issue/specification reviewers
+and explicitly no-edit verification remain read-only.
 
 Designated PR and Strong reviews select each backend's normal `options` list;
 read-only invocations select `options_for_noedit`. Configure custom provider
@@ -31,6 +32,42 @@ is permitted and the complete suite remains owned by CI. The policy resets on
 normal return and exceptions and does not affect concurrent or subsequent
 implementation work.
 
+## Correction eligibility
+
+An editable reviewer first assesses the clean admitted input HEAD. A retained
+correction needs a demonstrated current explicit-Requirement violation, an absent
+explicitly required test deliverable, or a material test-oracle gap satisfying
+the existing bounded-gap criteria. Its evidence identifies the exact Requirement,
+pre-edit counterexample or missing oracle, production boundary, material
+consequence, and required corrective outcome. Optional test expansion, additional
+input variants, refactoring, style cleanup and speculative hardening do not
+justify a correction. Existing accepted findings keep their original identities
+and scopes; a historical finding alone does not establish a current defect.
+
+When the input-head assessment satisfies the response protocol's PASS criteria,
+the reviewer returns PASS without editing source. Missing decision-critical
+evidence remains INCONCLUSIVE. INCONCLUSIVE permits bounded investigation and
+verification, not speculative retained changes. An ordinary PASS does not
+prevent the independent Strong Audit from identifying a genuine defect under
+the same standard.
+
+The structured response always assesses the admitted pre-edit HEAD. An editing
+ordinary review retains NEEDS_FIX with concrete implementation/deliverable findings
+or NEEDS_TESTS with qualifying material oracle gaps; Strong Audit retains FINDINGS
+with complete portable findings. A local fix or green post-edit test does not
+turn that input-head result into PASS. The reviewer separately identifies the
+correction and post-edit checks in its summary or evidence, without treating them
+as committed input-head proof or independent closure evidence.
+
+The controller validates the existing role-specific response and Requirement
+associations before allowing source publication. A changed workspace alone is
+insufficient. PASS, INCONCLUSIVE, malformed output, unknown Requirement references
+or missing concrete correction evidence refuse publication before any corrective
+commit or push. The unchanged-source review path retains its existing verdict
+and closure rules. This deterministic check verifies the structured evidence
+contract; the reviewer remains responsible for the semantic truth and bounded
+scope of its evidence. Prompt-regression evaluation remains advisory.
+
 ## Source changes and review evidence
 
 A production editable review starts from the exact clean admitted PR commit.
@@ -50,7 +87,7 @@ are reported as such rather than being promoted to successful validation.
 
 ## Controller publication and recovery
 
-Settled reviewer corrections reuse `LocalReviewRepairStore` and
+Eligible settled reviewer corrections reuse `LocalReviewRepairStore` and
 `execute_local_review_repair` with a captured-output executor. No second model
 is invoked to copy or publish the already produced correction. The review
 output identity deduplicates publication; it is not an accepted finding or a new
@@ -59,9 +96,12 @@ repair-allowance grant.
 The publisher copies the selected source changes to an exact-head correction
 workspace, uses the centralized commit/push helpers, and leases the existing
 same-repository PR branch against the reviewed SHA. It rechecks current target
-authority before publication. A concurrently advanced branch cannot be
-overwritten. Commit preparation does not invoke a formatter or another model to
-change the captured correction after review. Failed preparation retains an
+authority before publication. Before a new commit or send it also reconfirms each
+cited Requirement ID and text against the live explicit Requirements, even when
+HEAD is unchanged; already-entered sends retain the existing exact-candidate
+readback path. A concurrently advanced branch cannot be overwritten. Commit
+preparation does not invoke a formatter or another model to change the captured
+correction after review. Failed preparation retains an
 explicit incomplete state instead of declaring success.
 
 A candidate commit is retained before push. Its checkpoint is separate from a

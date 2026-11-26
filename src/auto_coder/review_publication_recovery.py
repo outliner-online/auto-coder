@@ -18,6 +18,7 @@ from .local_review_repair import (
     LocalReviewRepairStore,
     _resume_publication,
     get_origin_push_url,
+    review_correction_basis_refusal,
 )
 from .logger_config import get_logger
 from .review_supersession import (
@@ -142,6 +143,8 @@ def recover_current_head_review(
         if authority_check is None:
             raise SupersessionBlocked("publication_authority_unavailable", "no current publication authority is available")
         recovery = store.get_commit_recovery(request)
+        if recovery is None and (basis_refusal := review_correction_basis_refusal(record)):
+            raise SupersessionBlocked("correction_basis_unavailable", basis_refusal)
         identity = verified_commit_identity(request, commit_identity_provider)
         identity_json = json.dumps(asdict(identity), sort_keys=True, separators=(",", ":"))
         if recovery is None:

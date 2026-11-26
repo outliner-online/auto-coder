@@ -13,6 +13,17 @@ these facts without a new event schema or dashboard-owned decision. Strong
 reviewer edits retain the existing deferred `pr.strong-audit` reason and retry
 path, without accepting that invocation's Strong result.
 
+Correction eligibility is checked before publication. A reviewer that changes
+source while returning PASS, INCONCLUSIVE, malformed output, or no qualifying
+current-Requirement evidence is refused with `local_phase=not_started`,
+`published=false`, and a `reason` beginning `reviewer correction refused:`.
+The existing `reviewer-source-changes` effect and role-specific deferred trace
+retain that reason; ordinary validation also exposes
+`diagnostic_category=reviewer_correction_refused`. These facts represent refused
+publication, never a corrective commit, successful handoff, approval or merge.
+The dashboard uses its existing stage and reason projection; no event schema or
+renderer changes are introduced.
+
 Run `bash scripts/test.sh tests/test_editable_pr_review_flow.py` for real
 detached-workspace and bare-origin publication, interrupted reviewer/check
 refusal, pending CI followed by fresh-session review, and lost-push-response

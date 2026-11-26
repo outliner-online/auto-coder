@@ -1,9 +1,9 @@
 """Source-bound PR reviewer edits and existing durable correction publication.
 
-A reviewer that changes source has produced an implementation candidate, not
-review evidence for its input commit. The controller publishes that candidate
-through the established correction path; a later independent review owns the
-new commit's verdict.
+Reviewer edits can become a correction candidate only with a validated blocker
+against explicit Requirements at the admitted input commit. The controller
+retains that evidence through the established publication path; a later
+independent review owns the new commit's verdict.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from .local_review_repair import (
     get_origin_push_url,
     local_review_repair_db_path,
 )
+from .review_correction_policy import ReviewCorrectionBasis, validate_review_correction_basis_json
 from .review_supersession import ReviewSupersessionTarget, reconcile_review_supersession
 from .worktree_utils import (
     WorkspaceFileState,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
 REVIEW_OUTPUT_PREFIX = "review-output:"
 PublicationAuthorityCheck = Callable[[str, str], bool]
+CorrectionBasisCheck = Callable[[str], bool]
 
 
 @dataclass(frozen=True)
@@ -53,9 +55,11 @@ class ReviewWorkspaceSnapshot:
 class ReviewChangesProduced(RuntimeError):
     """A successful review turn changed source and cannot certify its old head."""
 
-    def __init__(self, snapshot: ReviewWorkspaceSnapshot) -> None:
+    def __init__(self, snapshot: ReviewWorkspaceSnapshot, correction_basis: Optional[ReviewCorrectionBasis] = None, refusal_reason: str = "") -> None:
         self.snapshot = snapshot
-        super().__init__("Reviewer changed source; publication and independent new-head validation are required")
+        self.correction_basis = correction_basis
+        self.refusal_reason = refusal_reason
+        super().__init__("Reviewer changed source; a validated pre-edit blocker is required before publication")
 
 
 _CURRENT_REVIEW_WORKSPACE: contextvars.ContextVar[Optional[ReviewWorkspaceSnapshot]] = contextvars.ContextVar("editable_pr_review_workspace", default=None)
@@ -113,11 +117,11 @@ def editable_review_active() -> bool:
     return _CURRENT_REVIEW_WORKSPACE.get() is not None
 
 
-def assert_review_workspace_unchanged() -> None:
+def assert_review_workspace_unchanged(correction_basis: Optional[ReviewCorrectionBasis] = None, refusal_reason: str = "") -> None:
     """Stop verdict consumption as soon as a successful turn produces edits."""
     snapshot = _CURRENT_REVIEW_WORKSPACE.get()
     if snapshot is not None and review_workspace_changed(snapshot):
-        raise ReviewChangesProduced(snapshot)
+        raise ReviewChangesProduced(snapshot, correction_basis, refusal_reason)
 
 
 def publish_review_changes(
@@ -128,7 +132,10 @@ def publish_review_changes(
     head_repository: str,
     head_ref: str,
     review_identity: str,
+    correction_basis: Optional[ReviewCorrectionBasis] = None,
+    refusal_reason: str = "",
     authority_check: Optional[PublicationAuthorityCheck] = None,
+    correction_basis_check: Optional[CorrectionBasisCheck] = None,
     store: Optional[LocalReviewRepairStore] = None,
     commit_identity_provider: Optional[Callable[[], ControllerGitIdentity]] = None,
 ) -> LocalReviewRepairOutcome:
@@ -141,13 +148,17 @@ def publish_review_changes(
         raise ValueError("review publication requires the originating review identity")
     if not review_workspace_changed(snapshot):
         return LocalReviewRepairOutcome("completed_no_change", "reviewer produced no source changes")
+    basis_json = correction_basis.to_json() if correction_basis is not None else ""
+    basis_error = refusal_reason or validate_review_correction_basis_json(basis_json, snapshot.head_sha)
+    if basis_error:
+        return LocalReviewRepairOutcome("not_started", f"reviewer correction refused: {basis_error}")
     preserved = tuple(state.relative_path for state in snapshot.files)
     selected_files = capture_workspace_source_files(snapshot.root, preserved)
-    request = LocalReviewRepairRequest(repository, pr_number, head_repository, head_ref, snapshot.head_sha, (f"{REVIEW_OUTPUT_PREFIX}{review_identity}",), "", expected_push_url=snapshot.origin_push_url)
+    request = LocalReviewRepairRequest(repository, pr_number, head_repository, head_ref, snapshot.head_sha, (f"{REVIEW_OUTPUT_PREFIX}{review_identity}",), "", expected_push_url=snapshot.origin_push_url, review_correction_basis_json=basis_json)
 
     def authorized() -> bool:
         _verify_review_snapshot(snapshot)
-        return authority_check is None or authority_check(request.head_sha, request.head_ref)
+        return (authority_check is None or authority_check(request.head_sha, request.head_ref)) and (correction_basis_check is None or correction_basis_check(basis_json))
 
     def copy_result(_request: LocalReviewRepairRequest, destination: str) -> str:
         _verify_review_snapshot(snapshot)
@@ -178,6 +189,7 @@ def _resume_pending_review_publication(
     pr_number: int,
     root: str | Callable[[], str],
     authority_check: Optional[PublicationAuthorityCheck] = None,
+    correction_basis_check: Optional[CorrectionBasisCheck] = None,
     store: Optional[LocalReviewRepairStore] = None,
     current_target: Optional[Callable[[], ReviewSupersessionTarget]] = None,
     commit_identity_provider: Optional[Callable[[], ControllerGitIdentity]] = None,
@@ -192,7 +204,11 @@ def _resume_pending_review_publication(
     record = store.get_unfinished(lookup, feedback_prefix=REVIEW_OUTPUT_PREFIX)
     if record is None:
         return None
-    request = LocalReviewRepairRequest(repository, pr_number, repository, record.head_ref, record.head_sha, record.feedback_identities, "", expected_push_url=record.expected_push_url)
+    request = LocalReviewRepairRequest(repository, pr_number, repository, record.head_ref, record.head_sha, record.feedback_identities, "", expected_push_url=record.expected_push_url, review_correction_basis_json=record.review_correction_basis_json)
+
+    def authorized(head_sha: str, head_ref: str) -> bool:
+        return (authority_check is None or authority_check(head_sha, head_ref)) and (correction_basis_check is None or correction_basis_check(record.review_correction_basis_json))
+
     if record.phase == "indeterminate":
         repository_root = Path(root() if callable(root) else root).resolve()
         if commit_identity_provider is not None:
@@ -204,7 +220,7 @@ def _resume_pending_review_publication(
                 record,
                 repository_root,
                 current_target=current_target,
-                authority_check=authority_check,
+                authority_check=None if authority_check is None else authorized,
                 commit_identity_provider=commit_identity_provider,
             )
             if recovered is not None:
@@ -217,7 +233,7 @@ def _resume_pending_review_publication(
         store,
         record,
         Path(root() if callable(root) else root).resolve(),
-        publication_authorizer=None if authority_check is None else lambda: authority_check(record.head_sha, record.head_ref),
+        publication_authorizer=None if authority_check is None and correction_basis_check is None else lambda: authorized(record.head_sha, record.head_ref),
     )
 
 
@@ -227,6 +243,7 @@ def resume_pending_review_publication(
     pr_number: int,
     root: str | Callable[[], str],
     authority_check: Optional[PublicationAuthorityCheck] = None,
+    correction_basis_check: Optional[CorrectionBasisCheck] = None,
     store: Optional[LocalReviewRepairStore] = None,
     current_target: Optional[Callable[[], ReviewSupersessionTarget]] = None,
     commit_identity_provider: Optional[Callable[[], ControllerGitIdentity]] = None,
@@ -240,6 +257,7 @@ def resume_pending_review_publication(
             pr_number=pr_number,
             root=root,
             authority_check=authority_check,
+            correction_basis_check=correction_basis_check,
             store=store,
             current_target=current_target,
             commit_identity_provider=commit_identity_provider,

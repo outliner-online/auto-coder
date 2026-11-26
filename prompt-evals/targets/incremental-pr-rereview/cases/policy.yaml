@@ -62,3 +62,26 @@ tests:
   - type: javascript
     value: ((r)=>{const findings=r.findings||[]; return r.result==='NEEDS_FIX' && findings.length>0 && findings.some(f=>(f.requirement_ids||[f.requirement_id]).some(id=>id==='REQ-001'||id.endsWith('/REQ-001'))
       && /authorization|unauthorized/i.test(JSON.stringify(f)));})(JSON.parse(output))
+- vars:
+    id: local-required-regression-fix-retains-input-head-finding
+    title: Reviewer adds the missing required regression and its local check passes
+    requirement: ReviewController.validate must enforce the authorization guard, and committed regression coverage must exercise
+      that production boundary.
+    prior_gap_status: OPEN
+    prior_resolution_evidence: ''
+    scope_context: 'The fixed Objective is to preserve authorization validation. REQ-001 is the sole implementation contract.
+      The review response assesses the admitted input HEAD, even if the reviewer has made an eligible local correction.'
+    current_evidence: 'At the admitted input HEAD, ReviewController.validate correctly rejects unauthorized operations, but
+      tests/test_review_controller.py contains only an authorized happy-path assertion. No committed regression exercises
+      unauthorized entry through ReviewController.validate or proves unchanged durable state. This violates the explicit
+      required regression deliverable, not the current runtime guard. Before editing, the reviewer established this missing
+      deliverable. The reviewer then added the focused unauthorized production-boundary regression in the private workspace
+      and ran it successfully. That new test is an uncommitted post-edit correction, absent from the admitted input HEAD.'
+    review_demand: 'The local focused test is now green. Return the required structured review response for the admitted
+      input HEAD; preserve the original missing-regression obligation without creating a duplicate gap lifecycle.'
+  assert:
+  - type: javascript
+    value: ((r)=>{const findings=r.findings||[]; const coverage=r.requirement_coverage||[]; return r.result==='NEEDS_FIX'
+      && findings.some(f=>(f.requirement_ids||[f.requirement_id]).some(id=>id==='REQ-001'||id.endsWith('/REQ-001'))
+      && /regression|test/i.test(JSON.stringify(f))) && coverage.some(c=>(c.requirement_id==='REQ-001'||c.requirement_id.endsWith('/REQ-001'))
+      && c.status==='VIOLATED');})(JSON.parse(output))

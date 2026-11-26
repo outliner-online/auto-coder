@@ -175,14 +175,24 @@ It retrieves issues and error-related PRs from GitHub to build and fix the appli
   inspect and edit the working tree and run tests, but must not change branches/HEAD,
   stage, commit, push, merge, rebase, or mutate GitHub lifecycle state. Auto-Coder owns
   those operations through its centralized helpers. Controller-designated ordinary
-  PR adversarial reviews and Strong Audit may also edit source/tests and run focused
-  verification in their private workspace. Retain only intended corrections and
-  keep disposable output under `.agent-tmp/` or repository-ignored locations.
-  The controller publishes reviewer corrections to the existing PR; their original
-  verdict cannot approve the changed candidate, which requires independent review
-  and CI. Issue/specification review and explicitly no-edit verification remain
-  read-only. Reviewers return the structured response required by their review
-  prompt, without posting comments or claiming publication/merge authority.
+  PR adversarial reviews and Strong Audit may edit source/tests only after
+  demonstrating an explicit current Requirement violation, an absent required
+  test deliverable, or a qualifying material test-oracle gap on the admitted
+  input HEAD. Retained edits must correct that bounded defect; optional test
+  expansion, extra variants, refactors, style cleanup and speculative hardening
+  are not correction authority. If the input-head assessment meets the response
+  protocol's PASS criteria, return PASS without source edits. INCONCLUSIVE permits
+  investigation, not retained edits.
+  Run focused verification in the private workspace and keep disposable output
+  under `.agent-tmp/` or repository-ignored locations. The response must retain
+  the input-head blocking result and concrete finding/gap evidence even after
+  the local correction passes; post-edit checks do not certify the input HEAD.
+  The controller refuses publication without that evidence and publishes only
+  eligible corrections to the existing PR. The changed candidate still requires
+  independent review and CI. Issue/specification review and explicitly no-edit
+  verification remain read-only. Reviewers return the structured response required
+  by their review prompt, without posting comments or claiming publication/merge
+  authority.
   Implementation success outputs only a single line beginning with `ACTION_SUMMARY:`;
   if the issue cannot be fixed, output `CANNOT_FIX`.
 * **TEST_SCRIPT_PATH (`scripts/test.sh`) Policy:**
