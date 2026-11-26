@@ -4,7 +4,7 @@ This module contains tests to verify that backend switching occurs correctly
 during PR processing, specifically in the _fix_pr_issues_with_testing function.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
 
@@ -625,8 +625,8 @@ class TestPRProcessorMerge:
             mock_api.pulls.create_review.assert_called_once_with("owner", "repo", 123, event="APPROVE", commit_id=head_sha)
             # Verify merge was called for the expected head
             mock_api.pulls.merge.assert_called_once_with("owner", "repo", 123, merge_method="squash", sha=head_sha)
-            mock_close.assert_called_once_with("owner/repo", 123)
-            mock_archive.assert_called_once_with("owner/repo", 123)
+            mock_close.assert_called_once_with("owner/repo", 123, mock_instance)
+            mock_archive.assert_not_called()
 
     @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")
     @patch("auto_coder.util.gh_cache.get_ghapi_client")
@@ -790,6 +790,74 @@ class TestPRProcessorMerge:
         assert disposition.reason == "Definitive merge rejection"
         mock_resolve.assert_not_called()
 
+    @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")
+    @patch("auto_coder.util.gh_cache.get_ghapi_client")
+    @patch("src.auto_coder.pr_processor.GitHubClient")
+    @patch("src.auto_coder.pr_processor._get_allowed_merge_methods", return_value=[])
+    def test_definitive_rejection_never_messages_historical_jules_session(
+        self,
+        _allowed_methods,
+        github_client_class,
+        get_ghapi_client,
+        get_ghapi_client_adapter,
+        tmp_path,
+    ):
+        """The production merge sender leaves a conflicted Jules session inert."""
+        from src.auto_coder.automation_config import AutomationConfig
+        from src.auto_coder.pr_processor import _merge_pr
+        from src.auto_coder.util.github_request_outcome import (
+            DeliveryCertainty,
+            GitHubApiOutcome,
+            GitHubRequestContext,
+            GitHubRequestError,
+            GitHubRequestOutcome,
+            GitHubResponseMetadata,
+            RequestProvenance,
+        )
+
+        github_client_class.get_instance.return_value.token = "token"
+        api = MagicMock()
+        get_ghapi_client.return_value = api
+        get_ghapi_client_adapter.return_value = api
+        head_sha = "e" * 40
+        api.pulls.get.return_value = {
+            "number": 127,
+            "user": {"login": "google-labs-jules"},
+            "body": "https://jules.google.com/session/historical-conflict",
+            "head": {"sha": head_sha},
+            "mergeable": False,
+        }
+        context = GitHubRequestContext(
+            operation_id="op",
+            attempt_id="attempt",
+            subsystem="test",
+            api_origin="https://api.github.com",
+            method="PUT",
+            kind="mutation",
+            endpoint_template="/pulls/{n}/merge",
+        )
+        outcome = GitHubRequestOutcome(
+            context=context,
+            status=405,
+            classification=GitHubApiOutcome.REMOTE_ERROR,
+            provenance=RequestProvenance.NETWORK,
+            delivery=DeliveryCertainty.HTTP_RESPONSE_RECEIVED,
+            metadata=GitHubResponseMetadata(),
+            elapsed_ms=1.0,
+            message="Method Not Allowed",
+        )
+        api.pulls.merge.side_effect = GitHubRequestError(outcome)
+
+        with (
+            self._patch_merge_operation_store(tmp_path),
+            patch("src.auto_coder.pr_processor.get_speculative_jules_lifecycle", return_value=None),
+            patch("src.auto_coder.jules_client.JulesClient", side_effect=AssertionError("historical Jules session accessed")),
+            patch("src.auto_coder.pr_processor._extract_session_id_from_pr_body", side_effect=AssertionError("historical session binding read")),
+        ):
+            assert _merge_pr("owner/repo", 127, {}, AutomationConfig()) is False
+
+        api.pulls.merge.assert_called_once()
+
 
 class TestUpdateWithBaseBranchDependabot:
     """Dependency-bot PRs must never have their merge conflicts resolved."""
@@ -900,3 +968,152 @@ class TestPRMergeChecksInProgress:
         # Watch should now be scheduled at 120 + 30 = 150 (not waiting until 400)
         assert queue.promote_due_ci_watches("owner/repo", now=149.9) == 0
         assert queue.promote_due_ci_watches("owner/repo", now=150.0) == 1
+
+
+def test_controller_branch_origin_reaches_local_conflict_repair():
+    from src.auto_coder.automation_config import AutomationConfig
+    from src.auto_coder.github_controller_auth import ControllerIdentity
+    from src.auto_coder.pr_processor import PRRepairResult, RepairDisposition, _update_with_base_branch
+    from src.auto_coder.utils import CommandResult
+
+    client = Mock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    pr_data = {
+        "number": 4243,
+        "base_branch": "main",
+        "body": "",
+        "user": {"login": "auto-coder[bot]", "id": 101},
+        "head": {"ref": "issue-123", "sha": "a" * 40},
+    }
+    commands = [
+        CommandResult(True, "", "", 0),
+        CommandResult(True, "3\n", "", 0),
+        CommandResult(False, "CONFLICT", "", 1),
+    ]
+
+    with (
+        patch("src.auto_coder.pr_processor.cmd.run_command", side_effect=commands),
+        patch(
+            "src.auto_coder.pr_processor._dispatch_cloud_conflict_repair",
+            return_value=PRRepairResult(RepairDisposition.REFUSED, reason="not cloud"),
+        ),
+        patch(
+            "src.auto_coder.conflict_resolver._perform_base_branch_merge_and_conflict_resolution",
+            return_value=True,
+        ) as perform,
+        patch(
+            "src.auto_coder.pr_processor._dispatch_local_conflict_repair",
+            side_effect=lambda _repo, _pr, operation: PRRepairResult(RepairDisposition.APPLIED if operation() else RepairDisposition.FAILED),
+        ),
+    ):
+        actions = _update_with_base_branch("owner/repo", pr_data, AutomationConfig(), client)
+
+    perform.assert_called_once()
+    assert not any("dependency-bot PR" in action for action in actions)
+
+
+def test_controller_branch_origin_reaches_definitive_merge_conflict_route():
+    from unittest.mock import MagicMock, patch
+
+    from src.auto_coder.automation_config import AutomationConfig
+    from src.auto_coder.github_controller_auth import ControllerIdentity
+    from src.auto_coder.pr_processor import (
+        PRRepairResult,
+        RepairDisposition,
+        _handle_definitive_merge_rejection,
+    )
+
+    client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    api = MagicMock()
+    api.pulls.get.return_value = {
+        "number": 127,
+        "user": {"login": "auto-coder[bot]", "id": 101},
+        "body": "",
+        "head": {"ref": "issue-123", "sha": "d" * 40},
+        "mergeable": False,
+    }
+    admitted = PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, reason="queued")
+    with (
+        patch(
+            "src.auto_coder.pr_processor._dispatch_cloud_conflict_repair",
+            return_value=PRRepairResult(RepairDisposition.REFUSED, reason="not cloud"),
+        ),
+        patch(
+            "src.auto_coder.pr_processor._offer_selected_local_pr_repair",
+            return_value=admitted,
+        ) as local_offer,
+    ):
+        assert (
+            _handle_definitive_merge_rejection(
+                "owner/repo",
+                127,
+                AutomationConfig(),
+                client,
+                api,
+                "owner",
+                "repo",
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                "d" * 40,
+            )
+            is False
+        )
+
+    local_offer.assert_called_once()
+
+
+def test_controller_branch_origin_reaches_durable_mergeability_remediation():
+    from src.auto_coder.github_controller_auth import ControllerIdentity
+    from src.auto_coder.pr_processor import (
+        PRRepairResult,
+        RepairDisposition,
+        _start_mergeability_remediation,
+    )
+
+    client = Mock(token="unused-personal-token")
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    api = Mock()
+    client.api_for.return_value = api
+    api.pulls.get.return_value = {
+        "number": 128,
+        "user": {"login": "auto-coder[bot]", "id": 101},
+        "body": "",
+        "head": {
+            "ref": "issue-123",
+            "sha": "d" * 40,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "base": {
+            "ref": "main",
+            "sha": "e" * 40,
+            "repo": {"full_name": "owner/repo"},
+        },
+    }
+    admitted = PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, reason="queued")
+
+    with (
+        patch("src.auto_coder.pr_processor.check_pr_repair_exhaustion", return_value=None),
+        patch("src.auto_coder.pr_processor.GitHubClient.get_instance") as singleton,
+        patch(
+            "src.auto_coder.pr_processor._offer_selected_local_pr_repair",
+            return_value=admitted,
+        ) as local_offer,
+    ):
+        actions = _start_mergeability_remediation(
+            128,
+            "DIRTY",
+            "owner/repo",
+            client,
+        )
+
+    singleton.assert_not_called()
+    local_offer.assert_called_once_with(
+        "owner/repo",
+        {**api.pulls.get.return_value, "number": 128},
+        ANY,
+        client,
+        conflict_eligible=True,
+    )
+    assert actions.repair_result is admitted

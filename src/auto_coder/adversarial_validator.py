@@ -41,6 +41,7 @@ from .progress_footer import ProgressStage
 from .prompt_loader import render_prompt
 from .requirement_contract import build_normative_issue_manifest, is_explicit_test_deliverable
 from .review_capture import validation_evidence
+from .review_correction_policy import ReviewCorrectionBasis, ReviewCorrectionBlocker, validate_review_correction_basis_json
 from .reviewer_session_registry import RecoveredFileEvidence, ReviewerSession, ReviewerSessionRegistry, TestOracleGap
 from .security_utils import redact_string
 from .trace_logger import get_trace_logger
@@ -63,6 +64,16 @@ ADVERSARIAL_EVIDENCE_RECOVERY_BUDGET = 300
 RECOVERED_FILE_IDENTITY_VERSION = 1
 CHANGE_PROVENANCE_CLARIFICATION_MARKER = "<!-- auto-coder-change-provenance-clarification:v1 -->"
 TEST_ORACLE_GAP_STATUSES = {"OPEN", "RESOLVED", "INVALID"}
+_TEST_ORACLE_GAP_REQUIRED_FIELDS = (
+    "requirement_id",
+    "authoritative_boundary",
+    "invariant",
+    "plausible_incorrect_implementation",
+    "why_tests_still_pass",
+    "material_consequence",
+    "focused_regression_scenario",
+    "anchor_path",
+)
 TEST_ORACLE_GAP_REREVIEW_EXCEPTIONS = {
     "CORRECTIVE_DIFF_NEW_BOUNDARY",
     "PROTECTION_WEAKENED",
@@ -527,6 +538,9 @@ class AdversarialValidationResult:
     decision_critical_evidence_gaps: List[DecisionCriticalEvidenceGap] = field(default_factory=list)
     specification_gaps: List[SpecificationGap] = field(default_factory=list)
     test_oracle_gaps: List[TestOracleGap] = field(default_factory=list)
+    # Complete gap evidence supplied in this response, before recorded lifecycle
+    # fields are hydrated. Historical OPEN state alone cannot authorize an edit.
+    current_test_oracle_gaps: List[TestOracleGap] = field(default_factory=list, repr=False)
     thread_dispositions: List[ReviewThreadDisposition] = field(default_factory=list)
     unexplained_changes: List[ChangeProvenanceItem] = field(default_factory=list)
     clarification_reply_fingerprint: str = ""
@@ -1703,16 +1717,7 @@ def _extract_test_oracle_gaps(
     gaps: List[TestOracleGap] = []
     recorded_by_id = {gap.gap_id: gap for gap in recorded_gaps}
     updates_by_id: dict[str, TestOracleGap] = {}
-    required_fields = (
-        "requirement_id",
-        "authoritative_boundary",
-        "invariant",
-        "plausible_incorrect_implementation",
-        "why_tests_still_pass",
-        "material_consequence",
-        "focused_regression_scenario",
-        "anchor_path",
-    )
+    required_fields = _TEST_ORACLE_GAP_REQUIRED_FIELDS
     for item in raw_value:
         if not isinstance(item, dict):
             return [], _parse_error(raw_response, "schema_error", "Malformed test-oracle gap entry", "test-oracle gap entries must be objects")
@@ -1810,6 +1815,27 @@ def _extract_test_oracle_gaps(
         updates_by_id[derived_id] = new_gap
         gaps.append(new_gap)
     return gaps, None
+
+
+def _current_test_oracle_gap_reports(raw_gaps: object, gaps: Sequence[TestOracleGap]) -> List[TestOracleGap]:
+    """Keep complete current reports separate from hydrated historical evidence."""
+    if not isinstance(raw_gaps, list):
+        return []
+    parsed_by_id = {gap.gap_id: gap for gap in gaps}
+    current: dict[str, TestOracleGap] = {}
+    for item in raw_gaps:
+        if not isinstance(item, dict) or any(not isinstance(item.get(name), str) or not item[name].strip() for name in _TEST_ORACLE_GAP_REQUIRED_FIELDS):
+            continue
+        values = {name: item[name].strip() for name in _TEST_ORACLE_GAP_REQUIRED_FIELDS}
+        supplied_id = item.get("gap_id")
+        gap_id = supplied_id.strip() if isinstance(supplied_id, str) and supplied_id.strip() else _stable_test_oracle_gap_id(values["requirement_id"], values["authoritative_boundary"], values["invariant"])
+        parsed_gap = parsed_by_id.get(gap_id)
+        if parsed_gap is None or parsed_gap.status != "OPEN":
+            continue
+        if any(values[name] != getattr(parsed_gap, name) for name in ("requirement_id", "authoritative_boundary", "invariant", "focused_regression_scenario")):
+            continue
+        current[gap_id] = replace(parsed_gap, **values)
+    return list(current.values())
 
 
 def parse_adversarial_validation_response(
@@ -2221,12 +2247,14 @@ def parse_adversarial_validation_response(
                     summary=summary or ("Validation passed" if result_val == "PASS" else f"Validation status: {result_val}"),
                     findings=findings,
                     raw_response=raw_response,
+                    raw_model_result=raw_result,
                     dynamic_check_requested=dynamic_check,
                     requirement_coverage=requirement_coverage,
                     evidence_recovery=evidence_recovery,
                     decision_critical_evidence_gaps=decision_gaps,
                     specification_gaps=specification_gaps,
                     test_oracle_gaps=test_oracle_gaps,
+                    current_test_oracle_gaps=_current_test_oracle_gap_reports(parsed.get("test_oracle_gaps", []), test_oracle_gaps),
                     thread_dispositions=thread_dispositions,
                     unexplained_changes=unexplained_changes,
                 )
@@ -2656,20 +2684,20 @@ def _addressed_test_oracle_gap_evidence(
     return {gap_id: f"{disposition.rationale}\nEvidence: {disposition.evidence}" for gap_id, disposition in _dispositioned_test_oracle_gap_ids(result, claimed_review_threads, recorded_gaps, "ADDRESSED").items() if is_valid_test_oracle_resolution_evidence(disposition.evidence)}
 
 
-def _upheld_test_oracle_gap_ids(
+def _upheld_test_oracle_gap_evidence(
     result: AdversarialValidationResult,
     claimed_review_threads: Sequence["ClaimedReviewThread"],
     recorded_gaps: Sequence[TestOracleGap] = (),
     projection: Optional[AcceptedFindingProjection] = None,
-) -> frozenset[str]:
-    """Gap identities this run's independent STILL_VALID disposition currently upholds.
+) -> dict[str, str]:
+    """Current evidence from each exactly associated STILL_VALID disposition.
 
     A disposition is associated with an accepted gap either through the ordinary gap
     prose of its thread or through the exact native root the accepted finding was
     published under. A root shared by several accepted gaps is ambiguous and
     upholds none of them.
     """
-    upheld = set(_dispositioned_test_oracle_gap_ids(result, claimed_review_threads, recorded_gaps, "STILL_VALID"))
+    upheld = {gap_id: f"{disposition.rationale}\nEvidence: {disposition.evidence}" for gap_id, disposition in _dispositioned_test_oracle_gap_ids(result, claimed_review_threads, recorded_gaps, "STILL_VALID").items()}
     if projection is not None:
         gaps_by_root: dict[int, set[str]] = {}
         for record in projection.records:
@@ -2683,8 +2711,18 @@ def _upheld_test_oracle_gap_ids(
                 continue
             candidates = gaps_by_root.get(thread.root_comment_database_id, set())
             if len(candidates) == 1:
-                upheld |= candidates
-    return frozenset(upheld)
+                upheld[next(iter(candidates))] = f"{disposition.rationale}\nEvidence: {disposition.evidence}"
+    return upheld
+
+
+def _upheld_test_oracle_gap_ids(
+    result: AdversarialValidationResult,
+    claimed_review_threads: Sequence["ClaimedReviewThread"],
+    recorded_gaps: Sequence[TestOracleGap] = (),
+    projection: Optional[AcceptedFindingProjection] = None,
+) -> frozenset[str]:
+    """Gap identities this run's independent STILL_VALID disposition upholds."""
+    return frozenset(_upheld_test_oracle_gap_evidence(result, claimed_review_threads, recorded_gaps, projection))
 
 
 def _enforce_inconclusive_recovery_contract(
@@ -2866,15 +2904,26 @@ def _remaining_unverified_paths(result: AdversarialValidationResult, context: Ad
     return [path for path in context.unverified_files if path not in accounted]
 
 
-def _assert_reviewer_workspace(backend_manager: Optional[BackendManager]) -> None:
-    """Separate a completed source correction from any same-invocation verdict."""
+def _assert_reviewer_workspace(
+    backend_manager: Optional[BackendManager],
+    correction_basis_provider: Optional[Callable[[], tuple[Optional[ReviewCorrectionBasis], str]]] = None,
+) -> None:
+    """Separate edits from a verdict and retain only validated input-head evidence."""
     try:
         assert_review_workspace_unchanged()
-    except ReviewChangesProduced:
+    except ReviewChangesProduced as changed:
         session_id = getattr(backend_manager, "_last_session_id", None)
         if isinstance(session_id, str) and session_id and backend_manager is not None:
             backend_manager.release_local_session(session_id)
-        raise
+        basis = None
+        refusal = "Source changed outside a completed reviewer response"
+        if correction_basis_provider is not None:
+            try:
+                basis, refusal = correction_basis_provider()
+            except Exception as exc:
+                logger.warning("Could not validate reviewer correction evidence: {}", exc)
+                refusal = "The current response's pre-edit correction evidence could not be validated"
+        raise ReviewChangesProduced(changed.snapshot, basis, refusal) from changed
 
 
 def _continue_reviewer_session(
@@ -2883,13 +2932,61 @@ def _continue_reviewer_session(
     prompt: str,
     *,
     retained_local: Optional[bool] = None,
+    response_check: Optional[Callable[[str], None]] = None,
 ) -> str:
     """Authorize retained local workspace reuse before continuing a reviewer session."""
     is_retained_local = retained_local if retained_local is not None else bool(getattr(backend_manager, "has_retained_local_session", lambda _sid: False)(session_id))
     if is_retained_local:
         backend_manager.authorize_retained_local_session_reuse(session_id)
     response = backend_manager.continue_session(session_id, prompt, is_noedit=not pr_review_designated())
-    _assert_reviewer_workspace(backend_manager)
+    if response_check is not None:
+        response_check(response)
+    else:
+        _assert_reviewer_workspace(backend_manager)
+    return response
+
+
+def _run_dynamic_reviewer_followup(
+    backend_manager: BackendManager,
+    session_id: str,
+    prompt: str,
+    *,
+    original_prompt: str,
+    prior_response: str,
+    phase: str,
+    manifest: validation_evidence.ManifestInput,
+    followup_includes_manifest: bool = False,
+    response_check: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Choose review transport before entry without weakening explicit resume."""
+    identity = backend_manager.get_current_backend_identity()
+    backend_type = str(identity[1]).lower() if isinstance(identity, tuple) and len(identity) == 3 else ""
+    retained_local = backend_type not in CLOUD_BACKEND_TYPES and bool(backend_manager.has_retained_local_session(session_id))
+    if backend_type in CLOUD_BACKEND_TYPES or retained_local:
+        validation_evidence.observe_prompt(phase, prompt, manifest if followup_includes_manifest else None)
+        return _continue_reviewer_session(
+            backend_manager,
+            session_id,
+            prompt,
+            retained_local=retained_local,
+            response_check=response_check,
+        )
+
+    # A provider session ID is history, not authority to resurrect a released
+    # workspace. Submit a self-contained fresh turn selected by the controller.
+    fresh_prompt = render_prompt(
+        "pr.adversarial_validation_fresh_followup",
+        original_prompt=original_prompt,
+        prior_response=prior_response,
+        followup_prompt=prompt,
+    )
+    validation_evidence.observe_prompt(phase, fresh_prompt, manifest)
+    logger.info("Starting fresh reviewer {} because its local workspace is not retained", phase)
+    response = run_llm_prompt(fresh_prompt, backend_manager=backend_manager, is_noedit=not pr_review_designated())
+    if response_check is not None:
+        response_check(response)
+    else:
+        _assert_reviewer_workspace(backend_manager)
     return response
 
 
@@ -2902,6 +2999,7 @@ def _complete_changed_file_evidence(
     recorded_test_oracle_gaps: Sequence[TestOracleGap] = (),
     closure_input: Optional[ReviewExecutionInput] = None,
     reviewer_provenance: str = "",
+    response_check: Optional[Callable[[str], None]] = None,
 ) -> AdversarialValidationResult:
     """Perform the one controller-driven, same-session coverage continuation."""
     unresolved = _remaining_unverified_paths(result, context)
@@ -2942,7 +3040,7 @@ def _complete_changed_file_evidence(
     initial_identity = backend_manager.get_current_backend_identity()
     validation_evidence.observe_prompt("evidence_completion", prompt, _manifest_input(context))
     try:
-        response = _continue_reviewer_session(backend_manager, session_id, prompt)
+        response = _continue_reviewer_session(backend_manager, session_id, prompt, response_check=response_check)
         current_identity = backend_manager.get_current_backend_identity()
     except ReviewChangesProduced:
         raise
@@ -3542,6 +3640,97 @@ def _parse_reviewer_response(
     return result
 
 
+def _ordinary_review_correction_basis(
+    response: str,
+    context: AdversarialValidationContext,
+    head_sha: str,
+    recorded_gaps: Sequence[TestOracleGap] = (),
+    claimed_review_threads: Sequence["ClaimedReviewThread"] = (),
+    accepted_projection: Optional[AcceptedFindingProjection] = None,
+    lifecycle_session: Optional[ReviewerSession] = None,
+) -> tuple[Optional[ReviewCorrectionBasis], str]:
+    """Validate this response's pre-edit blockers without authorizing its edited tree."""
+    result = parse_adversarial_validation_response(response, recorded_gaps)
+    raw_verdict = result.raw_model_result.strip().upper()
+    if raw_verdict not in {"NEEDS_FIX", "NEEDS_TESTS"}:
+        return None, "Retained reviewer edits require a pre-edit NEEDS_FIX or NEEDS_TESTS response; PASS and uncertainty do not authorize changes"
+    requirements = {requirement.requirement_id: requirement.text for requirement in context.issue_requirements if context.requirement_manifest_mode in {"explicit-contract", "mixed"} and re.fullmatch(r"#[1-9]\d*/REQ-\d{3}", requirement.requirement_id)}
+    if not head_sha or not requirements or context.requirement_manifest_error or context.evidence_retrieval_error:
+        return None, "The reviewed head and authoritative Requirements could not be established"
+
+    upheld = _upheld_test_oracle_gap_evidence(result, claimed_review_threads, recorded_gaps, accepted_projection)
+    current_gaps = {gap.gap_id: gap for gap in result.current_test_oracle_gaps}
+    result = _reconcile_test_oracle_gap_lifecycle(
+        result,
+        lifecycle_session,
+        head_sha,
+        _addressed_test_oracle_gap_evidence(result, claimed_review_threads, recorded_gaps),
+        context.accepted_known_gap_ids,
+    )
+    # Preserve the existing rereview discovery and closure decisions before
+    # selecting current evidence. Compact OPEN state alone is not a new finding.
+    result.test_oracle_gaps = [current_gaps.get(gap.gap_id, gap) for gap in result.open_test_oracle_gaps if gap.gap_id in upheld or gap.gap_id in current_gaps]
+    current_gap_ids = frozenset(gap.gap_id for gap in result.test_oracle_gaps)
+    evidence_context = replace(context, accepted_upheld_gap_ids=context.accepted_known_gap_ids & current_gap_ids)
+    result = _enforce_coverage_and_verdict_precedence(result, evidence_context)
+    if result.result not in {"NEEDS_FIX", "NEEDS_TESTS"}:
+        return None, result.diagnostic_reason or "The current response did not establish an eligible pre-edit blocker"
+
+    blockers: list[ReviewCorrectionBlocker] = []
+    for finding in result.findings:
+        ids = tuple(finding.all_requirement_ids)
+        if not ids or any(requirement_id not in requirements for requirement_id in ids):
+            continue
+        evidence = finding.evidence
+        if finding.finding_identity in upheld:
+            evidence = f"{upheld[finding.finding_identity]}\nRecorded scope: {evidence}"
+        regression = finding.suggested_regression_scenario
+        if regression == "Add regression test covering counterexample":
+            regression = finding.counterexample
+        blockers.append(
+            ReviewCorrectionBlocker(
+                requirement_ids=ids,
+                requirement_texts=tuple(requirements[requirement_id] for requirement_id in ids),
+                boundary=finding.anchor_path,
+                evidence=f"{finding.reachability}\n{evidence}",
+                counterexample=finding.counterexample,
+                required_behavior=finding.required_behavior,
+                actual_behavior=finding.actual_behavior,
+                regression=regression,
+            )
+        )
+    for gap in result.open_test_oracle_gaps:
+        # Scope normalization can convert a missing-test allegation into a gap,
+        # but that conversion does not supply the material-gap evidence required
+        # to retain edits. The reviewer must have actually reported or upheld it.
+        if gap.requirement_id not in requirements or (gap.gap_id not in current_gaps and gap.gap_id not in upheld):
+            continue
+        if any(not getattr(gap, name).strip() for name in _TEST_ORACLE_GAP_REQUIRED_FIELDS):
+            continue
+        evidence = gap.why_tests_still_pass
+        if gap.gap_id in upheld:
+            evidence = f"{upheld[gap.gap_id]}\nRecorded scope: {evidence}"
+        blockers.append(
+            ReviewCorrectionBlocker(
+                requirement_ids=(gap.requirement_id,),
+                requirement_texts=(requirements[gap.requirement_id],),
+                boundary=gap.authoritative_boundary,
+                evidence=evidence,
+                counterexample=f"{gap.plausible_incorrect_implementation}\nMaterial consequence: {gap.material_consequence}",
+                required_behavior=gap.invariant,
+                actual_behavior=f"Current tests admit {gap.plausible_incorrect_implementation}: {gap.why_tests_still_pass}",
+                regression=gap.focused_regression_scenario,
+                kind="TEST_ORACLE",
+            )
+        )
+    if not blockers:
+        return None, "No current demonstrated Requirement violation or material test-oracle gap authorizes the retained edits"
+    manifest_identity = context.validation_snapshot or context.requirement_manifest_identity or hashlib.sha256(json.dumps(sorted(requirements.items()), separators=(",", ":")).encode()).hexdigest()
+    basis = ReviewCorrectionBasis(head_sha, manifest_identity, raw_verdict, tuple(blockers))
+    refusal = validate_review_correction_basis_json(basis.to_json(), head_sha)
+    return (None, refusal) if refusal else (basis, "")
+
+
 def _apply_coverage_and_verdict_precedence(
     result: AdversarialValidationResult,
     context: AdversarialValidationContext,
@@ -4133,6 +4322,13 @@ def run_adversarial_validation(
     )
     validation_evidence.observe_prompt("initial", prompt, _manifest_input(context), context.pr_body[: config.MAX_PROMPT_SIZE * 2])
 
+    def check_reviewer_response(response: str, recorded_gaps: Optional[Sequence[TestOracleGap]] = None) -> None:
+        gaps = recorded_gaps if recorded_gaps is not None else lifecycle_session.test_oracle_gaps if lifecycle_session else ()
+        _assert_reviewer_workspace(
+            backend_manager,
+            lambda: _ordinary_review_correction_basis(response, context, head_sha, gaps, claimed_review_threads, accepted_projection, lifecycle_session),
+        )
+
     # 4. Invoke the strong model
     with ProgressStage("Adversarial validation"):
         verify_execution_target("LLM invocation")
@@ -4142,15 +4338,16 @@ def run_adversarial_validation(
                 stored_session.session_id,
                 prompt,
                 retained_local=stored_session_retained_local,
+                response_check=check_reviewer_response,
             )
             was_resumed = getattr(backend_manager, "_last_continue_session_resumed", False)
         else:
             response = run_llm_prompt(prompt, backend_manager=backend_manager, is_noedit=not pr_review_designated())
             was_resumed = False
+    check_reviewer_response(response)
     verify_execution_target("LLM completion")
 
     used_backend, used_type, used_model = manager_identity()
-    provider_session_id = getattr(backend_manager, "_last_session_id", None)
     # Conversational continuity and the accepted review lifecycle are separate
     # authorities.  A continuation fallback must not reuse execution evidence
     # from the old provider session, but it still adjudicates the lifecycle
@@ -4186,6 +4383,7 @@ def run_adversarial_validation(
         result.test_oracle_gaps,
         closure_input,
         reviewer_provenance,
+        response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps),
     )
     result = _apply_coverage_and_verdict_precedence(result, context)
     current_run_recovered_evidence = [replace(entry, requirement_ids=list(entry.requirement_ids)) for entry in result.evidence_recovery if entry.status in {"RECOVERED", "IRRELEVANT"} and (entry.path in context.unverified_files or entry.provenance == "REUSED_EQUIVALENT")]
@@ -4225,8 +4423,20 @@ def run_adversarial_validation(
                     diagnostic_reason=target_error,
                 )
             else:
-                validation_evidence.observe_prompt("target_correction", correction_prompt, None)
-                correction_response = _continue_reviewer_session(backend_manager, correction_session_id, correction_prompt)
+                verify_execution_target("target_correction invocation")
+                correction_response = _run_dynamic_reviewer_followup(
+                    backend_manager,
+                    correction_session_id,
+                    correction_prompt,
+                    original_prompt=prompt,
+                    prior_response=result.raw_response,
+                    phase="target_correction",
+                    manifest=_manifest_input(context),
+                    response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps),
+                )
+                verify_execution_target("target_correction completion")
+                used_backend, used_type, used_model = manager_identity()
+                reviewer_provenance = "/".join(part for part in (used_backend, used_type, used_model) if part) or "unavailable"
                 if refresh_ci_status is not None:
                     ci_status = refresh_ci_status()
                 result = _parse_reviewer_response("target_correction", correction_response, result.test_oracle_gaps, closure_input, reviewer_provenance)
@@ -4286,8 +4496,20 @@ def run_adversarial_validation(
                             diagnostic_category="dynamic_check_target_protocol_error",
                             diagnostic_reason=test_res.target_selection_error,
                         )
-                    validation_evidence.observe_prompt("target_selection_correction", correction_prompt, None)
-                    correction_response = _continue_reviewer_session(backend_manager, correction_session_id, correction_prompt)
+                    verify_execution_target("target_selection_correction invocation")
+                    correction_response = _run_dynamic_reviewer_followup(
+                        backend_manager,
+                        correction_session_id,
+                        correction_prompt,
+                        original_prompt=prompt,
+                        prior_response=result.raw_response,
+                        phase="target_selection_correction",
+                        manifest=_manifest_input(context),
+                        response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps),
+                    )
+                    verify_execution_target("target_selection_correction completion")
+                    used_backend, used_type, used_model = manager_identity()
+                    reviewer_provenance = "/".join(part for part in (used_backend, used_type, used_model) if part) or "unavailable"
                     if refresh_ci_status is not None:
                         ci_status = refresh_ci_status()
                     result = _parse_reviewer_response("target_selection_correction", correction_response, result.test_oracle_gaps, closure_input, reviewer_provenance)
@@ -4373,15 +4595,28 @@ def run_adversarial_validation(
                         )
                         + closure_extension
                     )
-                    validation_evidence.observe_prompt("dynamic_check_followup", followup_prompt, _manifest_input(context))
                     with ProgressStage("Adversarial dynamic check follow-up"):
+                        verify_execution_target("dynamic-check follow-up invocation")
                         followup_session_id = getattr(backend_manager, "_last_session_id", None)
                         if isinstance(followup_session_id, str) and followup_session_id:
-                            followup_response = _continue_reviewer_session(backend_manager, followup_session_id, followup_prompt)
+                            followup_response = _run_dynamic_reviewer_followup(
+                                backend_manager,
+                                followup_session_id,
+                                followup_prompt,
+                                original_prompt=prompt,
+                                prior_response=result.raw_response,
+                                phase="dynamic_check_followup",
+                                manifest=_manifest_input(context),
+                                followup_includes_manifest=True,
+                                response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps),
+                            )
                         else:
                             # Never guess an implicit last session. A provider that did not
                             # expose an ID cannot safely retain dynamic-check context.
                             raise RuntimeError("Reviewer provider did not return an explicit session ID for dynamic follow-up")
+                    verify_execution_target("dynamic-check follow-up completion")
+                    used_backend, used_type, used_model = manager_identity()
+                    reviewer_provenance = "/".join(part for part in (used_backend, used_type, used_model) if part) or "unavailable"
                     result = _parse_reviewer_response("dynamic_check_followup", followup_response, result.test_oracle_gaps, closure_input, reviewer_provenance)
                     current_gap_decision_ids = frozenset(gap.gap_id for gap in result.test_oracle_gaps)
                     _log_contextual_parse_diagnostics(result, followup_response, backend_manager, pr_number, "dynamic_check_followup")
@@ -4473,9 +4708,11 @@ def run_adversarial_validation(
                     completion_session_id,
                     completion_prompt,
                     retained_local=completion_retained_local,
+                    response_check=lambda response: check_reviewer_response(response, canonical_recorded_gaps),
                 )
             else:
                 completion_response = run_llm_prompt(completion_prompt, backend_manager=backend_manager, is_noedit=not pr_review_designated())
+            check_reviewer_response(completion_response, canonical_recorded_gaps)
             verify_execution_target("test-oracle gap completion response")
             if not validation_snapshot_is_current(repo_name, pr_data, config, github_client, context.validation_snapshot):
                 raise RuntimeError("repository/PR/head/base/Requirements snapshot changed or could not be reconfirmed")
@@ -4550,6 +4787,10 @@ def run_adversarial_validation(
     result.review_input_context_identity = validation_input_identity(context)
     result.accepted_finding_projection = project_accepted_findings(bridge, projection_target, claimed_review_threads, accepted_finding_dispositions(result, claimed_review_threads, accepted_projection, head_sha)) if accepted_projection.records else accepted_projection
 
+    # A controller-selected fresh follow-up has its own provider identity.
+    # Persist the latest completed turn rather than the initial review session.
+    used_backend, used_type, used_model = manager_identity()
+    provider_session_id = getattr(backend_manager, "_last_session_id", None)
     if was_resumed:
         persisted_session_id = provider_session_id if isinstance(provider_session_id, str) and provider_session_id else stored_session.session_id if stored_session else ""
     else:

@@ -36,7 +36,7 @@ The retirement transaction follows a crash-safe commit sequence: acquired-start 
 
 ## Evidence Collection for Retirement Decisions
 
-The `implementation_retirement_observer` module derives authoritative `ImplementationRetirementObservation` instances from live API data. It is strictly read-only — it does not close issues, merge or reopen PRs, send Jules messages, or mutate any store.
+The `implementation_retirement_observer` module derives authoritative `ImplementationRetirementObservation` instances from strict GitHub reads and durable ownership data. It is strictly read-only — it does not close issues, merge or reopen PRs, send Jules messages, or mutate any store. Scheduled production reclamation does not construct or invoke `JulesClient`; historical Jules membership whose terminal state is no longer observable remains explicitly `UNKNOWN` and is isolated to that owner, while Codex Cloud and local owners continue through their supported evidence paths. Codex reclamation retains an owner as unknown when its CloudManager binding identifies a different historical provider, and rechecks that binding before retirement.
 
 ### PR Candidate Set Construction
 
@@ -52,9 +52,29 @@ Each candidate PR is read individually with the strict, cache-bypassing PR metad
 
 Jules ownership resolution also queries the repository's real `CloudRunRepository` API — `list_for_issue(issue_number)` (preferred) or `list_all()` — never invented methods. This surfaces accepted/unresolved Jules work recorded in `CloudRunRepository` even when it has not yet been mirrored into the slot's own `provider_sessions` list, so such work cannot be silently excluded from retirement evidence.
 
+### Retained Retry Ownership
+
+Reclamation reads the exact repository/Issue retry journal without creating or
+migrating it. Remote accepted receipts remain attributable even when a process
+stopped before CloudManager, CloudRun, or slot membership was projected. A
+claimed or indeterminate remote submission without a session receipt remains
+explicitly unknown. An uncertain retry alone does not stop collection of available CloudManager
+and CloudRun session attribution. Captured remote predecessors remain evidence even when the
+successor used a local backend or definitely did not start.
+
+Historical Jules evidence stays unknown on both the ordinary and Codex
+reclamation paths, without a Jules API request and without blocking an unrelated
+owner. Pointer supersession and a different generation do not prove terminality;
+only matching retired owner, generation, and session history discharges an old
+receipt. Captured predecessors have no recorded predecessor generation and are
+discharged only by the same owner's retired session history. A missing journal
+contains no retry evidence, while an unreadable one
+retains the affected reservation as unknown. Codex's supported retry evidence
+still follows its complete reconstruction and terminality checks.
+
 ### Jules Session Observation
 
-Each bound Jules session is read individually with a direct session GET (not from the cached full-session list). COMPLETED and FAILED states are terminal candidates only when established PR publication exists in the session's outputs. COMPLETED without established publication is retained as ACTIVE (waiting-for-publication). Every `pullRequest` or `pull_request` output in both mapping and list payloads is preserved without flattening to avoid silently discarding additional output entries, and a PR is identified either by a `number` field or by parsing the canonical GitHub PR URL, with repository identity always validated so a foreign repository's PR number is never reinterpreted as local. Only `pullRequest`/`pull_request` output keys are ever treated as PR evidence — a URL-shaped value under an unrelated output key is never adopted.
+Legacy diagnostic callers may still supply a Jules reader and read each bound session individually with a direct session GET (not from the cached full-session list). The scheduled production path supplies no reader and records every durably attributed Jules session as `UNKNOWN`, rather than treating the missing response as an empty session set or terminal evidence. When explicit diagnostic evidence is available, COMPLETED and FAILED states are terminal candidates only when established PR publication exists in the session's outputs. COMPLETED without established publication is retained as ACTIVE (waiting-for-publication). Every `pullRequest` or `pull_request` output in both mapping and list payloads is preserved without flattening to avoid silently discarding additional output entries, and a PR is identified either by a `number` field or by parsing the canonical GitHub PR URL, with repository identity always validated so a foreign repository's PR number is never reinterpreted as local. Only `pullRequest`/`pull_request` output keys are ever treated as PR evidence — a URL-shaped value under an unrelated output key is never adopted.
 
 Recognition never requires the `number` field: the official Jules Get Session example (`outputs: [{pullRequest: {url, title, description}}]`) supplies only a `url`/`html_url`, and this alone establishes the exact repository/PR identity (Issue #2284). GitHub PR URLs are parsed strictly — `https://github.com/<owner>/<repo>/pull/<positive-decimal-number>` only, with the host matched exactly (case-insensitively), no user-info, no non-default port, and no extra path segments; a trailing slash, query string, or fragment does not change identity, but a host look-alike (e.g. `github.com` embedded in a different host or path) never matches. When an entry supplies more than one identity signal — `number`, `url`, `html_url`, `repository.full_name`, `base.repo.full_name` — every signal present must agree; a malformed URL, a boolean/zero/negative/non-integer `number`, or any disagreement between signals marks discovery incomplete (never silently ignored, and never silently trusted from a single field). An entry with no identity evidence at all (only `title`/`description`) is genuinely-empty publication, not malformed. Exact duplicate PR identities collapse to one; distinct PR outputs are all preserved.
 

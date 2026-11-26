@@ -217,7 +217,8 @@ def test_raw_pass_with_upheld_accepted_finding_becomes_actionable_and_references
     assert application.decision.corrections[0].qualified_requirements == ("#2401/REQ-001",)
     assert application.decision.corrections[0].source_identity == record.source_identity
     effective = application.result
-    assert effective.result == expected and effective.raw_model_result == result.result
+    assert effective.result == expected
+    assert effective.raw_model_result == result.raw_model_result == "PASS"
     assert not effective.is_pass and not effective.allows_auto_merge
     if gap:
         assert [item.gap_id for item in effective.open_test_oracle_gaps] == [record.known_gap_id] and not effective.findings

@@ -164,3 +164,23 @@ def test_machine_readable_diagnostics_preserve_full_identity(tmp_path):
         "invocation-4",
         "result checkpoint retained",
     )
+
+
+def test_read_for_issue_never_creates_or_migrates_a_journal(tmp_path):
+    path = tmp_path / "absent" / "handoffs.db"
+    assert RetryDispatchRepository.read_for_issue("owner/repo", 2185, path) == ()
+    assert not path.parent.exists()
+    store = RetryDispatchRepository("owner/repo", path)
+    store.claim(authority(), "jules", "jules", {})
+    receipt = store.record_outcome("request-1", "accepted", external_id="historical-jules")
+    assert RetryDispatchRepository.read_for_issue("owner/repo", 2185, path) == (receipt,)
+    assert RetryDispatchRepository.read_for_issue("other/repo", 2185, path) == ()
+    assert RetryDispatchRepository.read_for_issue("owner/repo", 99, path) == ()
+
+    # Historical schemas did not have this projection checkpoint.
+    with store._connection:
+        store._connection.execute("ALTER TABLE retry_handoffs DROP COLUMN handoff_complete")
+    before = path.read_bytes()
+    assert RetryDispatchRepository.read_for_issue("owner/repo", 2185, path) == (receipt,)
+    assert path.read_bytes() == before
+    assert "handoff_complete" not in {row[1] for row in store._connection.execute("PRAGMA table_info(retry_handoffs)")}

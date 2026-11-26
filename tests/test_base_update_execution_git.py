@@ -384,3 +384,24 @@ def test_definitive_entry_refuses_changed_head_and_base_before_git_effects(tmp_p
     operation.assert_not_called()
     assert git(work, "rev-parse", "HEAD").stdout.strip() == original_head
     assert git(work, "status", "--porcelain").stdout == ""
+
+
+def test_historical_jules_base_conflict_does_not_send_or_fallback(tmp_path, monkeypatch, _use_real_commands):
+    work, pr_data = conflict_repository(tmp_path)
+    monkeypatch.chdir(work)
+    pr_data.update(user={"login": "google-labs-jules"}, body="Session ID: historical-session")
+    client = MagicMock()
+    with (
+        patch("auto_coder.jules_client.JulesClient", return_value=client) as jules,
+        patch("auto_coder.pr_processor._guard_outbound_jules_send", return_value=True),
+        patch("auto_coder.pr_processor._dispatch_jules_repair", side_effect=lambda _r, _p, _k, _s, send: send()),
+        patch("auto_coder.pr_processor._dispatch_cloud_conflict_repair") as cloud,
+        patch("auto_coder.pr_processor._dispatch_local_conflict_repair") as local,
+    ):
+        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig())
+    jules.assert_not_called()
+    client.send_message.assert_not_called()
+    cloud.assert_not_called()
+    local.assert_not_called()
+    assert result.repair_result.disposition is RepairDisposition.REFUSED
+    assert not (work / ".git" / "MERGE_HEAD").exists()

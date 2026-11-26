@@ -10,19 +10,26 @@ to an ordinary route.
 
 Every invocation is self-contained and bound to the requested head, reviewed
 base, Requirements snapshot, strong-policy identity, round, and attempt.
-Controller-designated ordinary PR reviewers and Strong Audit may edit source,
-add focused regressions, and run the necessary tests, builds, setup or dependency
-commands in their private workspace. They do not run an automatic unscoped
-implementation baseline or the complete repository test suite. Explicitly
-read-only callers and Issue/specification reviewers retain their no-edit
-instructions and enforcement.
+Controller-designated ordinary PR reviewers and Strong Audit may edit source
+and add focused regressions only for a demonstrated pre-edit explicit-Requirement
+violation, absent required test deliverable, or qualifying material test-oracle gap.
+They may run the necessary focused tests, builds, setup or dependency commands
+in their private workspace. PASS requires no retained source edits; optional
+improvements and inconclusive suspicions cannot authorize a correction. They do
+not run an automatic unscoped implementation baseline or the complete repository
+test suite. Explicitly read-only callers and Issue/specification reviewers retain
+their no-edit instructions and enforcement.
 
 The execution checkout's HEAD and source-file state are checked at review
 boundaries. A changed source tree invalidates the input-head verdict even when
-HEAD itself did not move. The controller publishes retained corrections through
-the existing durable local correction publisher, then requires independent
-review and CI for the new candidate. The editing conversation cannot supply
-that independent approval. See [Editable PR reviewers](editable-pr-reviewers.md).
+HEAD itself did not move. Before publishing, the controller requires a valid
+role-specific blocking response with concrete current-Requirement evidence about
+the admitted pre-edit HEAD. Editing Strong Audit returns FINDINGS, even when
+its local correction passes a check; the same editing conversation cannot
+reclassify its patch as PASS. Eligible corrections use the existing durable
+local publisher, then require independent review and CI for the new candidate.
+The editing conversation cannot supply that independent approval.
+See [Editable PR reviewers](editable-pr-reviewers.md).
 Ordinary reviewers may still request focused dynamic checks through their
 existing response protocol; execution success alone never proves semantic
 Requirement coverage. The prompt/render regressions cover both permission modes.
@@ -34,7 +41,11 @@ head corrective diff.
 
 Strong findings preserve their stable ID, exact Requirement references and
 text, reachable counterexample, expected and actual behavior, evidence,
-production boundary, consequence, and focused regression oracle. A regression
+production boundary, consequence, and focused regression oracle. Complete
+`REQ-NNN: ...` quotations remain in those portable findings. Before an editable
+correction can be published, the controller verifies the matching qualified ID
+and exact current body and retains that canonical body in its separate
+correction basis; publication and recovery still recheck the live contract. A regression
 gap also records the incorrect implementation admitted by existing tests and why
 those tests remain green. Ordinary closure must return exactly one evidence-backed
 `FIXED`, `INVALID`, `OPEN`, or `INCONCLUSIVE` disposition for every accepted

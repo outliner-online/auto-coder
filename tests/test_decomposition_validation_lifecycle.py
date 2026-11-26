@@ -785,10 +785,7 @@ def test_stale_jules_replacement_enforces_parent_set_and_sibling_transitions(tmp
         replacement.assert_not_called()
         increment.assert_not_called()
         assert slots.active_execution_ids(owner) == ()
-        if scenario == "became-parent":
-            child_analysis.assert_called_once()
-        elif scenario == "reopened-predecessor":
-            assert child_analysis.call_count == 2
+        child_analysis.assert_not_called()
 
 
 def test_stale_jules_child_cannot_fallback_after_parent_readiness_withdrawal(tmp_path):
@@ -863,11 +860,8 @@ def test_parent_generation_validates_despite_retained_first_child_owner(tmp_path
     dispatch.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "child_ready,child_verdict,replacement_expected",
-    [(False, "READY", True), (True, "BLOCKED", False)],
-)
-def test_stale_jules_inherited_readiness_and_blocked_effects(tmp_path, child_ready, child_verdict, replacement_expected):
+@pytest.mark.parametrize("child_ready,child_verdict", [(False, "READY"), (True, "BLOCKED")])
+def test_stale_jules_inherited_readiness_and_blocked_effects(tmp_path, child_ready, child_verdict):
     """The real daemon withdraws explicit child readiness and preserves the parent."""
     from auto_coder.implementation_slots import ImplementationOwner
 
@@ -912,16 +906,10 @@ def test_stale_jules_inherited_readiness_and_blocked_effects(tmp_path, child_rea
     ):
         engine.handle_stale_jules_issue_sessions("owner/repo")
 
-    assert replacement.called is replacement_expected
-    assert increment.called is replacement_expected
+    replacement.assert_not_called()
+    increment.assert_not_called()
     assert slots.active_execution_ids(owner) == ()
-    if child_verdict == "BLOCKED":
-        assert github.remove_labels.call_args_list == [
-            call("owner/repo", 11, ["implementation-ready"], item_type="issue"),
-        ]
-    else:
-        github.remove_labels.assert_not_called()
-        assert not is_implementation_ready(child)
+    github.remove_labels.assert_not_called()
 
 
 def test_closed_parent_cannot_publish_pause_or_create_continuation_episode(tmp_path):

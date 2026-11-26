@@ -125,8 +125,6 @@ from .issue_stage_routing import (
     review_classification,
     standalone_review_generation,
 )
-from .jules_client import invalidate_jules_sessions_cache
-from .jules_engine import check_and_resume_or_archive_sessions, check_and_start_recurrent_jules_tasks
 from .label_manager import LabelManager
 from .llm_backend_config import active_repo_context, get_pr_review_allowlist_from_config, get_review_adjudicator_allowlist_from_config
 from .local_job_handoff import LocalJobClaim, LocalJobKind, LocalJobRecord, LocalJobStore, LocalJobStoreUnavailable
@@ -180,7 +178,6 @@ from .specification_validation_lifecycle import (
     configured_provider_identity,
     validation_publication_identity,
 )
-from .stale_jules_recovery import find_pending_stale_jules_recovery
 from .test_log_utils import extract_important_errors
 from .test_result import TestResult
 from .trace_logger import get_trace_logger
@@ -245,7 +242,6 @@ def _reconciliation_request_error(error: BaseException) -> GitHubRequestError | 
     return None
 
 
-JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS = 60 * 60
 LOCAL_JOB_WORKSPACE_RECLAMATION_INTERVAL_SECONDS = 60 * 60
 MAINTENANCE_INTERVAL_SECONDS = 60
 CAPACITY_STATE_CHECK_INTERVAL_SECONDS = 1
@@ -1090,10 +1086,6 @@ class AutomationEngine:
         self._pr_local_job_runner: Optional[LocalJobRunner] = None
         self._issue_job_runtimes: Dict[str, IssueJobRuntime] = {}
         self._issue_runtime_composition: Optional[IssueRuntimeComposition] = None
-        # Full Jules discovery is deliberately delayed after startup.  Claiming
-        # a cycle advances this deadline before any HTTP work begins, so a
-        # failed listing cannot cause a hot retry on the next loop iteration.
-        self._next_jules_session_list_refresh = time.monotonic() + JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS
         # Local workspace reclamation has its own provider-neutral cadence.
         # Claiming advances the deadline before store access so a broken store
         # cannot turn the producer into a cleanup retry hot loop.
@@ -1329,15 +1321,6 @@ class AutomationEngine:
                 await asyncio.gather(force_wait, return_exceptions=True)
             await asyncio.sleep(0)
 
-    def _claim_jules_session_list_refresh(self) -> bool:
-        """Claim the hourly full-list maintenance cycle when it is due."""
-        now = time.monotonic()
-        if now < self._next_jules_session_list_refresh:
-            return False
-
-        self._next_jules_session_list_refresh = now + JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS
-        return True
-
     def _claim_local_job_workspace_reclamation(self) -> bool:
         """Claim the hourly provider-neutral local workspace cleanup cycle."""
         now = time.monotonic()
@@ -1395,18 +1378,6 @@ class AutomationEngine:
             if "closed pr #" in action_lower or "closed unfixable pr" in action_lower or "closed stale jules pr" in action_lower or "closed empty jules pr" in action_lower or "closing pr" in action_lower:
                 return True
         return False
-
-    async def check_and_start_recurrent_jules_tasks_async(self, repo_name: str) -> None:
-        """Scan .auto-coder/prompts/*.md files and start recurrent Jules tasks if not already running."""
-        try:
-            await self._run_local_critical(
-                "recurrent provider scan",
-                check_and_start_recurrent_jules_tasks,
-                repo_name,
-                self._get_implementation_slots(repo_name),
-            )
-        except Exception as e:
-            logger.error(f"Error checking/starting recurrent Jules tasks: {e}")
 
     def handle_stale_jules_issue_sessions(self, repo_name: str) -> List[str]:
         """Hand issues over to backend_with_high_score when Jules times out without a PR."""
@@ -3700,7 +3671,6 @@ class AutomationEngine:
             logger.info("Closed item handled on startup, continuing to producer loop")
             get_health_monitor().record_event("producer_startup", "closed item handled on startup", repo_name)
 
-        skip_jules_sessions = False
         iteration = 0
         while True:
             try:
@@ -3730,37 +3700,11 @@ class AutomationEngine:
                 if self.is_draining:
                     return
 
-                if not skip_jules_sessions and self._claim_jules_session_list_refresh():
-                    # All list-dependent maintenance shares this cycle's fresh listing.
-                    invalidate_jules_sessions_cache()
-
-                    # Resume sessions
-                    heartbeat("producer:jules-sessions", f"iteration {iteration}")
-                    await self._run_local_critical("remote session reconciliation", check_and_resume_or_archive_sessions, repo_name)
-                    if self.is_draining:
-                        return
-
-                    # Take issues away from Jules sessions that timed out without creating a PR
-                    await self._run_local_critical("stale remote session reconciliation", self.handle_stale_jules_issue_sessions, repo_name)
-
-                    if self.is_draining:
-                        return
-
-                    # Check and start recurrent Jules tasks
-                    await self.check_and_start_recurrent_jules_tasks_async(repo_name)
-                    if self.is_draining:
-                        return
-                elif skip_jules_sessions:
-                    logger.info("Resumed loop early after PR merge/close; skipping Jules session enumeration")
-                    skip_jules_sessions = False
-
                 if self.is_draining:
                     return
 
                 heartbeat("producer:maintenance-sleep", f"{MAINTENANCE_INTERVAL_SECONDS}s")
-                woken_early = await self._sleep_or_wake(MAINTENANCE_INTERVAL_SECONDS)
-                if woken_early:
-                    skip_jules_sessions = True
+                await self._sleep_or_wake(MAINTENANCE_INTERVAL_SECONDS)
 
             except asyncio.CancelledError:
                 logger.info("Producer loop cancelled")
@@ -3946,25 +3890,8 @@ class AutomationEngine:
         return execution_id, False
 
     def _pending_stale_jules_recovery(self, repo_name: str, item_number: int, generation: str) -> Optional[ImplementationRetryRequest]:
-        """Return this Issue's pending automatic stale-Jules recovery, if still current.
-
-        A pending recovery captured (by ``_close_stale_jules_pr``, Issue
-        #2286) against a since-superseded Implementation generation is
-        permanently invalidated here rather than silently reused or left to
-        linger (REQ-005); the caller then falls through to ordinary
-        admission with no special retry semantics.
-        """
-        pending = find_pending_stale_jules_recovery(self.issue_stage_routing, repo_name, item_number)
-        if pending is None:
-            return None
-        if pending.generation != generation:
-            self.issue_stage_routing.invalidate_retry_request(
-                pending.request_id,
-                generation,
-                reason="Implementation generation changed since the automatic stale-Jules recovery was captured",
-            )
-            return None
-        return pending
+        """Never turn a historical stale-Jules row into fresh authority."""
+        return None
 
     def _routing_members_are_stable(self, repo_name: str, members: List[Dict[str, Any]]) -> bool:
         """Retain creation-anchored invalidations until every member is stable."""
@@ -4750,14 +4677,6 @@ class AutomationEngine:
         freed slot can admit a new Issue without waiting for an unrelated
         webhook or the next scheduled tick.
         """
-        jules_client: Optional[Any] = None
-        try:
-            from .jules_client import JulesClient
-
-            jules_client = JulesClient()
-        except Exception as exc:
-            logger.debug(f"Jules client unavailable for reclamation checks on {repo_name}: {exc}")
-
         cloud_manager: Optional[Any] = None
         cloud_run_store: Optional[Any] = None
         cloud_provider_stores_available = True
@@ -4783,7 +4702,6 @@ class AutomationEngine:
                 slots,
                 None,
                 github_client=self.github,
-                jules_client=jules_client,
                 cloud_manager=cloud_manager,
                 cloud_run_store=cloud_run_store,
                 cloud_provider_stores_available=cloud_provider_stores_available,
@@ -6216,8 +6134,7 @@ class AutomationEngine:
                 if _is_jules_pr(pr_data) and pr_data.get("draft"):
                     logger.info(f"Jules PR #{pr_number} is a draft, marking as ready for review")
                     try:
-                        token = self.github.token
-                        api = get_ghapi_client(token)
+                        api = self.github.api_for(repo_name, required_permissions={"pull_requests": "read"})
                         node_id = pr_data.get("node_id")
 
                         if not node_id:
@@ -6245,7 +6162,12 @@ class AutomationEngine:
                               }
                             }
                             """
-                            self.github.graphql_query(query=mutation, variables={"id": node_id})
+                            self.github.graphql_query(
+                                query=mutation,
+                                variables={"id": node_id},
+                                repo_name=repo_name,
+                                required_permissions={"pull_requests": "write"},
+                            )
                             logger.info(f"Successfully marked Jules PR #{pr_number} as ready for review (via GraphQL)")
                             # Update local data
                             pr_data["draft"] = False
@@ -6359,7 +6281,15 @@ class AutomationEngine:
                 # `checks` was already computed above): it can never
                 # substitute for that mandatory boundary's own fresh,
                 # same-HEAD confirmation (REQ-005).
-                dependency_bot_flag_decision = _dependency_bot_flag_decision(_is_dependabot_pr(pr_data), self.config.IGNORE_DEPENDABOT_PRS, self.config.AUTO_MERGE_DEPENDABOT_PRS)
+                try:
+                    controller_identity = self.github.get_authenticated_controller_identity(repo_name)
+                except Exception:
+                    controller_identity = None
+                dependency_bot_flag_decision = _dependency_bot_flag_decision(
+                    _is_dependabot_pr(pr_data, controller_identity),
+                    self.config.IGNORE_DEPENDABOT_PRS,
+                    self.config.AUTO_MERGE_DEPENDABOT_PRS,
+                )
                 if dependency_bot_flag_decision is None:
                     dependency_bot_decision = _dependency_bot_readiness_decision(
                         is_open=True,
@@ -6835,6 +6765,7 @@ class AutomationEngine:
                 deferred_result = self._defer_wrapped_reconciliation(repo_name, item_number, candidate.data, exc, result)
                 if deferred_result is not None:
                     result = deferred_result
+                    result.actions = ["Deferred - Parent-Issue reconciliation requires retry"]
                 logger.warning("Deferred relationship reconciliation for {}/#{}: {}", repo_name, item_number, exc)
                 if deferred_result is None:
                     _record_issue_stage_result(item_number, "issue.parent-reconciliation", f"issue#{item_number} parent reconciliation", Outcome.DEFERRED, {"reason": result.error})
@@ -7046,6 +6977,7 @@ class AutomationEngine:
                 except ParentOperationalError as exc:
                     deferred_result = self._defer_wrapped_reconciliation(repo_name, item_number, candidate.data, exc, result)
                     if deferred_result is not None:
+                        deferred_result.actions = ["Deferred - Parent-Issue reconciliation requires retry"]
                         return deferred_result
                     result.error = f"Parent-Issue reconciliation is temporarily unavailable: {exc}"
                     result.target_outcome = ExplicitTargetOutcome.DEFERRED
@@ -9110,28 +9042,6 @@ class AutomationEngine:
 
                 # Check for updates and restart if necessary
                 check_for_updates_and_restart()
-
-                if self._claim_jules_session_list_refresh():
-                    # All list-dependent maintenance shares this cycle's fresh listing.
-                    invalidate_jules_sessions_cache()
-
-                    # Check and resume failed Jules sessions. Passing the real
-                    # ImplementationSlotRepository is required so retired-session
-                    # guards (REQ-009) actually apply in this production maintenance
-                    # loop instead of silently no-opping on the None default.
-                    check_and_resume_or_archive_sessions(
-                        repo_name,
-                        self._get_implementation_slots(repo_name),
-                    )
-
-                    # Take issues away from Jules sessions that timed out without creating a PR
-                    self.handle_stale_jules_issue_sessions(repo_name)
-
-                    # Check and start recurrent Jules tasks
-                    check_and_start_recurrent_jules_tasks(
-                        repo_name,
-                        self._get_implementation_slots(repo_name),
-                    )
 
                 # Pull latest changes for monitored repository
                 try:

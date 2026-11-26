@@ -874,3 +874,49 @@ def test_redacted_gate_diagnostic_exposes_superseded_wait_and_new_outcome(
     wait = diagnostic.superseded_waits[0]
     assert (wait.reason, wait.retry_not_before) == ("surplus reserve denied", 100.0)
     assert wait.superseding_observation == "strong route unavailable"
+
+
+@pytest.fixture
+def build_strong_inputs(monkeypatch):
+    """Use the production contract builder with offline issue/config readers."""
+    from auto_coder.issue_context import IssueOracleResolution, VerifiedIssueOracle
+    from auto_coder.pr_processor import _two_tier_gate_inputs
+
+    config = MagicMock()
+    config.get_backend_strong_pr_adversarial_validation.return_value = None
+    config.get_strong_pr_adversarial_validation_backend_order.return_value = ["strong"]
+    config.get_strong_pr_adversarial_validation_default_backend.return_value = "strong"
+    monkeypatch.setattr("auto_coder.llm_backend_config.get_llm_config", lambda: config)
+    monkeypatch.setattr("auto_coder.pr_processor.TwoTierPrGate", lambda _repo: object())
+
+    def build(*bodies):
+        issues = tuple(VerifiedIssueOracle(2208 + index, body=body) for index, body in enumerate(bodies))
+        resolution = IssueOracleResolution(issues=issues)
+        monkeypatch.setattr("auto_coder.pr_processor.resolve_issue_oracles", lambda *_args, **_kwargs: resolution)
+        return _two_tier_gate_inputs(
+            MagicMock(),
+            "owner/repo",
+            {"head": {"sha": "head", "ref": "review-head", "repo": {"full_name": "owner/repo"}}, "base": {"sha": "base"}},
+        )
+
+    return build
+
+
+def test_strong_input_builder_does_not_promote_context_into_requirements(build_strong_inputs):
+    assert build_strong_inputs("## Context\nREQ-001: Add optional coverage.\n") is None
+
+
+def test_strong_input_builder_retains_only_explicit_contract_and_all_linked_ids(build_strong_inputs):
+    inputs = build_strong_inputs(
+        "## Objective\nREQ-099: Optional refactor.\n\n## Requirements\n- `REQ-001`: Preserve the source.\n2. REQ-002: Retain exact bytes.\n\n## Context\nREQ-003: Example only.\n",
+        "## Context\nREQ-004: Historical requirement.\n",
+    )
+    assert inputs is not None
+    assert inputs.contract.issue_ids == ("#2208", "#2209")
+    assert inputs.contract.requirements_text == "Issue #2208 REQ-001: Preserve the source.\nIssue #2208 REQ-002: Retain exact bytes."
+
+
+@pytest.mark.parametrize("requirements", ["", "REQ-001: First.\nREQ-001: Duplicate.", "REQ-001: Valid.\nUnnumbered obligation."])
+def test_strong_input_builder_refuses_malformed_explicit_contract(build_strong_inputs, requirements):
+    with pytest.raises(RuntimeError, match="Requirements section"):
+        build_strong_inputs(f"## Requirements\n{requirements}\n")

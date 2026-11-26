@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 from auto_coder.adversarial_validator import adversarial_validation_comment_marker
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.automation_engine import AutomationEngine
+from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.pr_processor import is_current_head_adversarial_review_blocked
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
@@ -146,6 +147,55 @@ class TestAdversarialReviewBlockedUnit:
 
 class TestAdversarialReviewBlockedPriorityIntegration:
     """Exercise the production candidate-collection path (AutomationEngine._get_candidates)."""
+
+    @patch("auto_coder.util.github_action._check_github_actions_status")
+    def test_controller_local_pr_keeps_ordinary_blocked_priority_without_widening_bots(
+        self,
+        mock_check_actions,
+        mock_github_client,
+        mock_gemini_client,
+        test_repo_name,
+    ):
+        """A proven controller local PR follows the former local-user review route."""
+        mock_github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+        mock_github_client.get_pr_comments.return_value = []
+        mock_github_client.get_pr_commits.return_value = []
+        mock_github_client.get_open_sub_issues.return_value = []
+        mock_github_client.has_linked_pr.return_value = False
+        mock_github_client.get_issue.return_value = {
+            "number": 42,
+            "title": "Spec",
+            "body": "",
+        }
+        mock_check_actions.side_effect = authoritative_ci_status(success=True, ids=[1])
+
+        priorities = {}
+        for number, login, account_id in (
+            (101, "auto-coder[bot]", 101),
+            (102, "former-controller", 202),
+            (103, "unrelated[bot]", 303),
+        ):
+            head_sha = str(number)[-1] * 40
+            pr_data = _pr_data(number, head_sha)
+            pr_data.update(
+                {
+                    "body": "Fixes #42\n<!-- auto-coder:local-llm -->",
+                    "user": {"login": login, "id": account_id},
+                    "head": {"ref": f"issue-{number}", "sha": head_sha},
+                }
+            )
+            mock_github_client.get_open_prs_json.return_value = [pr_data]
+            mock_github_client.get_pr_details.return_value = pr_data
+            mock_github_client.get_pr_reviews_strict.return_value = [_adversarial_review(head_sha, "NEEDS_FIX")]
+
+            candidates = AutomationEngine(mock_github_client)._get_candidates(test_repo_name, max_items=10)
+            priorities[login] = candidates[0].priority
+
+        assert priorities == {
+            "auto-coder[bot]": 1,
+            "former-controller": 1,
+            "unrelated[bot]": 2,
+        }
 
     @patch("auto_coder.util.github_action._check_github_actions_status")
     def test_needs_fix_pr_scheduled_at_priority_one(self, mock_check_actions, mock_github_client, mock_gemini_client, test_repo_name):

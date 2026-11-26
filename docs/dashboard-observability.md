@@ -13,6 +13,17 @@ these facts without a new event schema or dashboard-owned decision. Strong
 reviewer edits retain the existing deferred `pr.strong-audit` reason and retry
 path, without accepting that invocation's Strong result.
 
+Correction eligibility is checked before publication. A reviewer that changes
+source while returning PASS, INCONCLUSIVE, malformed output, or no qualifying
+current-Requirement evidence is refused with `local_phase=not_started`,
+`published=false`, and a `reason` beginning `reviewer correction refused:`.
+The existing `reviewer-source-changes` effect and role-specific deferred trace
+retain that reason; ordinary validation also exposes
+`diagnostic_category=reviewer_correction_refused`. These facts represent refused
+publication, never a corrective commit, successful handoff, approval or merge.
+The dashboard uses its existing stage and reason projection; no event schema or
+renderer changes are introduced.
+
 Run `bash scripts/test.sh tests/test_editable_pr_review_flow.py` for real
 detached-workspace and bare-origin publication, interrupted reviewer/check
 refusal, pending CI followed by fresh-session review, and lost-push-response
@@ -712,6 +723,21 @@ the durable finding bundle remains supplied. The production prompt-selection
 regression is `tests/test_adversarial_validator.py::TestRunAdversarialValidation::test_local_rereview_starts_fresh_when_private_workspace_was_released`
 (all six local adapter types). No event schema or dashboard projection changes;
 an explicit continuation refusal remains a failed interaction.
+
+Dynamic-check target corrections and result follow-ups now make this same
+transport selection before entry. A local backend whose previous private root
+was released emits a new `llm.local-execution` with invocation mode `fresh` and
+keeps the existing PR execution identity. Cloud or retained-local continuations
+keep their existing mode; a rejected explicit continuation never falls back to
+fresh execution. The validation-attempt prompt fingerprint and manifest describe
+the actual complete fresh-call prompt. Existing review-result, source-correction
+and thread-disposition emissions remain unchanged, so the dashboard requires no
+new schema or projection. Run
+`bash scripts/test.sh tests/test_adversarial_dynamic_followup.py` for the real
+manager's released-workspace recovery, both target-correction paths, exact prompt
+fingerprints, refusal without fallback, and source-edit rejection. These checks
+cover the changed producer boundary; existing local-execution mounted-view
+coverage remains authoritative for rendering those unchanged events.
 The parametrized `test_unbounded_scope_requires_a_renewed_strong_audit_and_never_authorizes_merge`
 in `tests/test_single_review_ordinary_closure_flow.py` also covers a complete
 EXPANDED/UNKNOWN assessment carrying INCONCLUSIVE: production emits

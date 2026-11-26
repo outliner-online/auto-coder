@@ -121,7 +121,7 @@ def test_incremental_rereview_semantic_cases_use_production_prompt_and_record_ex
 
     case_document = yaml.safe_load((target / "cases/policy.yaml").read_text())
     cases = case_document["tests"]
-    assert len(cases) == 3
+    assert len(cases) == 4
     case_spec = importlib.util.spec_from_file_location("incremental_pr_rereview_cases", target / "cases.py")
     assert case_spec is not None and case_spec.loader is not None
     case_module = importlib.util.module_from_spec(case_spec)
@@ -131,6 +131,7 @@ def test_incremental_rereview_semantic_cases_use_production_prompt_and_record_ex
         "fixed-original-oracle-converges",
         "unrelated-variant-and-parent-demand-are-not-blockers",
         "correction-induced-material-defect-blocks",
+        "local-required-regression-fix-retains-input-head-finding",
     ]
     rendered = module.render({"vars": cases[0]["vars"]})
     assert "Previous reviewed head: accepted-head" in rendered
@@ -148,8 +149,14 @@ def test_incremental_rereview_semantic_cases_use_production_prompt_and_record_ex
     assert record["local_outcome"] == "NOT_RUN"
     assert "did not execute a real semantic model" in record["local_reason"]
     assert record["observed_ci_execution"]["real_model_executed"] is True
+    # The immutable historical run predates the correction-eligibility case.
     assert record["observed_ci_execution"]["executed_cases"] == 3
-    assert set(record["observed_ci_execution"]["observations"]) == set(case["vars"]["id"] for case in cases)
+    assert set(record["observed_ci_execution"]["observations"]) == {
+        "fixed-original-oracle-converges",
+        "unrelated-variant-and-parent-demand-are-not-blockers",
+        "correction-induced-material-defect-blocks",
+    }
+    assert "local-required-regression-fix-retains-input-head-finding" not in record["observed_ci_execution"]["observations"]
 
 
 def test_prompt_key_and_shared_dependencies_select_only_affected_targets(tmp_path: Path) -> None:

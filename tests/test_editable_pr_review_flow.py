@@ -8,6 +8,7 @@ code against a real local bare repository.
 from __future__ import annotations
 
 import json
+import runpy
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -91,9 +92,80 @@ def _correction_events(after_sequence: int):
     ]
 
 
+def _ordinary_correction_payload() -> str:
+    payload = json.loads(PASS_PAYLOAD)
+    payload.update(
+        result="NEEDS_FIX",
+        summary="The admitted HEAD returns incorrect. The local correction now returns hello; it still needs independent review.",
+        requirement_coverage=[{"requirement_id": "#99/REQ-001", "status": "VIOLATED", "evidence": "At the admitted HEAD, sample.greet() returns incorrect instead of hello."}],
+        findings=[
+            {
+                "finding_identity": "incorrect-greeting",
+                "correction_identity": "restore-required-greeting",
+                "requirement_ids": ["#99/REQ-001"],
+                "violated_requirement": "greet() returns the string hello.",
+                "evidence_classification": "DEMONSTRATED",
+                "reachability": "Import sample and call greet() at the admitted input HEAD.",
+                "required_behavior": "greet() returns the string hello.",
+                "actual_behavior": "greet() returns the string incorrect.",
+                "evidence": "sample.py:2 at the admitted HEAD returns incorrect; the pre-edit call confirms this value.",
+                "counterexample": "Calling greet() at the admitted HEAD must return hello but returns incorrect.",
+                "test_gap": "The admitted repository has no greeting regression test.",
+                "suggested_regression_scenario": "Import sample and assert greet() == 'hello'.",
+                "anchor_path": "sample.py",
+                "anchor_line": 2,
+                "anchor_side": "RIGHT",
+            }
+        ],
+    )
+    return json.dumps(payload)
+
+
+def _strong_response_identity(prompt: str) -> dict:
+    identity_block = prompt.split("Identity (copy every value exactly into the JSON response):\n", 1)[1].split("Issue identities:", 1)[0]
+    payload = {}
+    for line in identity_block.splitlines():
+        key, separator, value = line.strip().partition("=")
+        if separator:
+            payload[key] = int(value) if key == "finding_set_revision" else value
+    return payload
+
+
+def _strong_correction_response(prompt: str) -> str:
+    payload = _strong_response_identity(prompt)
+    payload.update(
+        result="FINDINGS",
+        summary="The admitted HEAD returns incorrect. The local correction returns hello but requires independent review.",
+        findings=[
+            {
+                "finding_id": "incorrect-greeting",
+                "requirement_ids": ["#99/REQ-001"],
+                "requirement_texts": ["REQ-001: greet() returns the string hello."],
+                "counterexample": "Calling greet() at the admitted HEAD must return hello but returns incorrect.",
+                "expected_behavior": "greet() returns hello.",
+                "actual_behavior": "greet() returns incorrect.",
+                "evidence": "sample.py:2 at the admitted HEAD returns incorrect; the pre-edit call confirms this value.",
+                "affected_boundary": "sample.py:greet",
+                "material_consequence": "The public greeting result violates the explicit required value.",
+                "focused_regression_scenario": "Import sample and assert greet() == 'hello'.",
+                "is_regression_gap": False,
+            }
+        ],
+    )
+    return json.dumps(payload)
+
+
 def _edit_source(root: Path) -> None:
     source = root / "sample.py"
-    source.write_text(source.read_text() + "\n# Reviewed greeting implementation.\n", encoding="utf-8")
+    assert runpy.run_path(str(source))["greet"]() == "incorrect"
+    source.write_text('def greet():\n    return "hello"\n', encoding="utf-8")
+    assert runpy.run_path(str(source))["greet"]() == "hello"
+
+
+def _optional_source_edit(root: Path) -> None:
+    source = root / "sample.py"
+    assert runpy.run_path(str(source))["greet"]() == "hello"
+    source.write_text(source.read_text() + "\n# Optional greeting explanation.\n", encoding="utf-8")
 
 
 def _write_runtime_outputs(root: Path) -> None:
@@ -106,7 +178,13 @@ def _write_runtime_outputs(root: Path) -> None:
 @pytest.fixture
 def flow(tmp_path, monkeypatch, _use_real_commands, audit_store, request):
     repository, head = _build_pr_repo(tmp_path)
-    if getattr(request, "param", "") in {"dynamic", "interrupted-dynamic"}:
+    scenario_kind = getattr(request, "param", "")
+    if scenario_kind == "defective":
+        (repository / "sample.py").write_text('def greet():\n    return "incorrect"\n', encoding="utf-8")
+        _git(["add", "sample.py"], repository)
+        _git(["commit", "--amend", "--no-edit"], repository)
+        head = _git(["rev-parse", "HEAD"], repository)
+    if scenario_kind in {"dynamic", "interrupted-dynamic"}:
         (repository / "tests").mkdir()
         (repository / "tests" / "test_sample.py").write_text("def test_greeting():\n    assert True\n", encoding="utf-8")
         (repository / "scripts").mkdir()
@@ -142,9 +220,10 @@ def flow(tmp_path, monkeypatch, _use_real_commands, audit_store, request):
 
     class Reviewer(MockReviewerClient):
         mutation: Callable[[Path], None] | None = None
+        response_factory: Callable[[str], str] | None = None
         fail_after_edit = False
 
-        def _response(self, mode: str, is_noedit: bool) -> str:
+        def _response(self, mode: str, is_noedit: bool, prompt: str) -> str:
             assert is_noedit is False
             root = Path(CommandExecutor.run_command(["git", "rev-parse", "--show-toplevel"]).stdout.strip())
             examined = _git(["rev-parse", "HEAD"], root)
@@ -156,15 +235,16 @@ def flow(tmp_path, monkeypatch, _use_real_commands, audit_store, request):
             if self.fail_after_edit:
                 raise RuntimeError("reviewer interrupted before returning a result")
             self.calls.append(mode)
-            return self._next()
+            return self.response_factory(prompt) if self.response_factory is not None else self._next()
 
         def _run_llm_cli(self, prompt, is_noedit=False):
-            return self._response("fresh", is_noedit)
+            return self._response("fresh", is_noedit, prompt)
 
         def continue_session(self, session_id, prompt, is_noedit=False):
-            return self._response("continue", is_noedit)
+            return self._response("continue", is_noedit, prompt)
 
-    reviewer = Reviewer("reviewer", responses=[PASS_PAYLOAD, PASS_PAYLOAD], session_id="review-provider-session")
+    first_response = _ordinary_correction_payload() if scenario_kind == "defective" else PASS_PAYLOAD
+    reviewer = Reviewer("reviewer", responses=[first_response, PASS_PAYLOAD], session_id="review-provider-session")
     manager = _build_backend_manager(monkeypatch, {"reviewer": reviewer}, "reviewer")
     monkeypatch.setattr("auto_coder.cli_helpers.resolve_adversarial_validation_availability", lambda validation_kind=None, execution_cwd=None: AdversarialValidationAvailability(backend_manager=manager))
     scenario = ReviewFlow(repository, remote, head, base, client, config, reviewer, publication, merge, seen)
@@ -180,14 +260,13 @@ def flow(tmp_path, monkeypatch, _use_real_commands, audit_store, request):
     return scenario
 
 
-@pytest.mark.parametrize("editing_response", [PASS_PAYLOAD, "completed source correction without valid review JSON"])
-def test_review_fix_is_published_without_self_approval_then_independently_reviewed(flow, monkeypatch, editing_response):
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
+def test_review_fix_is_published_without_self_approval_then_independently_reviewed(flow, monkeypatch):
     registry = ReviewerSessionRegistry()
     retained = ReviewerSession(REPO_NAME, PR_NUMBER, "reviewer", "codex-cloud", "reviewer-model", "prior-review-session", flow.initial_head)
     registry.save(retained)
     before = _caller_snapshot(flow.repository)
     flow.reviewer.mutation = _edit_source
-    flow.reviewer._responses = [editing_response, PASS_PAYLOAD]
     trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
 
     actions = flow.run()
@@ -195,7 +274,7 @@ def test_review_fix_is_published_without_self_approval_then_independently_review
     changed_head = flow.head()
     assert changed_head != flow.initial_head, actions
     assert _git(["rev-parse", f"{changed_head}^"], flow.remote) == flow.initial_head
-    assert "# Reviewed greeting implementation." in _git(["show", f"{changed_head}:sample.py"], flow.remote)
+    assert _git(["show", f"{changed_head}:sample.py"], flow.remote) == 'def greet():\n    return "hello"'
     assert flow.reviewer.calls == ["continue"]
     flow.publication.assert_not_called()
     flow.merge.assert_not_called()
@@ -231,6 +310,80 @@ def test_review_fix_is_published_without_self_approval_then_independently_review
     assert _caller_snapshot(flow.repository) == before
 
 
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
+def test_ordinary_correction_refuses_requirement_changed_during_review(flow, monkeypatch):
+    from auto_coder import local_review_repair
+
+    before = _caller_snapshot(flow.repository)
+
+    def correct_and_change_requirement(root):
+        _edit_source(root)
+        issue = flow.client.get_issue.return_value
+        flow.client.get_issue.return_value = {**issue, "body": issue["body"].replace("string hello.", "string goodbye.")}
+
+    flow.reviewer.mutation = correct_and_change_requirement
+    commit = Mock(wraps=local_review_repair.git_commit_with_retry)
+    push = Mock(wraps=local_review_repair.git_push)
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", commit)
+    monkeypatch.setattr(local_review_repair, "git_push", push)
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+
+    actions = flow.run()
+
+    assert flow.head() == flow.initial_head, actions
+    commit.assert_not_called()
+    push.assert_not_called()
+    assert flow.reviewer.calls == ["fresh"]
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert _caller_snapshot(flow.repository) == before
+    events = _correction_events(trace_start)
+    assert len(events) == 1
+    assert events[0].facts["published"] is False
+    assert "authority" in events[0].facts["reason"].lower()
+
+
+@pytest.mark.parametrize("editing_verdict", ["PASS", "INCONCLUSIVE", "malformed"])
+def test_nonblocking_or_invalid_review_cannot_publish_optional_edits(flow, monkeypatch, editing_verdict):
+    from auto_coder import local_review_repair
+
+    before = _caller_snapshot(flow.repository)
+    flow.reviewer.mutation = _optional_source_edit
+    if editing_verdict == "malformed":
+        response = "completed an optional source cleanup without valid review JSON"
+    else:
+        payload = json.loads(PASS_PAYLOAD)
+        payload["result"] = editing_verdict
+        if editing_verdict == "INCONCLUSIVE":
+            payload["summary"] = "Decision-critical review evidence is unavailable."
+            payload["requirement_coverage"][0].update(status="UNVERIFIED", evidence="The reviewer did not establish the required greeting result.")
+        response = json.dumps(payload)
+    flow.reviewer._responses = [response]
+    commit = Mock(wraps=local_review_repair.git_commit_with_retry)
+    push = Mock(wraps=local_review_repair.git_push)
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", commit)
+    monkeypatch.setattr(local_review_repair, "git_push", push)
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+
+    actions = flow.run()
+
+    assert flow.head() == flow.initial_head, actions
+    assert "Optional greeting explanation." not in _git(["show", f"{flow.head()}:sample.py"], flow.remote)
+    commit.assert_not_called()
+    push.assert_not_called()
+    assert flow.reviewer.calls == ["fresh"]
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert _caller_snapshot(flow.repository) == before
+    assert all(not root.exists() for _, _, root in flow.seen)
+    events = _correction_events(trace_start)
+    assert len(events) == 1
+    assert events[0].facts["local_phase"] == "not_started"
+    assert events[0].facts["published"] is False
+    assert events[0].facts["reason"].startswith("reviewer correction refused:")
+    assert events[0].facts["review_disposition"] == "RECONCILIATION_WAIT"
+
+
 def test_only_disposable_runtime_output_keeps_original_review_candidate(flow):
     flow.reviewer.mutation = _write_runtime_outputs
     before = _caller_snapshot(flow.repository)
@@ -245,20 +398,32 @@ def test_only_disposable_runtime_output_keeps_original_review_candidate(flow):
 
 
 @pytest.mark.parametrize("flow", ["dynamic"], indirect=True)
-def test_dynamic_check_source_mutation_cannot_certify_unchanged_head(flow):
+def test_dynamic_check_source_mutation_cannot_certify_unchanged_head(flow, monkeypatch):
+    from auto_coder import local_review_repair
+
     requested = json.loads(PASS_PAYLOAD)
     requested["dynamic_check_requested"] = "tests/test_sample.py"
     flow.reviewer._responses = [json.dumps(requested)]
+    push = Mock(wraps=local_review_repair.git_push)
+    monkeypatch.setattr(local_review_repair, "git_push", push)
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
 
     actions = flow.run()
 
-    assert flow.head() != flow.initial_head, actions
-    assert "Source changed during dynamic verification." in _git(["show", f"{flow.head()}:sample.py"], flow.remote)
+    assert flow.head() == flow.initial_head, actions
+    assert "Source changed during dynamic verification." not in _git(["show", f"{flow.head()}:sample.py"], flow.remote)
+    push.assert_not_called()
     assert flow.reviewer.calls == ["fresh"]
     flow.publication.assert_not_called()
     flow.merge.assert_not_called()
+    events = _correction_events(trace_start)
+    assert len(events) == 1
+    assert events[0].facts["local_phase"] == "not_started"
+    assert events[0].facts["published"] is False
+    assert events[0].facts["reason"].startswith("reviewer correction refused:")
 
 
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
 def test_interrupted_editing_reviewer_neither_publishes_nor_approves(flow):
     before = _caller_snapshot(flow.repository)
     flow.reviewer.mutation = _edit_source
@@ -274,13 +439,13 @@ def test_interrupted_editing_reviewer_neither_publishes_nor_approves(flow):
     assert all(not root.exists() for _, _, root in flow.seen)
 
 
-def test_strong_audit_fixes_are_published_without_accepting_its_own_pass(flow):
+def _pending_strong_inputs(flow):
     from auto_coder.pr_review_cycle import ContractSnapshot, StrongPolicyIdentity
     from auto_coder.two_tier_pr_gate import TwoTierPrGate
 
     inputs = pr_processor.TwoTierGateInputs(
         gate=TwoTierPrGate(REPO_NAME),
-        contract=ContractSnapshot(("#99",), "Issue #99 REQ-001: greet() returns hello."),
+        contract=ContractSnapshot(("#99",), "Issue #99 REQ-001: greet() returns the string hello."),
         policy=StrongPolicyIdentity("strong-review", "model=strong", "v1"),
         head_sha=flow.initial_head,
         base_sha=flow.base,
@@ -288,14 +453,22 @@ def test_strong_audit_fixes_are_published_without_accepting_its_own_pass(flow):
         head_ref="feature-branch",
     )
     inputs.gate.ordinary_pass(PR_NUMBER, flow.initial_head, flow.base, inputs.contract)
+    return inputs
+
+
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
+def test_ordinary_pass_still_allows_strong_defect_correction_without_self_approval(flow):
+    inputs = _pending_strong_inputs(flow)
     before = _caller_snapshot(flow.repository)
     flow.reviewer.mutation = _edit_source
+    flow.reviewer.response_factory = _strong_correction_response
 
     accepted, reason = pr_processor._execute_pending_strong_audit(
         REPO_NAME,
         PR_NUMBER,
         inputs,
         publication_authority=lambda sha, ref: flow.head() == sha and ref == "feature-branch",
+        correction_basis_check=lambda basis: pr_processor._review_correction_requirements_current(flow.client, REPO_NAME, PR_NUMBER, basis),
     )
 
     assert not accepted, reason
@@ -309,6 +482,94 @@ def test_strong_audit_fixes_are_published_without_accepting_its_own_pass(flow):
     flow.publication.assert_not_called()
     flow.merge.assert_not_called()
     assert _caller_snapshot(flow.repository) == before
+
+
+@pytest.mark.parametrize(
+    "requirement_id,requirement_text",
+    [
+        ("#99/REQ-001", "REQ-002: greet() returns the string hello."),
+        ("#99/REQ-001", "REQ-001: greet() returns the string goodbye."),
+        ("#100/REQ-001", "REQ-001: greet() returns the string hello."),
+    ],
+)
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
+def test_strong_declaration_mismatch_cannot_publish_correction(flow, monkeypatch, requirement_id, requirement_text):
+    from auto_coder import local_review_repair
+
+    inputs = _pending_strong_inputs(flow)
+    before = _caller_snapshot(flow.repository)
+    flow.reviewer.mutation = _edit_source
+
+    def response(prompt):
+        payload = json.loads(_strong_correction_response(prompt))
+        payload["findings"][0].update(requirement_ids=[requirement_id], requirement_texts=[requirement_text])
+        return json.dumps(payload)
+
+    flow.reviewer.response_factory = response
+    commit = Mock(wraps=local_review_repair.git_commit_with_retry)
+    push = Mock(wraps=local_review_repair.git_push)
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", commit)
+    monkeypatch.setattr(local_review_repair, "git_push", push)
+
+    accepted, reason = pr_processor._execute_pending_strong_audit(
+        REPO_NAME,
+        PR_NUMBER,
+        inputs,
+        publication_authority=lambda sha, ref: flow.head() == sha and ref == "feature-branch",
+        correction_basis_check=lambda basis: pr_processor._review_correction_requirements_current(flow.client, REPO_NAME, PR_NUMBER, basis),
+    )
+
+    assert not accepted
+    assert "Strong correction does not match a current explicit Requirement" in reason
+    assert flow.head() == flow.initial_head
+    commit.assert_not_called()
+    push.assert_not_called()
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert inputs.gate.state.snapshot(PR_NUMBER).completion is None
+    assert _caller_snapshot(flow.repository) == before
+
+
+@pytest.mark.parametrize("editing_verdict", ["PASS", "INCONCLUSIVE", "malformed"])
+def test_strong_nonblocking_or_invalid_review_cannot_publish_optional_edits(flow, monkeypatch, editing_verdict):
+    from auto_coder import local_review_repair
+
+    inputs = _pending_strong_inputs(flow)
+    before = _caller_snapshot(flow.repository)
+    flow.reviewer.mutation = _optional_source_edit
+
+    def response(prompt):
+        if editing_verdict == "malformed":
+            return "completed an optional source cleanup without valid review JSON"
+        return json.dumps({**_strong_response_identity(prompt), "result": editing_verdict, "findings": [], "summary": "No demonstrated Requirement defect supports the optional edit."})
+
+    flow.reviewer.response_factory = response
+    commit = Mock(wraps=local_review_repair.git_commit_with_retry)
+    push = Mock(wraps=local_review_repair.git_push)
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", commit)
+    monkeypatch.setattr(local_review_repair, "git_push", push)
+
+    accepted, reason = pr_processor._execute_pending_strong_audit(
+        REPO_NAME,
+        PR_NUMBER,
+        inputs,
+        publication_authority=lambda sha, ref: flow.head() == sha and ref == "feature-branch",
+    )
+
+    assert not accepted, reason
+    assert flow.head() == flow.initial_head, reason
+    assert "reviewer correction refused:" in reason
+    commit.assert_not_called()
+    push.assert_not_called()
+    assert flow.reviewer.calls == ["fresh"]
+    snapshot = inputs.gate.state.snapshot(PR_NUMBER)
+    assert snapshot.accepted_strong_round is None
+    assert snapshot.active_claim is None
+    assert snapshot.completion is None
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert _caller_snapshot(flow.repository) == before
+    assert all(not root.exists() for _, _, root in flow.seen)
 
 
 def _seed_stale_strong_finding(flow, monkeypatch):
@@ -356,8 +617,11 @@ def _edit_on_renewed_strong(flow, mutation):
         flow.reviewer.mutation = mutation
 
     flow.reviewer.mutation = after_ordinary
+    # The ordinary reviewer misses a real defect that independent Strong finds.
+    flow.reviewer.response_factory = lambda prompt: _strong_correction_response(prompt) if "explicitly tagged PR reviewer role STRONG_AUDIT" in prompt else PASS_PAYLOAD
 
 
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
 def test_renewed_strong_fix_is_published_without_closing_retained_findings(flow, monkeypatch):
     inputs, strong, _config = _seed_stale_strong_finding(flow, monkeypatch)
     before = _caller_snapshot(flow.repository)
@@ -369,7 +633,7 @@ def test_renewed_strong_fix_is_published_without_closing_retained_findings(flow,
     changed_head = flow.head()
     assert changed_head != flow.initial_head, actions
     assert _git(["rev-parse", f"{changed_head}^"], flow.remote) == flow.initial_head
-    assert "# Reviewed greeting implementation." in _git(["show", f"{changed_head}:sample.py"], flow.remote)
+    assert _git(["show", f"{changed_head}:sample.py"], flow.remote) == 'def greet():\n    return "hello"'
     assert flow.reviewer.calls == ["fresh", "fresh"]
     snapshot = inputs.gate.state.snapshot(PR_NUMBER)
     assert snapshot.accepted_strong_round == strong
@@ -399,6 +663,7 @@ def test_renewed_strong_fix_is_published_without_closing_retained_findings(flow,
 
 
 @pytest.mark.parametrize("changed_target", ["head", "base", "contract", "policy"])
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
 def test_renewed_strong_fix_refuses_publication_when_target_changes(flow, monkeypatch, changed_target):
     inputs, strong, config = _seed_stale_strong_finding(flow, monkeypatch)
     before = _caller_snapshot(flow.repository)
@@ -440,6 +705,7 @@ def test_renewed_strong_fix_refuses_publication_when_target_changes(flow, monkey
     assert "provider-entry authority changed during preparation" in events[0].facts["reason"]
 
 
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
 def test_renewed_strong_pre_send_deferral_resumes_without_another_reviewer(flow, monkeypatch):
     from auto_coder import local_review_repair
 
@@ -469,7 +735,7 @@ def test_renewed_strong_pre_send_deferral_resumes_without_another_reviewer(flow,
     assert retained is not None and retained.publication_send_state == "not_entered"
     assert retained.result_sha != flow.initial_head
     assert _git(["rev-parse", f"{retained.result_sha}^"], flow.repository) == flow.initial_head
-    assert "# Reviewed greeting implementation." in _git(["show", f"{retained.result_sha}:sample.py"], flow.repository)
+    assert _git(["show", f"{retained.result_sha}:sample.py"], flow.repository) == 'def greet():\n    return "hello"'
     assert first_actions.retry_not_before is not None
     assert time.time() < first_actions.retry_not_before <= time.time() + 60.0
     assert flow.last_status.outcome is PRProcessingOutcome.DEFERRED
@@ -529,6 +795,7 @@ def test_interrupted_dynamic_check_cannot_publish_its_partial_source(flow):
     assert _caller_snapshot(flow.repository) == before
 
 
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
 def test_accepted_push_with_lost_acknowledgement_resumes_without_another_reviewer(flow, monkeypatch):
     from auto_coder import local_review_repair
     from auto_coder.utils import CommandResult
@@ -583,6 +850,7 @@ def test_accepted_push_with_lost_acknowledgement_resumes_without_another_reviewe
     assert flow.last_status.retry_not_before == second_actions.retry_not_before
 
 
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
 def test_legacy_retained_correction_supersession_still_requires_new_ci_and_independent_review(flow, tmp_path, monkeypatch):
     from auto_coder import editable_review, local_review_repair
     from auto_coder.local_review_repair import LocalReviewRepairRequest, LocalReviewRepairStore, local_review_repair_db_path
@@ -675,6 +943,7 @@ def test_legacy_retained_correction_supersession_still_requires_new_ci_and_indep
     assert _caller_snapshot(flow.repository) == before
 
 
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
 def test_controller_identity_failure_resumes_without_review_and_waits_for_fresh_ci(flow, monkeypatch):
     from auto_coder import editable_review
     from auto_coder.local_review_repair import LocalReviewRepairRequest, LocalReviewRepairStore, local_review_repair_db_path
@@ -744,6 +1013,56 @@ def test_controller_identity_failure_resumes_without_review_and_waits_for_fresh_
     assert _caller_snapshot(flow.repository) == before
 
 
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
+def test_retained_correction_refuses_changed_requirement_before_recovery(flow, monkeypatch):
+    from auto_coder import editable_review, local_review_repair
+    from auto_coder.local_review_repair import LocalReviewRepairRequest, LocalReviewRepairStore, local_review_repair_db_path
+
+    before = _caller_snapshot(flow.repository)
+    flow.reviewer.mutation = _edit_source
+    commit = Mock(wraps=local_review_repair.git_commit_with_retry)
+    push = Mock(wraps=local_review_repair.git_push)
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", commit)
+    monkeypatch.setattr(local_review_repair, "git_push", push)
+
+    def unavailable(_repository):
+        raise ControllerGitIdentityError("Controller App installation is unavailable")
+
+    with monkeypatch.context() as offline:
+        offline.setattr(pr_processor, "resolve_controller_git_identity", unavailable)
+        first_actions = flow.run()
+    assert flow.head() == flow.initial_head, first_actions
+    assert flow.reviewer.calls == ["fresh"]
+    push.assert_not_called()
+    store = LocalReviewRepairStore(local_review_repair_db_path(REPO_NAME))
+    lookup = LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, "", "", (), "")
+    retained = store.get_unfinished(lookup, feedback_prefix=editable_review.REVIEW_OUTPUT_PREFIX)
+    assert retained is not None and retained.phase == "indeterminate" and not retained.result_sha
+    assert retained.pre_push_evidence_json
+    commits_before_recovery = commit.call_count
+    issue = flow.client.get_issue.return_value
+    flow.client.get_issue.return_value = {**issue, "body": issue["body"].replace("string hello.", "string goodbye.")}
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+
+    recovery_actions = flow.run()
+
+    assert flow.head() == flow.initial_head, recovery_actions
+    assert flow.reviewer.calls == ["fresh"]
+    assert commit.call_count == commits_before_recovery
+    push.assert_not_called()
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    assert _caller_snapshot(flow.repository) == before
+    preserved = LocalReviewRepairStore(local_review_repair_db_path(REPO_NAME)).get_unfinished(lookup, feedback_prefix=editable_review.REVIEW_OUTPUT_PREFIX)
+    assert preserved is not None and preserved.attempt_id == retained.attempt_id
+    assert preserved.workspace_path == retained.workspace_path
+    events = _correction_events(trace_start)
+    assert len(events) == 1
+    assert events[0].facts["published"] is False
+    assert "authority" in events[0].facts["reason"].lower()
+
+
+@pytest.mark.parametrize("flow", ["defective"], indirect=True)
 def test_unresolved_push_restart_waits_without_resend_until_candidate_readback(flow, monkeypatch):
     from auto_coder import local_review_repair
     from auto_coder.utils import CommandResult

@@ -9,6 +9,7 @@ GitHub mutation or merge authority.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -20,6 +21,8 @@ from .invocation_admission import pr_review_designated
 from .logger_config import get_logger
 from .pr_review_cycle import ContractSnapshot, Finding, StrongPolicyIdentity
 from .prompt_loader import render_prompt
+from .requirement_contract import parse_requirement_contract
+from .review_correction_policy import ReviewCorrectionBasis, ReviewCorrectionBlocker
 from .security_utils import redact_string
 from .utils import CommandExecutor, bind_command_execution_cwd, reset_command_execution_cwd
 
@@ -146,8 +149,12 @@ def execute_review(
     try:
         _verify_head(execution_cwd, review_input.head_sha)
         response = run_llm_prompt(build_review_prompt(review_input), backend_manager=backend_manager, is_noedit=not pr_review_designated())
+        identity = backend_manager.get_current_backend_identity()
+        provenance = "/".join(str(part) for part in identity) if isinstance(identity, tuple) else "unavailable"
+        result = parse_review_result(response, review_input, provenance)
+        basis, refusal = _review_correction_basis(review_input, result)
         try:
-            assert_review_workspace_unchanged()
+            assert_review_workspace_unchanged(basis, refusal)
         except ReviewChangesProduced:
             session_id = getattr(backend_manager, "_last_session_id", None)
             if isinstance(session_id, str) and session_id:
@@ -156,9 +163,72 @@ def execute_review(
         _verify_head(execution_cwd, review_input.head_sha)
     finally:
         reset_command_execution_cwd(execution_token)
-    identity = backend_manager.get_current_backend_identity()
-    provenance = "/".join(str(part) for part in identity) if isinstance(identity, tuple) else "unavailable"
-    return parse_review_result(response, review_input, provenance)
+    return result
+
+
+def _review_correction_basis(
+    review_input: ReviewExecutionInput,
+    result: ReviewExecutionResult,
+) -> tuple[Optional[ReviewCorrectionBasis], str]:
+    """Bind a Strong correction to findings about the admitted input revision."""
+    if review_input.mode is not ReviewMode.STRONG_AUDIT or not result.is_complete or result.verdict != "FINDINGS" or not result.findings:
+        return None, "source edits require a complete pre-edit Strong FINDINGS result"
+    declarations: dict[str, list[str]] = {}
+    for issue_id in review_input.contract.issue_ids:
+        if not re.fullmatch(r"#\d+", issue_id) or issue_id in declarations:
+            return None, "Strong correction has no valid explicit Requirements snapshot"
+        declarations[issue_id] = []
+    for line in review_input.contract.requirements_text.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"Issue (#\d+) (.+)", line)
+        if match is not None and match.group(1) in declarations:
+            declarations[match.group(1)].append(match.group(2))
+        elif len(declarations) == 1 and not line.startswith("Issue "):
+            next(iter(declarations.values())).append(line)
+        else:
+            return None, "Strong correction Requirement declarations are ambiguous"
+    manifest: dict[str, str] = {}
+    for issue_id, lines in declarations.items():
+        if not lines:
+            continue
+        parsed = parse_requirement_contract(int(issue_id[1:]), "## Requirements\n" + "\n".join(lines))
+        if parsed.error or not parsed.entries:
+            return None, "Strong correction has no valid explicit Requirements snapshot"
+        manifest.update((f"{issue_id}/{requirement_id}", text) for requirement_id, text in parsed.entries)
+    if not manifest:
+        return None, "Strong correction has no valid explicit Requirements snapshot"
+    blockers = []
+    for finding in result.findings:
+        if len(set(finding.requirement_ids)) != len(finding.requirement_ids):
+            return None, "Strong correction repeats a Requirement binding"
+        for requirement_id, text in zip(finding.requirement_ids, finding.requirement_texts):
+            authoritative_text = manifest.get(requirement_id)
+            if authoritative_text is None:
+                return None, "Strong correction does not match a current explicit Requirement"
+            requirement_body = " ".join(authoritative_text.split())
+            declaration = f"{requirement_id.rsplit('/', 1)[1]}: {requirement_body}"
+            if " ".join(text.split()) not in {requirement_body, declaration}:
+                return None, "Strong correction does not match a current explicit Requirement"
+        evidence = finding.evidence
+        if finding.is_regression_gap:
+            evidence += f"\nPlausible incorrect implementation: {finding.plausible_incorrect_implementation}" f"\nWhy current tests admit it: {finding.why_tests_admit_it}" f"\nMaterial consequence: {finding.material_consequence}"
+        blockers.append(
+            ReviewCorrectionBlocker(
+                requirement_ids=finding.requirement_ids,
+                # Preserve the portable finding while retaining authoritative bodies
+                # for the independent publication and recovery Requirements check.
+                requirement_texts=tuple(manifest[requirement_id] for requirement_id in finding.requirement_ids),
+                boundary=finding.affected_boundary,
+                evidence=evidence,
+                counterexample=finding.counterexample,
+                required_behavior=finding.expected_behavior,
+                actual_behavior=finding.actual_behavior,
+                regression=finding.focused_regression_scenario,
+                kind="TEST_ORACLE" if finding.is_regression_gap else "IMPLEMENTATION",
+            )
+        )
+    return ReviewCorrectionBasis(review_input.head_sha, review_input.contract.identity, result.verdict, tuple(blockers)), ""
 
 
 def _bounded_review_preview(response: str) -> str:
@@ -483,7 +553,9 @@ def _parse_findings(value: object, origin: str, *, allow_scope: bool = False) ->
         ids, texts = item["requirement_ids"], item["requirement_texts"]
         if not isinstance(ids, list) or not ids or not isinstance(texts, list) or len(ids) != len(texts) or not all(isinstance(x, str) and x.strip() for x in ids + texts):
             return None
-        regression = bool(item.get("is_regression_gap", False))
+        regression = item.get("is_regression_gap", False)
+        if not isinstance(regression, bool):
+            return None
         gap_fields = ("plausible_incorrect_implementation", "why_tests_admit_it", "material_consequence")
         if regression and any(not isinstance(item.get(key), str) or not item[key].strip() for key in gap_fields):
             return None

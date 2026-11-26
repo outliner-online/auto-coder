@@ -584,7 +584,7 @@ class TestAS006OtherPRAutomationRemainsIndependent:
         object.__setattr__(config, "ENABLE_MERGEABILITY_REMEDIATION", True)
         result = process_pull_request(client, config, "owner/repo", pr_data)
 
-        mock_start_remediation.assert_called_once_with(106, "dirty", "owner/repo")
+        mock_start_remediation.assert_called_once_with(106, "dirty", "owner/repo", client)
         assert any("Remediation initiated" in a for a in result.actions_taken)
 
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)

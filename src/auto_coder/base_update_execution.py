@@ -65,14 +65,18 @@ class BaseUpdateConflictExecutionService:
         operation: Any = None,
         *,
         config: Any = None,
+        github_client: Any = None,
     ) -> PRRepairResult:
         """Execute one route selected by the caller; never introduce fallback."""
         if config is not None:
             from . import pr_processor as p
 
             try:
-                token = p.GitHubClient.get_instance().token
-                api = p.get_ghapi_client(token)
+                client = github_client or p.GitHubClient.get_instance()
+                if isinstance(client, p.GitHubClient):
+                    api = client.api_for(request.repository, required_permissions={"pull_requests": "read"})
+                else:
+                    api = p.get_ghapi_client(client.token)
                 owner, repo = request.repository.split("/")
                 current_pr = api.pulls.get(owner, repo, request.pr_number)
             except Exception as exc:
@@ -166,10 +170,6 @@ def _run_base_update_operation(
     logger = p.logger
     GitHubClient = p.GitHubClient
     _is_jules_pr = p._is_jules_pr
-    _extract_session_id_from_pr_body = p._extract_session_id_from_pr_body
-    _guard_outbound_jules_send = p._guard_outbound_jules_send
-    render_prompt = p.render_prompt
-    _dispatch_jules_repair = p._dispatch_jules_repair
     _is_dependabot_pr = p._is_dependabot_pr
     _dispatch_cloud_conflict_repair = p._dispatch_cloud_conflict_repair
     _is_local_llm_pr = p._is_local_llm_pr
@@ -317,42 +317,20 @@ def _run_base_update_operation(
             actions.append(f"Merge conflict detected for PR #{pr_number}")
 
             if _is_jules_pr(pr_data):
-                actions.append(f"PR #{pr_number} is a Jules PR with merge conflicts. Requesting Jules to resolve it.")
-                try:
-                    from auto_coder.jules_client import JulesClient
-
-                    jules_client = JulesClient()
-                    session_id = _extract_session_id_from_pr_body(pr_data.get("body", ""))
-                    if session_id:
-
-                        def send_jules_conflict() -> Any:
-                            # Keep the existing retirement admission immediately
-                            # before the provider mutation.
-                            if not _guard_outbound_jules_send(repo_name, config, session_id):
-                                reason = f"Blocked merge-conflict resolution request for PR #{pr_number}: session '{session_id}' belongs to a durably retired implementation slot (REQ-009)"
-                                return PRRepairResult(RepairDisposition.REFUSED, (reason,), reason=reason)
-                            prompt = render_prompt("pr.jules_merge_conflict_resolution")
-                            jules_client.send_message(session_id, prompt)
-                            return PRRepairResult(
-                                RepairDisposition.ACCEPTED_OR_UNCERTAIN,
-                                (f"Requested Jules to resolve merge conflict in session {session_id}",),
-                                attempt_started=True,
-                            )
-
-                        jules_repair = _dispatch_jules_repair(repo_name, pr_data, RepairKind.MERGE_CONFLICT, session_id, send_jules_conflict)
-                        actions.extend(jules_repair.actions)
-                        actions.repair_result = jules_repair
-                        # We return here so we don't proceed with LLM fixing this PR right now
-                        actions.append("ACTION_FLAG:SKIP_ANALYSIS")
-                        return actions
-                    else:
-                        actions.append(f"Jules PR #{pr_number} has merge conflicts but no session ID found. Cannot delegate.")
-                except Exception as e:
-                    actions.append(f"Error requesting Jules to resolve conflict: {e}")
+                actions.append(f"Historical Jules repair is retired for PR #{pr_number}")
+                cmd.run_command(["git", "merge", "--abort"])
+                actions.append("ACTION_FLAG:SKIP_ANALYSIS")
+                record(RepairDisposition.REFUSED, reason=actions[-2])
+                return actions
 
             # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
             # the bot recreates the PR against the updated base branch by itself.
-            if _is_dependabot_pr(pr_data):
+            try:
+                identity_client = github_client or GitHubClient.get_instance()
+                controller_identity = identity_client.get_authenticated_controller_identity(repo_name)
+            except Exception:
+                controller_identity = None
+            if _is_dependabot_pr(pr_data, controller_identity):
                 actions.append(f"PR #{pr_number} is a dependency-bot PR with merge conflicts. Skipping conflict resolution.")
                 cmd.run_command(["git", "merge", "--abort"])
                 actions.append("ACTION_FLAG:SKIP_ANALYSIS")
@@ -382,7 +360,7 @@ def _run_base_update_operation(
                 actions.append("ACTION_FLAG:SKIP_ANALYSIS")
                 return actions
 
-            if not _is_local_llm_pr(pr_data):
+            if not _is_local_llm_pr(pr_data, controller_identity):
                 actions.repair_result = cloud_repair
                 actions.append(f"Cloud merge-conflict repair could not be delegated for PR #{pr_number}: " f"{cloud_repair.reason}; deferring conflict resolution.")
                 cmd.run_command(["git", "merge", "--abort"])
@@ -413,7 +391,7 @@ def _run_base_update_operation(
                 # Unresolved local conflicts are repair failures, not evidence
                 # that a read-only quality check rejected the merge.
                 remaining_conflicts = scan_conflict_markers()
-                if remaining_conflicts and not _is_local_llm_pr(pr_data):
+                if remaining_conflicts and not _is_local_llm_pr(pr_data, controller_identity):
                     actions.append(f"LLM determined merge would degrade code quality for PR #{pr_number}, skipping merge attempt")
                     actions.append("ACTION_FLAG:DEGRADING_MERGE_SKIP_MERGE")
                 else:

@@ -29,3 +29,27 @@ live-model observations remain separate from deterministic routing and parser
 tests. The target's committed execution record truthfully records when no local
 real-model evaluation occurred; CI records any later execution in its immutable
 Prompt Regression advisory report.
+
+## Dynamic-check follow-up transport
+
+The controller chooses transport again before correcting a dynamic-check target
+or asking the reviewer to assess its test output. Cloud sessions and local
+sessions whose exact private workspace remains retained use explicit
+continuation. A local adapter without a retained workspace, including the
+current Codex adapter, receives a fresh invocation containing the complete
+original review prompt, the preceding review response and the current focused
+follow-up. The new call does not depend on provider conversation history and
+is recorded as fresh execution.
+
+Transport selection occurs before continuation is attempted. A refused retained
+or cloud continuation remains a failure; it is never replaced after refusal.
+The same current-head, Requirements, canonical-finding, source-correction and
+thread-disposition checks apply to the fresh response. Successful tests alone
+cannot supply a verdict, and a source-changing response still requires a later
+independent review. Validation attempt evidence fingerprints the actual transmitted prompt,
+including the complete fresh-call context and its Requirements manifest.
+
+An operational BLOCKED result retained before this fix remains historical
+non-passing evidence. The supported explicit `--only <PR> --force` entry can
+request independent revalidation after the runtime is updated; no decision-store
+reset or synthetic passing result is required.
