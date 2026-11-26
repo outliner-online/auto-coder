@@ -52,6 +52,25 @@ Each candidate PR is read individually with the strict, cache-bypassing PR metad
 
 Jules ownership resolution also queries the repository's real `CloudRunRepository` API — `list_for_issue(issue_number)` (preferred) or `list_all()` — never invented methods. This surfaces accepted/unresolved Jules work recorded in `CloudRunRepository` even when it has not yet been mirrored into the slot's own `provider_sessions` list, so such work cannot be silently excluded from retirement evidence.
 
+### Retained Retry Ownership
+
+Reclamation reads the exact repository/Issue retry journal without creating or
+migrating it. Remote accepted receipts remain attributable even when a process
+stopped before CloudManager, CloudRun, or slot membership was projected. A
+claimed or indeterminate remote submission without a session receipt remains
+explicitly unknown. Captured remote predecessors remain evidence even when the
+successor used a local backend or definitely did not start.
+
+Historical Jules evidence stays unknown on both the ordinary and Codex
+reclamation paths, without a Jules API request and without blocking an unrelated
+owner. Pointer supersession and a different generation do not prove terminality;
+only matching retired owner, generation, and session history discharges an old
+receipt. Captured predecessors have no recorded predecessor generation and are
+discharged only by the same owner's retired session history. A missing journal
+contains no retry evidence, while an unreadable one
+retains the affected reservation as unknown. Codex's supported retry evidence
+still follows its complete reconstruction and terminality checks.
+
 ### Jules Session Observation
 
 Legacy diagnostic callers may still supply a Jules reader and read each bound session individually with a direct session GET (not from the cached full-session list). The scheduled production path supplies no reader and records every durably attributed Jules session as `UNKNOWN`, rather than treating the missing response as an empty session set or terminal evidence. When explicit diagnostic evidence is available, COMPLETED and FAILED states are terminal candidates only when established PR publication exists in the session's outputs. COMPLETED without established publication is retained as ACTIVE (waiting-for-publication). Every `pullRequest` or `pull_request` output in both mapping and list payloads is preserved without flattening to avoid silently discarding additional output entries, and a PR is identified either by a `number` field or by parsing the canonical GitHub PR URL, with repository identity always validated so a foreign repository's PR number is never reinterpreted as local. Only `pullRequest`/`pull_request` output keys are ever treated as PR evidence — a URL-shaped value under an unrelated output key is never adopted.

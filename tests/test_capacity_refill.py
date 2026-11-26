@@ -2,10 +2,17 @@ import asyncio
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from auto_coder.automation_config import AutomationConfig, Candidate, CandidateProcessingResult
 from auto_coder.automation_engine import AutomationEngine
+from auto_coder.cloud_manager import CloudManager
+from auto_coder.cloud_run import CloudRunRepository
 from auto_coder.implementation_reclamation_scheduler import ReclamationObligationStore, schedule_reevaluation
+from auto_coder.implementation_retirement import ImplementationPRObservation, ImplementationRetirementObservation, ProviderSessionObservation, PRTerminalState, RetirementStatus, SessionTerminalState, retire_implementation_slot
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository, ImplementationSlotUnavailable
+from auto_coder.issue_retry_admission import IssueRetryAdmissionService, IssueRetryDisposition, IssueRetryOrigin
+from auto_coder.retry_dispatch import RetryDispatchRepository
 from auto_coder.util.gh_cache import OpenGitHubEntities, OpenGitHubIssue
 
 
@@ -95,6 +102,70 @@ def test_engine_reclamation_retires_local_owner_while_legacy_jules_stays_unknown
     (pending,) = obligations.all()
     assert pending.owner == legacy
     assert "historical-jules-session" in (pending.last_reason or "")
+
+
+@pytest.mark.parametrize("outcome", ["claimed", "indeterminate", "accepted", "completed", "accepted-historical", "definitely-not-started"])
+def test_engine_reclamation_preserves_retry_only_jules_ownership(monkeypatch, tmp_path, outcome):
+    """REQ-002/005/006: a stopped retry must survive missing provider projection."""
+    monkeypatch.setenv("AUTO_CODER_ISSUE_STAGE_ROUTING_DB", str(tmp_path / "routing.sqlite3"))
+    legacy = ImplementationOwner("issue", 100)
+    local = ImplementationOwner("issue", 200)
+    github = _terminal_reclamation_github(
+        {201: {"number": 201, "state": "closed"}, 202: {"number": 202, "state": "closed"}},
+        {100: [201], 200: [202]},
+    )
+    engine = AutomationEngine(github, AutomationConfig())
+    slots = ImplementationSlotRepository("owner/repo", 2, tmp_path / "slots.json")
+    legacy_incarnation = _finished_owner(slots, legacy, 201, "legacy-generation")
+    local_incarnation = _finished_owner(slots, local, 202, "local-generation")
+    admitted = IssueRetryAdmissionService(engine.issue_stage_routing, slots).admit("owner/repo", 100, "legacy-generation", "historical-retry", IssueRetryOrigin.MANUAL)
+    assert admitted.disposition is IssueRetryDisposition.OWNED
+    authority = admitted.authority
+    assert authority is not None and authority.ownership_reference is not None
+    retries = RetryDispatchRepository("owner/repo")
+    _, may_create = retries.claim(authority, "jules", "jules", {"base_branch": "main"})
+    assert may_create
+    if outcome in {"accepted", "completed", "accepted-historical"}:
+        retries.record_outcome(authority.request_id, "accepted", external_id="retry-only-jules")
+        if outcome == "completed":
+            retries.record_outcome(authority.request_id, "completed", external_id="retry-only-jules")
+        elif outcome == "accepted-historical":
+            retries.mark_historical(authority.request_id, "a newer pointer owns the Issue")
+    elif outcome != "claimed":
+        retries.record_outcome(authority.request_id, outcome)
+    receipt = retries.get(authority.request_id)
+    slots.finish_execution(legacy, authority.ownership_reference)
+    assert CloudManager("owner/repo").get_binding(100) is None
+    assert CloudRunRepository("owner/repo").list_for_issue(100) == []
+    assert slots._read()[legacy.key].get("provider_sessions", []) == []
+    obligations = ReclamationObligationStore.for_slots(slots)
+    assert schedule_reevaluation(legacy, slots, obligations, due_at=0)
+    assert schedule_reevaluation(local, slots, obligations, due_at=0)
+    forbidden_jules = MagicMock(side_effect=AssertionError("reclamation constructed JulesClient"))
+    with (
+        patch("auto_coder.codex_wham_client.CodexWhamClient", return_value=MagicMock()),
+        patch("auto_coder.jules_client.JulesClient", forbidden_jules),
+    ):
+        freed = asyncio.run(engine._run_due_reclamation_checks("owner/repo", slots))
+
+    forbidden_jules.assert_not_called()
+    assert retries.get(authority.request_id) == receipt
+    assert slots.owner_incarnation(local) is None
+    assert local_incarnation in slots._read_retired()
+    if outcome == "definitely-not-started":
+        assert freed == 2
+        assert slots.owner_incarnation(legacy) is None
+        assert legacy_incarnation in slots._read_retired()
+        assert obligations.all() == ()
+    else:
+        assert freed == 1
+        assert slots.owner_incarnation(legacy) == legacy_incarnation
+        assert legacy_incarnation not in slots._read_retired()
+        (pending,) = obligations.all()
+        assert pending.owner == legacy
+        assert "RETAINED_UNKNOWN" in (pending.last_reason or "")
+        expected = "retry-only-jules" if receipt.external_id else "historical-retry"
+        assert expected in pending.last_reason
 
 
 def test_engine_reclamation_incomplete_github_discovery_retains_capacity(monkeypatch, tmp_path):
@@ -596,3 +667,46 @@ def test_available_normal_slots_excludes_emergency_capacity(tmp_path):
     emergency = slots.start_execution(ImplementationOwner("issue", 3), allow_urgent_emergency=True)
     assert emergency is not None
     assert slots.available_normal_slots() == 0
+
+
+@pytest.mark.parametrize("captured_predecessor", [False, True])
+def test_engine_reclamation_does_not_revive_retired_retry_work(monkeypatch, tmp_path, captured_predecessor):
+    """Retired responsibility must not block a later incarnation of the Issue."""
+    monkeypatch.setenv("AUTO_CODER_ISSUE_STAGE_ROUTING_DB", str(tmp_path / "routing.sqlite3"))
+    owner = ImplementationOwner("issue", 100)
+    github = _terminal_reclamation_github({201: {"number": 201, "state": "closed"}, 203: {"number": 203, "state": "closed"}}, {100: [203]})
+    engine = AutomationEngine(github, AutomationConfig())
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    old_incarnation = _finished_owner(slots, owner, 201, "old-generation")
+    admission = IssueRetryAdmissionService(engine.issue_stage_routing, slots)
+    authority = admission.admit("owner/repo", 100, "old-generation", "old-retry", IssueRetryOrigin.MANUAL).authority
+    assert authority is not None and authority.ownership_reference is not None
+    retries = RetryDispatchRepository("owner/repo")
+    retries.claim(authority, "jules", "jules", {})
+    retries.record_outcome(authority.request_id, "accepted", external_id="retired-jules")
+    assert slots.record_provider_session(owner, "retired-jules")
+    slots.finish_execution(owner, authority.ownership_reference)
+    old_observation = ImplementationRetirementObservation(
+        "owner/repo",
+        owner,
+        old_incarnation,
+        slots._read()[owner.key]["activity_revision"],
+        implementation_prs=(ImplementationPRObservation(201, PRTerminalState.CLOSED),),
+        provider_sessions=(ProviderSessionObservation("retired-jules", "jules", SessionTerminalState.ENDED),),
+    )
+    assert retire_implementation_slot(slots, old_observation, engine.issue_stage_routing).status is RetirementStatus.RELEASED
+    new_incarnation = _finished_owner(slots, owner, 203, "new-generation")
+    if captured_predecessor:
+        successor = admission.admit("owner/repo", 100, "new-generation", "new-retry", IssueRetryOrigin.MANUAL).authority
+        assert successor is not None and successor.ownership_reference is not None
+        retries.claim(successor, "local", "codex", {}, predecessor=("jules", "retired-jules", "jules"))
+        retries.record_outcome(successor.request_id, "definitely-not-started")
+        slots.finish_execution(owner, successor.ownership_reference)
+    obligations = ReclamationObligationStore.for_slots(slots)
+    assert schedule_reevaluation(owner, slots, obligations, due_at=0)
+    forbidden_jules = MagicMock(side_effect=AssertionError("reclamation constructed JulesClient"))
+    assert _run_engine_reclamation(engine, slots, forbidden_jules) == 1
+    forbidden_jules.assert_not_called()
+    assert slots.owner_incarnation(owner) is None
+    assert {old_incarnation, new_incarnation}.issubset(slots._read_retired())
+    assert obligations.all() == ()

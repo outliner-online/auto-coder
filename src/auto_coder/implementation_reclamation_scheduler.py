@@ -377,6 +377,16 @@ def _collect_settle_and_retire_codex(
     from .codex_work_accounting import CodexWorkAccounting, CodexWorkPhase
     from .codex_work_reconstruction import production_codex_reconstructor
     from .implementation_retirement import RetirementResult, evaluate_retirement_predicate
+    from .implementation_retirement_observer import _read_retry_provider_evidence
+
+    retry_evidence = _read_retry_provider_evidence(owner, slots)
+    unsupported_retries = tuple(session for session in retry_evidence.sessions if session.provider != "codex-cloud")
+    if retry_evidence.collection_reasons or unsupported_retries:
+        return RetirementResult(
+            RetirementStatus.RETAINED_UNKNOWN,
+            responsible_members=tuple(f"session:{session.session_id}" for session in unsupported_retries),
+            diagnostic="Unobservable historical retry provider evidence" + "".join(f"; {reason.boundary}" for reason in retry_evidence.collection_reasons),
+        )
 
     if not cloud_provider_stores_available:
         return RetirementResult(RetirementStatus.RETAINED_UNKNOWN, diagnostic="Cloud provider stores unavailable")
@@ -462,6 +472,8 @@ def _collect_settle_and_retire_codex(
         )
 
     def _guarded_validation() -> bool:
+        if _read_retry_provider_evidence(owner, slots) != retry_evidence:
+            return False
         if cloud_manager is not None and cloud_manager.get_binding(owner.number) != binding:
             return False
         latest_accounting = accounting.snapshot(owner, incarnation)

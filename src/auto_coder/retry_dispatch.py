@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
@@ -395,6 +396,33 @@ class RetryDispatchRepository:
                 (self.repository, issue_number),
             ).fetchall()
         return tuple(self._decode(row) for row in rows)
+
+    @classmethod
+    def read_for_issue(cls, repository: str, issue_number: int, path: Optional[Path] = None) -> tuple[RetryHandoff, ...]:
+        """Read retained receipts without creating or migrating their journal."""
+        journal = path or Path.home() / ".auto-coder" / repository / "retry_dispatch.db"
+        try:
+            journal.stat()
+        except FileNotFoundError:
+            return ()
+        # These optional columns were added after the original retry journal.
+        # Their historical defaults preserve membership without a schema write.
+        defaults = {
+            "predecessor_provider": "NULL",
+            "predecessor_task_id": "NULL",
+            "predecessor_backend_name": "NULL",
+            "projection_disposition": "'pending'",
+            "environment_id": "NULL",
+            "handoff_complete": "0",
+        }
+        with closing(sqlite3.connect(journal.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(retry_handoffs)")}
+            selected = ",".join(column if column in columns else f"{defaults.get(column, column)} AS {column}" for column in HANDOFF_COLUMNS.split(","))
+            rows = connection.execute(
+                f"SELECT {selected} FROM retry_handoffs WHERE repository=? AND issue_number=? ORDER BY rowid",
+                (repository, issue_number),
+            ).fetchall()
+        return tuple(cls._decode(row) for row in rows)
 
     def list_unfinished_accepted(self) -> tuple[RetryHandoff, ...]:
         """Return accepted Codex receipts whose joined bookkeeping is pending."""

@@ -1643,3 +1643,28 @@ def test_i2284_as005_old_incarnation_replay_does_not_disturb_new_incarnation(tmp
 
     assert ISSUE_100 in slots2.active_owners()
     assert slots2.owner_incarnation(ISSUE_100) == new_incarnation
+
+
+def test_retry_only_mixed_providers_keep_each_attributed_identity(tmp_path):
+    from auto_coder.issue_stage_routing import ImplementationRetryRequest
+    from auto_coder.retry_dispatch import RetryDispatchRepository
+
+    slots = _setup_slots(tmp_path)
+    execution = slots.start_execution(ISSUE_100, generation="mixed-generation")
+    assert execution
+    assert slots.record_implementation_pr(ISSUE_100, 201)
+    slots.finish_execution(ISSUE_100, execution)
+    retries = RetryDispatchRepository(REPO)
+    for provider, session_id in (("jules", "jules-retry"), ("codex-cloud", "codex-retry")):
+        authority = ImplementationRetryRequest(provider, REPO, ISSUE_100.number, "mixed-generation", provider, "owned", "stopped-execution")
+        retries.claim(authority, provider, provider, {})
+        retries.record_outcome(authority.request_id, "accepted", external_id=session_id)
+
+    observed = collect_retirement_observation(ISSUE_100, slots, _make_github_client())
+
+    assert observed is not None
+    assert {(session.provider, session.session_id, session.state) for session in observed.provider_sessions} == {
+        ("jules", "jules-retry", SessionTerminalState.UNKNOWN),
+        ("codex-cloud", "codex-retry", SessionTerminalState.UNKNOWN),
+    }
+    assert observed.collection_reasons[0].provider == "codex-cloud"

@@ -23,6 +23,8 @@ from auto_coder.implementation_reclamation_scheduler import (
 )
 from auto_coder.implementation_retirement import ImplementationPRObservation, PRTerminalState, RetirementResult, RetirementStatus
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
+from auto_coder.issue_stage_routing import ImplementationRetryRequest
+from auto_coder.retry_dispatch import RetryDispatchRepository
 
 
 def test_terminal_codex_work_is_settled_and_retired_under_one_owner_guard(tmp_path: Path, monkeypatch) -> None:
@@ -167,11 +169,12 @@ def test_due_codex_retention_reschedules_same_obligation(tmp_path: Path, monkeyp
     assert pending[0].last_reason == f"{status.value}|Codex task is active|task:active"
 
 
-@pytest.mark.parametrize("legacy_source", ["none", "slot", "cloud_manager"])
+@pytest.mark.parametrize("legacy_source", ["none", "slot", "cloud_manager", "retry", "retry_predecessor"])
 def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp_path: Path, monkeypatch, legacy_source: str) -> None:
     from auto_coder.codex_work_reconstruction import reconstruct_active_codex_work
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("AUTO_CODER_RUNTIME_ROOT", raising=False)
     repository = "owner/repo"
     owner = ImplementationOwner("issue", 2336)
     slots = ImplementationSlotRepository(repository, 1)
@@ -190,6 +193,15 @@ def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp
         assert slots.record_provider_session(owner, "historical-jules-session")
     elif legacy_source == "cloud_manager":
         assert manager.add_session(owner.number, "historical-jules-session", provider="jules")
+    elif legacy_source in {"retry", "retry_predecessor"}:
+        authority = ImplementationRetryRequest("historical-retry", repository, owner.number, "historical-generation", "historical-attempt", "owned", "historical-execution")
+        retries = RetryDispatchRepository(repository)
+        if legacy_source == "retry":
+            retries.claim(authority, "jules", "jules", {})
+            retries.record_outcome(authority.request_id, "accepted", external_id="historical-jules-session")
+        else:
+            retries.claim(authority, "local", "codex", {}, predecessor=("jules", "historical-jules-session", "jules"))
+            retries.record_outcome(authority.request_id, "definitely-not-started")
 
     request = WhamTurn("request", "user", "completed", raw_data={"request_id": request_id})
     terminal = WhamTurn("task_e_terminal~asst_terminal", "assistant", "completed")

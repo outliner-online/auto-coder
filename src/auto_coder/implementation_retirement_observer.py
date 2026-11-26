@@ -642,10 +642,48 @@ class _JulesOwnershipResolution:
 
     # Session IDs positively attributed to this owner (via CloudManager/CloudRun)
     attributed_sessions: List[str] = field(default_factory=list)
+    retry_sessions: Tuple[ProviderSessionObservation, ...] = ()
     # Whether ownership resolution is blocked (unsupported/mixed/conflicting)
     blocked: bool = False
     blocked_reason: str = ""
     collection_reason: Optional[RetirementCollectionReason] = None
+
+
+@dataclass(frozen=True)
+class _RetryProviderEvidence:
+    sessions: Tuple[ProviderSessionObservation, ...] = ()
+    collection_reasons: Tuple[RetirementCollectionReason, ...] = ()
+
+
+def _read_retry_provider_evidence(owner: ImplementationOwner, slots: ImplementationSlotRepository) -> _RetryProviderEvidence:
+    """Preserve remote responsibility recorded before provider/slot projection."""
+    from .retry_dispatch import RetryDispatchRepository
+
+    try:
+        handoffs = RetryDispatchRepository.read_for_issue(slots.repo_name, owner.number)
+        retired = slots.retired_associations(owner) if handoffs else ()
+    except Exception as exc:
+        logger.debug(f"Cannot read retained retry ownership for {owner.key}: {exc}")
+        return _RetryProviderEvidence(collection_reasons=(RetirementCollectionReason(CollectionReasonKind.UNAVAILABLE_EVIDENCE, "retry-dispatch-store"),))
+
+    sessions: Dict[Tuple[str, str], ProviderSessionObservation] = {}
+    reasons: List[RetirementCollectionReason] = []
+    for handoff in handoffs:
+        bindings = []
+        # A failed/local successor says nothing about its captured predecessor.
+        if handoff.predecessor_provider is not None or handoff.predecessor_task_id is not None:
+            bindings.append((handoff.predecessor_provider, handoff.predecessor_task_id, "predecessor"))
+        if handoff.route != "local" and handoff.outcome != "definitely-not-started":
+            bindings.append((handoff.route, handoff.external_id, "dispatch"))
+        for provider, session_id, source in bindings:
+            boundary = f"retry-{source}:{handoff.request_id}"
+            if not provider or not session_id:
+                reasons.append(RetirementCollectionReason(CollectionReasonKind.UNAVAILABLE_EVIDENCE, boundary, provider or "unknown"))
+                continue
+            if any(record.repository == slots.repo_name and (source == "predecessor" or record.generation == handoff.generation) and session_id in record.provider_sessions for record in retired):
+                continue
+            sessions[(provider, session_id)] = ProviderSessionObservation(session_id, provider, SessionTerminalState.UNKNOWN)
+    return _RetryProviderEvidence(tuple(sessions.values()), tuple(reasons))
 
 
 def _resolve_jules_session_ownership(
@@ -682,7 +720,23 @@ def _resolve_jules_session_ownership(
             return resolution
 
     slot_sessions: List[str] = list(stored_sessions_raw)
+    retry_evidence = _read_retry_provider_evidence(owner, slots)
+    resolution.retry_sessions = retry_evidence.sessions
+    for session in retry_evidence.sessions:
+        if session.session_id not in slot_sessions:
+            slot_sessions.append(session.session_id)
     resolution.attributed_sessions = list(slot_sessions)
+    if retry_evidence.collection_reasons:
+        resolution.blocked = True
+        resolution.blocked_reason = "Retained retry ownership is unavailable"
+        resolution.collection_reason = retry_evidence.collection_reasons[0]
+        return resolution
+    for session in retry_evidence.sessions:
+        if session.provider != "jules":
+            resolution.blocked = True
+            resolution.blocked_reason = f"Unsupported retry provider {session.provider!r} for owner {owner.key}"
+            resolution.collection_reason = RetirementCollectionReason(CollectionReasonKind.UNSUPPORTED_PROVIDER, "retry-dispatch-binding", session.provider)
+            return resolution
 
     if not cloud_provider_stores_available:
         resolution.blocked = True
@@ -1172,13 +1226,17 @@ def collect_retirement_observation(
         stored_prs = record.get("implementation_prs", [])
         known_prs = tuple(ImplementationPRObservation(number, PRTerminalState.UNKNOWN) for number in stored_prs if isinstance(number, int) and not isinstance(number, bool) and number > 0) if isinstance(stored_prs, list) else ()
         reason = jules_resolution.collection_reason or RetirementCollectionReason(CollectionReasonKind.AMBIGUOUS_ATTRIBUTION, "provider-ownership")
-        known_sessions = tuple(
-            ProviderSessionObservation(
-                session_id=session_id,
-                provider=reason.provider or "unknown",
-                state=SessionTerminalState.UNKNOWN,
+        known_sessions = (
+            tuple(
+                ProviderSessionObservation(
+                    session_id=session_id,
+                    provider=reason.provider or "unknown",
+                    state=SessionTerminalState.UNKNOWN,
+                )
+                for session_id in jules_resolution.attributed_sessions
+                if session_id not in {session.session_id for session in jules_resolution.retry_sessions}
             )
-            for session_id in jules_resolution.attributed_sessions
+            + jules_resolution.retry_sessions
         )
         return ImplementationRetirementObservation(
             repository=expected_repo,
