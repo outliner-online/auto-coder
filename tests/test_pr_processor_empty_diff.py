@@ -10,6 +10,7 @@ from src.auto_coder.cloud_run import CloudRun, CloudRunRepository
 from src.auto_coder.pr_processor import (
     _close_empty_pr,
     _is_empty_pr,
+    _link_jules_pr_to_issue,
     _resolve_pr_issue_numbers,
     process_pull_request,
 )
@@ -291,8 +292,8 @@ class TestCloseEmptyPRCloudRunAware:
 
     @patch("src.auto_coder.pr_processor._remove_reviewer_sessions_for_closed_pr")
     @patch("src.auto_coder.pr_processor.increment_attempt")
-    def test_jules_empty_pr_still_increments_attempt(self, mock_increment, mock_remove_sessions, tmp_path, monkeypatch):
-        """AC-005: an Issue with no persisted CloudRun keeps the pre-existing (Jules) behavior."""
+    def test_jules_empty_pr_does_not_increment_attempt(self, mock_increment, mock_remove_sessions, tmp_path, monkeypatch):
+        """A historical PR link cannot prove independent retry authority."""
         monkeypatch.setenv("HOME", str(tmp_path))
         mock_increment.return_value = 2
 
@@ -305,8 +306,8 @@ class TestCloseEmptyPRCloudRunAware:
             result = _close_empty_pr(github_client, "owner/repo", pr_data, config)
 
         assert result.closed is True
-        assert result.issue_numbers == [4800]
-        mock_increment.assert_called_once_with("owner/repo", 4800)
+        assert result.issue_numbers == []
+        mock_increment.assert_not_called()
 
 
 class TestProcessPullRequestEmptyDiff:
@@ -340,6 +341,7 @@ class TestAutomationEngineEmptyPRRequeue:
         engine = AutomationEngine(mock_github, config=config)
 
         empty_pr = _empty_pr_data_with_commits()
+        empty_pr["user"] = {"login": "developer"}
         engine.github.get_open_prs_json.return_value = [empty_pr]
         engine.github.get_issue.return_value = {"state": "open", "number": 4800}
         engine.github.get_open_issues.return_value = []
@@ -367,6 +369,7 @@ class TestAutomationEngineEmptyPRRequeue:
         engine = AutomationEngine(mock_github, config=config)
 
         empty_pr = _empty_pr_data_with_commits()
+        empty_pr["user"] = {"login": "developer"}
         candidate = Candidate(type="pr", data=empty_pr, priority=1)
         engine.github.get_issue.return_value = {"state": "open", "number": 4800}
 
@@ -414,5 +417,41 @@ class TestAutomationEngineEmptyPRRequeue:
         assert result.success is True
         github.close_pr.assert_called_once()
         cloud_manager_class.assert_not_called()
+        mock_increment.assert_not_called()
+        process_unlocked.assert_not_called()
+
+    @patch("src.auto_coder.pr_processor.increment_attempt")
+    def test_empty_historical_pr_does_not_retry_generated_issue_link(self, mock_increment):
+        """A link previously generated from session history is not retry authority."""
+        github = Mock()
+        engine = AutomationEngine(github, config=AutomationConfig())
+        candidate = Candidate(
+            type="pr",
+            data={
+                "number": 4975,
+                "title": "Historical provider output",
+                "body": "https://jules.google.com/session/historical-empty",
+                "state": "open",
+                "user": {"login": "google-labs-jules"},
+                "head": {"ref": "provider-output", "sha": "abc123"},
+                "base": {"ref": "main"},
+                "changed_files": 0,
+                "additions": 0,
+                "deletions": 0,
+            },
+            priority=1,
+        )
+        with (
+            patch("src.auto_coder.pr_processor.CloudManager") as history,
+            patch("src.auto_coder.pr_processor._update_jules_pr_body", return_value=True),
+        ):
+            history.return_value.get_issue_by_session.return_value = 42
+            assert _link_jules_pr_to_issue("owner/repo", candidate.data, github)
+        assert "close #42" in candidate.data["body"]
+        with patch.object(engine, "_process_unlocked_issue") as process_unlocked:
+            result = engine._process_single_candidate_unified("owner/repo", candidate, engine.config, jules_mode=True)
+
+        assert result.success is True
+        github.close_pr.assert_called_once()
         mock_increment.assert_not_called()
         process_unlocked.assert_not_called()

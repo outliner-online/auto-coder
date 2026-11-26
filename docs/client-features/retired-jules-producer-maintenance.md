@@ -13,9 +13,9 @@ the established PR-closing outcome, but it neither resolves an Issue from the
 old session binding nor advances or re-enters Issue work from that history.
 Failing CI and definitive merge conflicts likewise remain non-authorizing:
 daemon PR processing does not send repair messages to historical Jules
-sessions. Closing an empty historical Jules PR may retry an explicitly linked
-Issue, but a persisted session-to-Issue binding alone cannot advance or queue
-that Issue.
+sessions. Closing an empty historical Jules PR does not retry an Issue: even a
+closing reference may have been generated from a persisted session binding in
+an earlier processing pass.
 
 Provider-neutral workspace reclamation, update checks, the producer's fixed
 maintenance sleep, and PR merge/close wake-up remain independent of retired
