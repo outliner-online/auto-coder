@@ -6,7 +6,7 @@
       - "When a PR has zero changed files (or additions and deletions are zero / diff is empty), it is treated as a failed processing attempt even if the branch contains commits."
       - "The empty PR is closed automatically with an explanatory comment."
       - "The associated source issue is resolved from the PR body, session ID, branch name, or title."
-      - "Historical Jules PRs are closed without retrying an Issue because existing body links may have been generated from session history."
+      - "Historical Jules PR body links and session bindings are ignored because they may have been generated from session history; independently associated branch names or titles can still authorize the established retry flow."
       - "If the source issue was closed as a side effect of the PR relationship, it is reopened before reprocessing."
       - "The source issue's attempt counter is incremented, and its @auto-coder label is removed."
       - "The issue is requeued through the normal issue-processing path so the next attempt-based routing/fallback model takes over."
