@@ -36,8 +36,7 @@ adapter. Injected Issue and PR management callers use `GitHubClient.api_for`, wh
 credential at every wire send (including later pages on a retained GhApi object) rather than
 copying an installation token into the process environment. The legacy singleton remains the
 startup default until the remaining CI and terminal merge senders adopt repository-scoped
-clients; Git, native reviewer-App publication, Actions-secret publication, provider APIs and
-human-operator actions remain separate credential roles.
+clients; Git, native reviewer-App publication, provider APIs and human-operator actions remain separate credential roles.
 
 Controller-App PRs keep the local implementation marker and ordinary review/repair route. A
 `[bot]` suffix does not turn such a PR into a dependency update. Deployments with restrictive
