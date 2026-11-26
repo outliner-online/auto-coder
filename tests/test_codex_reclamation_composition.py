@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from auto_coder.cloud_manager import CloudManager
 from auto_coder.cloud_run import CloudRun, CloudRunRepository
 from auto_coder.codex_pr_recovery import CodexPRRecoveryStore, RecoveryOutcome
 from auto_coder.codex_retirement_observer import (
@@ -22,6 +23,8 @@ from auto_coder.implementation_reclamation_scheduler import (
 )
 from auto_coder.implementation_retirement import ImplementationPRObservation, PRTerminalState, RetirementResult, RetirementStatus
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
+from auto_coder.issue_stage_routing import ImplementationRetryRequest
+from auto_coder.retry_dispatch import RetryDispatchRepository
 
 
 def test_terminal_codex_work_is_settled_and_retired_under_one_owner_guard(tmp_path: Path, monkeypatch) -> None:
@@ -166,10 +169,12 @@ def test_due_codex_retention_reschedules_same_obligation(tmp_path: Path, monkeyp
     assert pending[0].last_reason == f"{status.value}|Codex task is active|task:active"
 
 
-def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("legacy_source", ["none", "slot", "cloud_manager", "retry", "retry_predecessor"])
+def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp_path: Path, monkeypatch, legacy_source: str) -> None:
     from auto_coder.codex_work_reconstruction import reconstruct_active_codex_work
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("AUTO_CODER_RUNTIME_ROOT", raising=False)
     repository = "owner/repo"
     owner = ImplementationOwner("issue", 2336)
     slots = ImplementationSlotRepository(repository, 1)
@@ -183,6 +188,20 @@ def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp
     assert recovery.save_observation(run, RecoveryOutcome.PR_OBSERVED, completion_turn=baseline, pr_number=91)
     assert recovery.mark_handoff(run)
     reconstruct_active_codex_work(repository, slots)
+    manager = CloudManager(repository)
+    if legacy_source == "slot":
+        assert slots.record_provider_session(owner, "historical-jules-session")
+    elif legacy_source == "cloud_manager":
+        assert manager.add_session(owner.number, "historical-jules-session", provider="jules")
+    elif legacy_source in {"retry", "retry_predecessor"}:
+        authority = ImplementationRetryRequest("historical-retry", repository, owner.number, "historical-generation", "historical-attempt", "owned", "historical-execution")
+        retries = RetryDispatchRepository(repository)
+        if legacy_source == "retry":
+            retries.claim(authority, "jules", "jules", {})
+            retries.record_outcome(authority.request_id, "accepted", external_id="historical-jules-session")
+        else:
+            retries.claim(authority, "local", "codex", {}, predecessor=("jules", "historical-jules-session", "jules"))
+            retries.record_outcome(authority.request_id, "definitely-not-started")
 
     request = WhamTurn("request", "user", "completed", raw_data={"request_id": request_id})
     terminal = WhamTurn("task_e_terminal~asst_terminal", "assistant", "completed")
@@ -223,13 +242,20 @@ def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp
         store,
         github_client=GitHub(),
         cloud_run_store=runs,
+        cloud_manager=manager,
         codex_wham_client=Wham(),
         now=100.0,
     )
 
-    assert released == 1
-    assert slots.owner_incarnation(owner) is None
-    assert slots.available_normal_slots() == 1
+    if legacy_source != "none":
+        assert released == 0
+        assert slots.owner_incarnation(owner) is not None
+        assert slots.available_normal_slots() == 0
+        assert "unknown" in (store.all()[0].last_reason or "").lower()
+    else:
+        assert released == 1
+        assert slots.owner_incarnation(owner) is None
+        assert slots.available_normal_slots() == 1
 
 
 def test_guarded_codex_commit_rejects_changed_final_source_evidence(tmp_path: Path, monkeypatch) -> None:

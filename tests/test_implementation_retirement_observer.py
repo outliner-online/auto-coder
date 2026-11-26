@@ -1643,3 +1643,80 @@ def test_i2284_as005_old_incarnation_replay_does_not_disturb_new_incarnation(tmp
 
     assert ISSUE_100 in slots2.active_owners()
     assert slots2.owner_incarnation(ISSUE_100) == new_incarnation
+
+
+def test_retry_only_mixed_providers_keep_each_attributed_identity(tmp_path):
+    from auto_coder.issue_stage_routing import ImplementationRetryRequest
+    from auto_coder.retry_dispatch import RetryDispatchRepository
+
+    slots = _setup_slots(tmp_path)
+    execution = slots.start_execution(ISSUE_100, generation="mixed-generation")
+    assert execution
+    assert slots.record_implementation_pr(ISSUE_100, 201)
+    slots.finish_execution(ISSUE_100, execution)
+    retries = RetryDispatchRepository(REPO)
+    for provider, session_id in (("jules", "jules-retry"), ("codex-cloud", "codex-retry")):
+        authority = ImplementationRetryRequest(provider, REPO, ISSUE_100.number, "mixed-generation", provider, "owned", "stopped-execution")
+        retries.claim(authority, provider, provider, {})
+        retries.record_outcome(authority.request_id, "accepted", external_id=session_id)
+
+    observed = collect_retirement_observation(ISSUE_100, slots, _make_github_client())
+
+    assert observed is not None
+    assert {(session.provider, session.session_id, session.state) for session in observed.provider_sessions} == {
+        ("jules", "jules-retry", SessionTerminalState.UNKNOWN),
+        ("codex-cloud", "codex-retry", SessionTerminalState.UNKNOWN),
+    }
+    assert observed.collection_reasons[0].provider == "codex-cloud"
+
+
+def test_unknown_retry_keeps_cloud_manager_session_attributable(tmp_path, monkeypatch):
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.issue_stage_routing import ImplementationRetryRequest
+    from auto_coder.retry_dispatch import RetryDispatchRepository
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    slots = _setup_slots(tmp_path)
+    execution = slots.start_execution(ISSUE_100, generation="generation")
+    assert execution is not None
+    assert slots.record_implementation_pr(ISSUE_100, 201)
+    slots.finish_execution(ISSUE_100, execution)
+    request = ImplementationRetryRequest("retry", REPO, 100, "generation", "attempt", "owned", "execution")
+    RetryDispatchRepository(REPO).claim(request, "jules", "jules", {})
+    manager = CloudManager(REPO)
+    assert manager.add_session(100, "known-jules", provider="jules")
+
+    observed = collect_retirement_observation(ISSUE_100, slots, _make_github_client(), cloud_manager=manager)
+
+    assert observed is not None
+    assert [(session.provider, session.session_id, session.state) for session in observed.provider_sessions] == [("jules", "known-jules", SessionTerminalState.UNKNOWN)]
+    assert observed.collection_reasons[0].boundary == "retry-dispatch:retry"
+
+
+def test_mixed_cloud_bindings_preserve_all_session_attribution(tmp_path, monkeypatch):
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    slots = _setup_slots(tmp_path)
+    execution = slots.start_execution(ISSUE_100, generation="mixed-generation")
+    assert execution is not None
+    assert slots.record_implementation_pr(ISSUE_100, 201)
+    slots.finish_execution(ISSUE_100, execution)
+    manager = CloudManager(REPO)
+    assert manager.add_session(100, "codex-task", provider="codex-cloud")
+    runs = CloudRunRepository(REPO, storage_path=tmp_path / "runs.json")
+    assert runs.save(CloudRun(REPO, 100, 1, "codex-cloud", task_id="other-codex"))
+    assert runs.save(CloudRun(REPO, 100, 2, "jules", task_id="jules-task"))
+
+    observed = collect_retirement_observation(ISSUE_100, slots, _make_github_client(), cloud_manager=manager, cloud_run_store=runs)
+
+    assert observed is not None
+    assert {(s.provider, s.session_id, s.state) for s in observed.provider_sessions} == {
+        ("codex-cloud", "codex-task", SessionTerminalState.UNKNOWN),
+        ("codex-cloud", "other-codex", SessionTerminalState.UNKNOWN),
+        ("jules", "jules-task", SessionTerminalState.UNKNOWN),
+    }
+    assert slots.retire_owner(observed).status is RetirementStatus.RETAINED_UNKNOWN
