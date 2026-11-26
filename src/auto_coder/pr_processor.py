@@ -2416,14 +2416,19 @@ def _offer_selected_local_pr_repair(
         explicit_local_checkout=explicit_local_checkout,
     )
 
+    try:
+        controller_identity = github_client.get_authenticated_controller_identity(repo_name)
+    except Exception:
+        controller_identity = None
+
     def owner_allowed(_request: LocalPRRepairOffer, final_metadata: Dict[str, Any]) -> bool:
         # Re-evaluate the selected origin on the same strict metadata read used
         # for exact H/B admission. Cloud and dependency-bot ownership cannot be
         # converted into local ownership merely because H/B stayed unchanged.
         if kind is RepairKind.CI_FAILURE:
-            local_route = explicit_local_checkout or _is_local_llm_pr(final_metadata)
+            local_route = explicit_local_checkout or _is_local_llm_pr(final_metadata, controller_identity)
         else:
-            local_route = explicit_local_checkout or not (_is_codex_or_claude_pr(final_metadata) or _is_jules_pr(final_metadata) or _is_dependabot_pr(final_metadata))
+            local_route = explicit_local_checkout or not (_is_codex_or_claude_pr(final_metadata) or _is_jules_pr(final_metadata) or _is_dependabot_pr(final_metadata, controller_identity))
         if not local_route:
             return False
         exhaustion = check_pr_repair_exhaustion(
@@ -6667,6 +6672,10 @@ def _coordinate_pr_review(
 ) -> PRReviewCoordinationResult:
     """Compose ordinary/two-tier review and retain final authority at its effect boundary."""
     pr_number = int(pr_data["number"])
+    try:
+        controller_identity = github_client.get_authenticated_controller_identity(repo_name)
+    except Exception:
+        controller_identity = None
     scope = PRReviewScope(
         repository=repo_name,
         pr_number=pr_number,
@@ -6791,7 +6800,7 @@ def _coordinate_pr_review(
             return actions
         force_admission_eligible = False
         if adv_enabled:
-            if (claimed_thread_state.has_blocking_unresolved or any(not thread.is_change_provenance for thread in claimed_thread_state.claimed) or any(not is_change_provenance_thread(thread) for thread in claimed_thread_state.unresolved)) and not _is_dependabot_pr(pr_data):
+            if (claimed_thread_state.has_blocking_unresolved or any(not thread.is_change_provenance for thread in claimed_thread_state.claimed) or any(not is_change_provenance_thread(thread) for thread in claimed_thread_state.unresolved)) and not _is_dependabot_pr(pr_data, controller_identity):
                 # An authentic validator finding remains a merge blocker, but it
                 # must not prevent validation of a newer head, nor prevent an
                 # explicit --force run from reaching a fresh current-head
@@ -6990,7 +6999,7 @@ def _coordinate_pr_review(
     # independent specification oracle, so validation is not applicable.
     # Dependabot PRs have automated provenance and are not subject to
     # adversarial validation.
-    adversarial_validation_enabled = adv_enabled and not _is_dependabot_pr(pr_data)
+    adversarial_validation_enabled = adv_enabled and not _is_dependabot_pr(pr_data, controller_identity)
     adversarial_validation_applicable = False
     if not adversarial_validation_enabled:
         _record_pr_stage(
@@ -7166,7 +7175,7 @@ def _coordinate_pr_review(
                     # gate, so an explicit --force run must not be blocked here
                     # either, even for a thread that only became visible after
                     # the Codex review completed.
-                    if thread_gate_enabled and force_adversarial_validation and post_codex_thread_state.has_blocking_unresolved and not _is_dependabot_pr(pr_data):
+                    if thread_gate_enabled and force_adversarial_validation and post_codex_thread_state.has_blocking_unresolved and not _is_dependabot_pr(pr_data, controller_identity):
                         try:
                             post_codex_reviewer_login = reviewer_login or resolve_reviewer_app_identity(repo_name).login
                         except Exception as exc:

@@ -625,7 +625,7 @@ class TestPRProcessorMerge:
             mock_api.pulls.create_review.assert_called_once_with("owner", "repo", 123, event="APPROVE", commit_id=head_sha)
             # Verify merge was called for the expected head
             mock_api.pulls.merge.assert_called_once_with("owner", "repo", 123, merge_method="squash", sha=head_sha)
-            mock_close.assert_called_once_with("owner/repo", 123)
+            mock_close.assert_called_once_with("owner/repo", 123, mock_instance)
             mock_archive.assert_called_once_with("owner/repo", 123)
 
     @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")

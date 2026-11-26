@@ -6312,7 +6312,15 @@ class AutomationEngine:
                 # `checks` was already computed above): it can never
                 # substitute for that mandatory boundary's own fresh,
                 # same-HEAD confirmation (REQ-005).
-                dependency_bot_flag_decision = _dependency_bot_flag_decision(_is_dependabot_pr(pr_data), self.config.IGNORE_DEPENDABOT_PRS, self.config.AUTO_MERGE_DEPENDABOT_PRS)
+                try:
+                    controller_identity = self.github.get_authenticated_controller_identity(repo_name)
+                except Exception:
+                    controller_identity = None
+                dependency_bot_flag_decision = _dependency_bot_flag_decision(
+                    _is_dependabot_pr(pr_data, controller_identity),
+                    self.config.IGNORE_DEPENDABOT_PRS,
+                    self.config.AUTO_MERGE_DEPENDABOT_PRS,
+                )
                 if dependency_bot_flag_decision is None:
                     dependency_bot_decision = _dependency_bot_readiness_decision(
                         is_open=True,

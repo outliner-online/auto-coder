@@ -3002,7 +3002,7 @@ class GitHubClient:
         """Add a comment to an existing issue."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             api.issues.create_comment(owner, repo, issue_number, body=comment)
             logger.debug(f"Added comment to issue #{issue_number}")

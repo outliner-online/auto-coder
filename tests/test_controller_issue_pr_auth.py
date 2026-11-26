@@ -160,3 +160,24 @@ def test_common_admission_distinguishes_same_body_controller_and_unrelated_bot()
 
     assert evaluate_dependency_bot_admission(client, "owner/repo", controller, config).allowed is True
     assert evaluate_dependency_bot_admission(client, "owner/repo", unrelated, config).allowed is False
+
+
+def test_issue_comment_uses_repository_scoped_controller_write_credential():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("POST", "https://api.github.com/repos/owner/repo/issues/42/comments")
+    transport.request.return_value = httpx.Response(
+        201,
+        json={"id": 7, "user": {"login": "auto-coder[bot]", "id": 101}},
+        request=request,
+    )
+
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        client.add_comment_to_issue("owner/repo", 42, "provider link")
+
+    sent = transport.request.call_args
+    assert sent.kwargs["method"].upper() == "POST"
+    assert sent.kwargs["url"] == "https://api.github.com/repos/owner/repo/issues/42/comments"
+    assert sent.kwargs["headers"]["Authorization"] == "Bearer installation-one"
+    assert sent.kwargs["json"] == {"body": "provider link"}
