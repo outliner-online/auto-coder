@@ -166,10 +166,6 @@ def _run_base_update_operation(
     logger = p.logger
     GitHubClient = p.GitHubClient
     _is_jules_pr = p._is_jules_pr
-    _extract_session_id_from_pr_body = p._extract_session_id_from_pr_body
-    _guard_outbound_jules_send = p._guard_outbound_jules_send
-    render_prompt = p.render_prompt
-    _dispatch_jules_repair = p._dispatch_jules_repair
     _is_dependabot_pr = p._is_dependabot_pr
     _dispatch_cloud_conflict_repair = p._dispatch_cloud_conflict_repair
     _is_local_llm_pr = p._is_local_llm_pr
@@ -317,38 +313,11 @@ def _run_base_update_operation(
             actions.append(f"Merge conflict detected for PR #{pr_number}")
 
             if _is_jules_pr(pr_data):
-                actions.append(f"PR #{pr_number} is a Jules PR with merge conflicts. Requesting Jules to resolve it.")
-                try:
-                    from auto_coder.jules_client import JulesClient
-
-                    jules_client = JulesClient()
-                    session_id = _extract_session_id_from_pr_body(pr_data.get("body", ""))
-                    if session_id:
-
-                        def send_jules_conflict() -> Any:
-                            # Keep the existing retirement admission immediately
-                            # before the provider mutation.
-                            if not _guard_outbound_jules_send(repo_name, config, session_id):
-                                reason = f"Blocked merge-conflict resolution request for PR #{pr_number}: session '{session_id}' belongs to a durably retired implementation slot (REQ-009)"
-                                return PRRepairResult(RepairDisposition.REFUSED, (reason,), reason=reason)
-                            prompt = render_prompt("pr.jules_merge_conflict_resolution")
-                            jules_client.send_message(session_id, prompt)
-                            return PRRepairResult(
-                                RepairDisposition.ACCEPTED_OR_UNCERTAIN,
-                                (f"Requested Jules to resolve merge conflict in session {session_id}",),
-                                attempt_started=True,
-                            )
-
-                        jules_repair = _dispatch_jules_repair(repo_name, pr_data, RepairKind.MERGE_CONFLICT, session_id, send_jules_conflict)
-                        actions.extend(jules_repair.actions)
-                        actions.repair_result = jules_repair
-                        # We return here so we don't proceed with LLM fixing this PR right now
-                        actions.append("ACTION_FLAG:SKIP_ANALYSIS")
-                        return actions
-                    else:
-                        actions.append(f"Jules PR #{pr_number} has merge conflicts but no session ID found. Cannot delegate.")
-                except Exception as e:
-                    actions.append(f"Error requesting Jules to resolve conflict: {e}")
+                actions.append(f"Historical Jules repair is retired for PR #{pr_number}")
+                cmd.run_command(["git", "merge", "--abort"])
+                actions.append("ACTION_FLAG:SKIP_ANALYSIS")
+                record(RepairDisposition.REFUSED, reason=actions[-2])
+                return actions
 
             # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
             # the bot recreates the PR against the updated base branch by itself.
