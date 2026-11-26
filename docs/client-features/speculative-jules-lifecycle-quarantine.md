@@ -1,20 +1,13 @@
-# Speculative Jules lifecycle quarantine
+# Retired speculative Jules artifact fence
 
-Pull requests durably associated with a Jules competition are classified before
-ordinary PR effects. Selected results may continue through normal processing;
-active unselected, uncertain, and conflicting artifacts are deferred, while
-verified retired artifacts are fenced and recorded for durable cleanup. A force
-target does not bypass this authority check.
-Classification searches the durable competition namespaces rather than relying
-on editable PR text, so late results with no Issue link and PRs containing several
-Issue references cannot bypass or ambiguously select the fence.
+Pull requests durably associated with a historical Jules competition are classified
+before ordinary PR effects and again at the final merge mutation boundary. Retired,
+unselected, uncertain, and conflicting artifacts are fenced without cleanup. Only a
+positively selected artifact may proceed, and its durable selection and exact current
+PR/Issue identity are revalidated at the merge boundary before ordinary gates apply.
 
-Cleanup is an independent replayable operation. It rechecks authoritative
-candidate membership immediately before closing a PR, confirms the resulting
-GitHub state before acknowledging the obligation, and leaves denied, ambiguous,
-or unconfirmed requests pending across restart. Already closed or merged PRs need
-no further close. Cleanup never mutates the source Issue, advances attempts,
-deletes branches, or claims that a remote Jules session was cancelled.
-The existing startup/hourly Jules maintenance pass consumes due cleanup even when
-no new Issue or PR event arrives, and cleanup reasons name the selected PR whenever
-the generation ledger has one.
+Classification uses the persisted competition ledger, retained observations, and
+strict GitHub PR identity reads. It never performs Jules session GET/list requests.
+Historical cleanup and delivery obligations remain inspectable but are inert: daemon
+restart does not close loser PRs, refresh candidates, adopt winners, or enqueue failed
+generations.

@@ -1,8 +1,8 @@
 """Fail-closed lifecycle fence for PRs owned by Jules competitions.
 
-The observation adapter is the authority for membership and winner identity.  This
-module turns that read-only decision into an ingress decision and keeps PR cleanup
-as a durable, independently replayable effect.
+The observation adapter is the authority for membership and winner identity. This
+module turns that read-only decision into ingress and merge decisions. Historical
+state is never refreshed from Jules and never authorizes cleanup mutations.
 """
 
 from __future__ import annotations
@@ -38,6 +38,13 @@ class CleanupGitHubClient(Protocol):
     def get_pull_request_metadata_strict(self, repository: str, pr_number: int) -> Mapping[str, object]: ...
 
     def close_pr(self, repository: str, pr_number: int, comment: str) -> None: ...
+
+
+class RetiredJulesReader:
+    """Non-transport placeholder satisfying the observation adapter contract."""
+
+    def get_session(self, session_id: str) -> Mapping[str, object]:
+        raise RuntimeError("retired Jules competitions cannot read provider sessions")
 
 
 @dataclass(frozen=True)
@@ -114,11 +121,7 @@ class SpeculativeJulesLifecycle:
         if result.classification is ArtifactClassification.SELECTED:
             return LifecycleDecision(result.classification, True)
         if result.classification is ArtifactClassification.RETIRED:
-            if issue_number is None or result.generation_id is None:
-                return LifecycleDecision(ArtifactClassification.BLOCKED, False, False, "retired artifact ownership is unavailable")
-            selected_pr = self.classifier.selected_pr_number(repository, issue_number, result.generation_id)
-            self.cleanup_store.retain(repository, issue_number, result, pr_number, selected_pr)
-            return LifecycleDecision(result.classification, False, True, "verified retired Jules competitor")
+            return LifecycleDecision(result.classification, False, False, "verified retired Jules competitor")
         # Active candidates use the competition evaluator; suspected/conflicting
         # artifacts must be retried after authoritative evidence becomes available.
         return LifecycleDecision(result.classification, False, False, "; ".join(result.diagnostics) or "candidate-aware evaluation required")
@@ -142,48 +145,50 @@ class SpeculativeJulesLifecycle:
         return LifecycleDecision(ArtifactClassification.SELECTED, True)
 
     def consume_cleanup(self, github_client: CleanupGitHubClient) -> int:
-        """Attempt every due close, rechecking authority at the outbound boundary."""
-        completed = 0
-        for obligation in self.cleanup_store.pending():
-            current = self.classifier.classify(obligation.repository, obligation.issue_number, obligation.repository, obligation.pr_number)
-            if current.classification is not ArtifactClassification.RETIRED or current.generation_id != obligation.generation_id or current.candidate_id != obligation.candidate_id:
-                continue
-            pr = github_client.get_pull_request_metadata_strict(obligation.repository, obligation.pr_number)
-            state = pr.get("state")
-            merged = bool(pr.get("merged"))
-            if state == "closed" or merged:
-                self.cleanup_store.complete(obligation.repository, obligation.generation_id, obligation.candidate_id, obligation.pr_number)
-                completed += 1
-                continue
-            # A second classification is intentionally adjacent to the mutation.
-            boundary = self.classifier.classify(obligation.repository, obligation.issue_number, obligation.repository, obligation.pr_number)
-            if boundary.classification is not ArtifactClassification.RETIRED or boundary.generation_id != obligation.generation_id or boundary.candidate_id != obligation.candidate_id:
-                continue
-            github_client.close_pr(obligation.repository, obligation.pr_number, f"Auto-Coder: Closing verified losing Jules candidate PR. {obligation.reason}.")
-            confirmed = github_client.get_pull_request_metadata_strict(obligation.repository, obligation.pr_number)
-            if confirmed.get("state") == "closed" or confirmed.get("merged"):
-                self.cleanup_store.complete(obligation.repository, obligation.generation_id, obligation.candidate_id, obligation.pr_number)
-                completed += 1
-        return completed
+        """Leave pre-retirement cleanup obligations inspectable and inert."""
+        return 0
 
 
 class RefreshingSpeculativeClassifier:
-    """Refresh candidate sessions before making an ingress authority decision."""
+    """Read the retired ledger and retained observations without Jules traffic.
+
+    The historical name remains for import compatibility.
+    """
 
     def __init__(self, adapter: object, ledger: object):
         self.adapter = adapter
         self.ledger = ledger
 
     def classify(self, repository: str, issue_number: int, pr_repository: str, pr_number: int) -> ClassificationResult:
-        snapshot = self.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
-        for generation in snapshot.generations:
-            for candidate in generation.candidates:
-                if candidate.session_id:
-                    self.adapter.observe_candidate(repository, issue_number, generation.generation_id, candidate.candidate_id)  # type: ignore[attr-defined]
-        return self.adapter.classify(repository, issue_number, pr_repository, pr_number)  # type: ignore[no-any-return,attr-defined]
+        try:
+            return self.adapter.classify(repository, issue_number, pr_repository, pr_number)  # type: ignore[no-any-return,attr-defined]
+        except Exception as exc:
+            return ClassificationResult(
+                ArtifactClassification.BLOCKED,
+                diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
+            )
 
     def classify_pr(self, repository: str, pr_repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> tuple[Optional[int], ClassificationResult]:
-        issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *self.ledger.list_issue_numbers(repository))))  # type: ignore[attr-defined]
+        try:
+            ledger_issues = self.ledger.list_issue_numbers(repository)  # type: ignore[attr-defined]
+        except Exception as exc:
+            # A strict human author identity independently proves that a PR is
+            # unrelated. Bot authorship alone remains ambiguous as required by
+            # the retirement fence.
+            try:
+                pr = self.adapter.github.get_pull_request_metadata_strict(pr_repository, pr_number)  # type: ignore[attr-defined]
+                user = pr.get("user") if isinstance(pr, Mapping) else None
+                login = user.get("login") if isinstance(user, Mapping) else None
+                user_type = user.get("type") if isinstance(user, Mapping) else None
+                if isinstance(login, str) and login and user_type == "User":
+                    return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
+            except Exception:
+                pass
+            return None, ClassificationResult(
+                ArtifactClassification.BLOCKED,
+                diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
+            )
+        issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
         if not issue_numbers:
             return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
         classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number)) for issue in issue_numbers)
@@ -252,7 +257,6 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
     global _lifecycle
     if _lifecycle is None and github_client is not None:
         from .jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
-        from .jules_client import JulesClient
         from .jules_competition_ledger import JulesCompetitionLedger
 
         root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
@@ -260,7 +264,7 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         adapter = JulesCandidateObservationAdapter(
             ledger,
             CandidateObservationStore(root / "jules_candidate_observations.db"),
-            JulesClient(),
+            RetiredJulesReader(),
             github_client,  # type: ignore[arg-type]
         )
         _lifecycle = SpeculativeJulesLifecycle(
@@ -289,30 +293,5 @@ def consume_due_speculative_work(
     enqueue_issue: Optional[Callable[[int], None]] = None,
     enqueue_pr: Optional[Callable[[int], None]] = None,
 ) -> tuple[int, int]:
-    """Refresh sessions and deliver durable adoption/failure obligations."""
-    from .jules_competition_ledger import ObligationKind
-
-    lifecycle = get_speculative_jules_lifecycle(github_client)
-    if lifecycle is None or not isinstance(lifecycle.classifier, RefreshingSpeculativeClassifier):
-        return (0, 0)
-    classifier = lifecycle.classifier
-    refreshed = 0
-    for issue_number in classifier.ledger.list_issue_numbers(repository):  # type: ignore[attr-defined]
-        snapshot = classifier.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
-        for generation in snapshot.generations:
-            for candidate in generation.candidates:
-                if candidate.session_id:
-                    classifier.adapter.observe_candidate(repository, issue_number, generation.generation_id, candidate.candidate_id)  # type: ignore[attr-defined]
-                    refreshed += 1
-        for obligation in classifier.ledger.list_pending_obligations(repository, issue_number):  # type: ignore[attr-defined]
-            delivered = False
-            if obligation.kind is ObligationKind.ADOPTION and enqueue_pr is not None:
-                enqueue_pr(obligation.adoption_payload().pr_number)
-                delivered = True
-            elif obligation.kind is ObligationKind.AGGREGATE_FAILURE and enqueue_issue is not None:
-                enqueue_issue(issue_number)
-                delivered = True
-            if delivered:
-                classifier.ledger.mark_obligation_delivered(obligation.obligation_id, f"production-deliver:{obligation.obligation_id}")  # type: ignore[attr-defined]
-                classifier.ledger.acknowledge_obligation(obligation.obligation_id, f"production-ack:{obligation.obligation_id}")  # type: ignore[attr-defined]
-    return refreshed, lifecycle.consume_cleanup(github_client)  # type: ignore[arg-type]
+    """Retired compatibility entry point; competition effects remain inert."""
+    return (0, 0)

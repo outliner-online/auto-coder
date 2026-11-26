@@ -23,37 +23,10 @@ def test_invalid_runtime_width_is_reported_before_provider_dispatch(client_class
     client_class.assert_not_called()
 
 
-def test_disabled_validator_defers_before_generation_or_post(tmp_path, monkeypatch) -> None:
+def test_competition_dispatch_is_retired_without_ledger_or_provider_effects(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     client = Mock()
-    actions = _dispatch_jules_competition("owner/repo", {"number": 7}, config(validation=False), "task", client, None, None)  # type: ignore[arg-type]
-    assert actions == ["Deferred Jules competition for issue #7: independent PR adversarial validation is disabled"]
+    actions = _dispatch_jules_competition("owner/repo", {"number": 7}, config(), "task", client, None, None)  # type: ignore[arg-type]
+    assert actions == ["Deferred retired Jules competition for issue #7: speculative execution is disabled"]
     client.start_session.assert_not_called()
     assert JulesCompetitionLedger().get_namespace_snapshot("owner/repo", 7).generations == ()
-
-
-@patch("auto_coder.cli_helpers.create_adversarial_validation_backend_manager", return_value=Mock())
-@patch("auto_coder.issue_processor.get_current_attempt", return_value=1)
-def test_retirement_stops_unsent_candidates(_attempt: Mock, _validator: Mock, tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    adapter = Mock()
-
-    def submit(request):
-        ledger = JulesCompetitionLedger()
-        snapshot = ledger.get_namespace_snapshot(request.repository, request.issue_number)
-        ledger.retire_generation(
-            request.repository,
-            request.issue_number,
-            request.generation_id,
-            "test-retire",
-            snapshot.epoch,
-            "shutdown",
-            GenerationRetirementSource.OPERATOR,
-        )
-        return CandidateSubmissionResult(CandidateSubmissionOutcome.ACCEPTED, session_id="session-1")
-
-    adapter.submit.side_effect = submit
-    with patch("auto_coder.jules_candidate_submission.JulesCandidateSubmissionAdapter", return_value=adapter):
-        actions = _dispatch_jules_competition("owner/repo", {"number": 7}, config(), "task", Mock(), None, None)  # type: ignore[arg-type]
-    assert adapter.submit.call_count == 1
-    assert "requested=3, accepted=1" in actions[0]

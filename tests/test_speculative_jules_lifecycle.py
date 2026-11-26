@@ -52,10 +52,10 @@ def test_targeted_maintenance_refreshes_known_sessions_without_account_listing(t
     service = SpeculativeJulesLifecycle(classifier, SpeculativeCleanupStore(tmp_path / "cleanup.db"))
     configure_speculative_jules_lifecycle(service)
     try:
-        assert consume_due_speculative_work("owner/repo", Mock()) == (1, 0)
+        assert consume_due_speculative_work("owner/repo", Mock()) == (0, 0)
     finally:
         configure_speculative_jules_lifecycle(None)
-    adapter.observe_candidate.assert_called_once_with("owner/repo", 7, "g1", "c1")
+    adapter.observe_candidate.assert_not_called()
     adapter.list_sessions.assert_not_called()
 
 
@@ -74,9 +74,9 @@ def test_targeted_maintenance_delivers_durable_aggregate_failure(tmp_path: Path)
         assert consume_due_speculative_work("owner/repo", Mock(), enqueue_issue=enqueue_issue) == (0, 0)
     finally:
         configure_speculative_jules_lifecycle(None)
-    enqueue_issue.assert_called_once_with(7)
-    ledger.mark_obligation_delivered.assert_called_once_with("obl-1", "production-deliver:obl-1")
-    ledger.acknowledge_obligation.assert_called_once_with("obl-1", "production-ack:obl-1")
+    enqueue_issue.assert_not_called()
+    ledger.mark_obligation_delivered.assert_not_called()
+    ledger.acknowledge_obligation.assert_not_called()
 
 
 def test_active_candidate_is_deferred_without_cleanup(tmp_path: Path) -> None:
@@ -90,27 +90,26 @@ def test_active_candidate_is_deferred_without_cleanup(tmp_path: Path) -> None:
 def test_retirement_is_durable_before_cleanup_and_survives_restart(tmp_path: Path) -> None:
     result = ClassificationResult(ArtifactClassification.RETIRED, "c2", "g1", cleanup_allowed=True)
     service, _ = lifecycle(tmp_path, result)
-    assert service.evaluate_pr("owner/repo", 42).cleanup_pending is True
+    assert service.evaluate_pr("owner/repo", 42).cleanup_pending is False
     restarted = SpeculativeCleanupStore(tmp_path / "cleanup.db")
-    assert restarted.pending() == (CleanupObligation("owner/repo", 7, "g1", "c2", 42, None, "retired Jules competitor in generation g1"),)
+    assert restarted.pending() == ()
 
 
 def test_cleanup_rechecks_authority_and_confirms_close(tmp_path: Path) -> None:
     result = ClassificationResult(ArtifactClassification.RETIRED, "c2", "g1", cleanup_allowed=True)
     service, classifier = lifecycle(tmp_path, result)
-    service.evaluate_pr("owner/repo", 42)
+    service.cleanup_store.retain("owner/repo", 7, result, 42, None)
     github = Mock()
-    github.get_pull_request_metadata_strict.side_effect = [{"number": 42, "state": "open"}, {"number": 42, "state": "closed"}]
-    assert service.consume_cleanup(github) == 1
-    assert classifier.calls == 3
-    github.close_pr.assert_called_once_with("owner/repo", 42, "Auto-Coder: Closing verified losing Jules candidate PR. retired Jules competitor in generation g1.")
-    assert service.cleanup_store.pending() == ()
+    assert service.consume_cleanup(github) == 0
+    github.get_pull_request_metadata_strict.assert_not_called()
+    github.close_pr.assert_not_called()
+    assert len(service.cleanup_store.pending()) == 1
 
 
 def test_cleanup_conflict_at_mutation_boundary_keeps_obligation(tmp_path: Path) -> None:
     retired = ClassificationResult(ArtifactClassification.RETIRED, "c2", "g1", cleanup_allowed=True)
     service, classifier = lifecycle(tmp_path, retired)
-    service.evaluate_pr("owner/repo", 42)
+    service.cleanup_store.retain("owner/repo", 7, retired, 42, None)
     classifier.result = retired
     github = Mock()
     github.get_pull_request_metadata_strict.return_value = {"number": 42, "state": "open"}
@@ -147,7 +146,7 @@ def test_top_level_processor_fences_retired_empty_pr_before_lifecycle_effects(tm
         configure_speculative_jules_lifecycle(None)
 
     assert result.outcome is PRProcessingOutcome.DEFERRED
-    assert result.priority == "cleanup"
+    assert result.priority == "defer"
     assert result.actions_taken == ["Speculative Jules retired artifact fenced: verified retired Jules competitor"]
     github.close_pr.assert_not_called()
 
@@ -164,7 +163,7 @@ def test_top_level_processor_fences_unlinked_retired_pr(tmp_path: Path) -> None:
         configure_speculative_jules_lifecycle(None)
 
     assert result.outcome is PRProcessingOutcome.DEFERRED
-    assert result.priority == "cleanup"
+    assert result.priority == "defer"
     github.close_pr.assert_not_called()
 
 
@@ -172,7 +171,7 @@ def test_cleanup_reason_includes_selected_pr_when_known(tmp_path: Path) -> None:
     result = ClassificationResult(ArtifactClassification.RETIRED, "c2", "g1", cleanup_allowed=True)
     classifier = Classifier(result, selected_pr=41)
     service = SpeculativeJulesLifecycle(classifier, SpeculativeCleanupStore(tmp_path / "cleanup.db"))
-    service.evaluate_pr("owner/repo", 42)
+    service.cleanup_store.retain("owner/repo", 7, result, 42, 41)
     assert service.cleanup_store.pending()[0].reason == "retired Jules competitor in generation g1; selected PR is #41"
 
 
@@ -190,3 +189,23 @@ def test_jules_maintenance_drives_due_cleanup_without_new_issue_event() -> None:
         check_and_resume_or_archive_sessions("owner/repo")
 
     cleanup.assert_called_once_with(github)
+
+
+def test_unavailable_ledger_allows_only_strictly_proven_human_pr(tmp_path: Path) -> None:
+    ledger = Mock()
+    ledger.list_issue_numbers.side_effect = OSError("offline")
+    adapter = Mock()
+    adapter.github.get_pull_request_metadata_strict.side_effect = [
+        {"number": 50, "user": {"login": "octocat", "type": "User"}},
+        {"number": 51, "user": {"login": "automation[bot]", "type": "Bot"}},
+    ]
+    classifier = RefreshingSpeculativeClassifier(adapter, ledger)
+
+    _, ordinary = classifier.classify_pr("owner/repo", "owner/repo", 50)
+    _, ambiguous = classifier.classify_pr("owner/repo", "owner/repo", 51)
+
+    assert ordinary.classification is ArtifactClassification.LEGACY
+    assert ordinary.mutation_allowed is True
+    assert ambiguous.classification is ArtifactClassification.BLOCKED
+    assert ambiguous.mutation_allowed is False
+    adapter.observe_candidate.assert_not_called()
