@@ -11,3 +11,8 @@ strict GitHub PR identity reads. It never performs Jules session GET/list reques
 Historical cleanup and delivery obligations remain inspectable but are inert: daemon
 restart does not close loser PRs, refresh candidates, adopt winners, or enqueue failed
 generations.
+
+A ledger binding remains a fence if its separate observation is missing. An
+unreadable namespace also prevents a selected association in another namespace
+from granting authority. An unrecognized bot author alone does not establish
+that a PR is unrelated to an incomplete competition history.

@@ -211,6 +211,21 @@ def test_unavailable_ledger_allows_only_strictly_proven_human_pr(tmp_path: Path)
     adapter.observe_candidate.assert_not_called()
 
 
+def test_selected_association_does_not_override_an_unreadable_namespace() -> None:
+    ledger = Mock()
+    ledger.list_issue_numbers.return_value = (7, 8)
+    adapter = Mock()
+    adapter.classify.side_effect = [
+        ClassificationResult(ArtifactClassification.SELECTED, "c1", "g1"),
+        OSError("unreadable namespace"),
+    ]
+    classifier = RefreshingSpeculativeClassifier(adapter, ledger)
+
+    _, result = classifier.classify_pr("owner/repo", "owner/repo", 41)
+
+    assert result.classification is ArtifactClassification.BLOCKED
+
+
 def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport(tmp_path: Path) -> None:
     """REQ-006: exercise both production boundaries from durable retired state."""
     from auto_coder.jules_candidate_observation import (
@@ -350,14 +365,23 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
             "head": {"repo": {"full_name": repository}, "ref": "ordinary", "sha": "head-50"},
             "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
         },
+        51: {
+            "number": 51,
+            "body": "",
+            "changed_files": 1,
+            "user": {"login": "other-automation[bot]", "type": "Bot"},
+            "head": {"repo": {"full_name": repository}, "ref": "unknown", "sha": "head-51"},
+            "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
+        },
     }
     github = Mock(token="token")
     github.get_pull_request_metadata_strict.side_effect = lambda _repo, number: strict_prs[number]
     restarted_ledger = JulesCompetitionLedger(ledger_path)
+    retired_reader = Mock(wraps=RetiredJulesReader())
     restarted_adapter = JulesCandidateObservationAdapter(
         restarted_ledger,
         CandidateObservationStore(observation_path),
-        RetiredJulesReader(),
+        retired_reader,
         github,
     )
     restarted = SpeculativeJulesLifecycle(
@@ -367,6 +391,12 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
 
     configure_speculative_jules_lifecycle(restarted)
     try:
+        enqueue_issue = Mock()
+        enqueue_pr = Mock()
+        assert consume_due_speculative_work(repository, github, enqueue_issue, enqueue_pr) == (0, 0)
+        enqueue_issue.assert_not_called()
+        enqueue_pr.assert_not_called()
+        github.close_pr.assert_not_called()
         green_ci = Mock(success=True, in_progress=False)
         with patch("auto_coder.pr_processor._check_github_actions_status", return_value=green_ci) as check_ci:
             loser = process_pull_request(github, AutomationConfig(), repository, strict_prs[42])
@@ -382,6 +412,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         assert ordinary.classification is ArtifactClassification.LEGACY
         ordinary_result = process_pull_request(github, AutomationConfig(), repository, strict_prs[50])
         assert all("Speculative Jules" not in action for action in ordinary_result.actions_taken)
+        assert process_pull_request(github, AutomationConfig(), repository, strict_prs[51]).outcome is PRProcessingOutcome.DEFERRED
 
         from auto_coder.merge_operation_state import MergeOperationStore
 
@@ -404,6 +435,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
             # refused before the durable adapter can dispatch a mutation.
             assert _merge_pr(repository, 42, {}, AutomationConfig(), github_client=github) is False
             assert _merge_pr(repository, 41, {}, AutomationConfig(), github_client=github) is False
+            assert _merge_pr(repository, 51, {}, AutomationConfig(), github_client=github) is False
             outbound_api.pulls.merge.assert_not_called()
 
             # The proven-unrelated control traverses the same final gate and
@@ -411,8 +443,30 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
             assert _merge_pr(repository, 50, {}, AutomationConfig(), github_client=github) is True
 
         outbound_api.pulls.merge.assert_called_once_with("owner", "repo", 50, merge_method="squash", sha="head-50")
+
+        # A surviving ledger binding must remain authoritative even if the
+        # separate observation database has been lost after restart.
+        missing_observations = JulesCandidateObservationAdapter(
+            restarted_ledger, CandidateObservationStore(tmp_path / "missing.db"), RetiredJulesReader(), github
+        )
+        configure_speculative_jules_lifecycle(
+            SpeculativeJulesLifecycle(
+                RefreshingSpeculativeClassifier(missing_observations, restarted_ledger),
+                SpeculativeCleanupStore(tmp_path / "cleanup.db"),
+            )
+        )
+        strict_prs[42]["user"] = {"login": "octocat", "type": "User"}
+        assert process_pull_request(github, AutomationConfig(), repository, strict_prs[42]).outcome is PRProcessingOutcome.DEFERRED
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=merge_store),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
+        ):
+            assert _merge_pr(repository, 42, {}, AutomationConfig(), github_client=github) is False
+        outbound_api.pulls.merge.assert_called_once()
     finally:
         configure_speculative_jules_lifecycle(None)
 
     github.close_pr.assert_not_called()
-    restarted_adapter.jules.get_session  # proves the inert production transport was composed
+    retired_reader.get_session.assert_not_called()

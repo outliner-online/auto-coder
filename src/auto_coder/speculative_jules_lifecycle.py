@@ -161,7 +161,22 @@ class RefreshingSpeculativeClassifier:
 
     def classify(self, repository: str, issue_number: int, pr_repository: str, pr_number: int) -> ClassificationResult:
         try:
-            return self.adapter.classify(repository, issue_number, pr_repository, pr_number)  # type: ignore[no-any-return,attr-defined]
+            result = self.adapter.classify(repository, issue_number, pr_repository, pr_number)  # type: ignore[attr-defined]
+            if result.classification is ArtifactClassification.LEGACY:
+                snapshot = self.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
+                if any(
+                    binding.pr_repository.lower() == pr_repository.lower() and binding.pr_number == pr_number
+                    for generation in snapshot.generations
+                    for candidate in generation.candidates
+                    for binding in candidate.bindings
+                ):
+                    return ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("ledger binding lacks matching observation authority",))
+                if snapshot.generations and not self.adapter.store.has_legacy_membership(repository, pr_repository, pr_number):  # type: ignore[attr-defined]
+                    pr = self.adapter.github.get_pull_request_metadata_strict(pr_repository, pr_number)  # type: ignore[attr-defined]
+                    user = pr.get("user") if isinstance(pr, Mapping) and pr.get("number") == pr_number else None
+                    if not isinstance(user, Mapping) or user.get("type") != "User" or not user.get("login"):
+                        return ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("unresolved retired Jules ownership",))
+            return result  # type: ignore[no-any-return]
         except Exception as exc:
             return ClassificationResult(
                 ArtifactClassification.BLOCKED,
@@ -177,7 +192,7 @@ class RefreshingSpeculativeClassifier:
             # the retirement fence.
             try:
                 pr = self.adapter.github.get_pull_request_metadata_strict(pr_repository, pr_number)  # type: ignore[attr-defined]
-                user = pr.get("user") if isinstance(pr, Mapping) else None
+                user = pr.get("user") if isinstance(pr, Mapping) and pr.get("number") == pr_number else None
                 login = user.get("login") if isinstance(user, Mapping) else None
                 user_type = user.get("type") if isinstance(user, Mapping) else None
                 if isinstance(login, str) and login and user_type == "User":
@@ -196,7 +211,7 @@ class RefreshingSpeculativeClassifier:
         if not relevant:
             return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
         definitive = tuple(item for item in relevant if item[1].classification in (ArtifactClassification.ACTIVE_UNSELECTED, ArtifactClassification.SELECTED, ArtifactClassification.RETIRED))
-        if len(definitive) == 1:
+        if len(definitive) == 1 and len(relevant) == 1:
             return definitive[0]
         if len(definitive) > 1 or len(relevant) > 1:
             return None, ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("PR has multiple speculative Issue associations",))
