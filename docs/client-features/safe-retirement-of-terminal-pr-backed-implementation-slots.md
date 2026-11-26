@@ -36,7 +36,7 @@ The retirement transaction follows a crash-safe commit sequence: acquired-start 
 
 ## Evidence Collection for Retirement Decisions
 
-The `implementation_retirement_observer` module derives authoritative `ImplementationRetirementObservation` instances from strict GitHub reads and durable ownership data. It is strictly read-only — it does not close issues, merge or reopen PRs, send Jules messages, or mutate any store. Scheduled production reclamation does not construct or invoke `JulesClient`; historical Jules membership whose terminal state is no longer observable remains explicitly `UNKNOWN` and is isolated to that owner, while Codex Cloud and local owners continue through their supported evidence paths.
+The `implementation_retirement_observer` module derives authoritative `ImplementationRetirementObservation` instances from strict GitHub reads and durable ownership data. It is strictly read-only — it does not close issues, merge or reopen PRs, send Jules messages, or mutate any store. Scheduled production reclamation does not construct or invoke `JulesClient`; historical Jules membership whose terminal state is no longer observable remains explicitly `UNKNOWN` and is isolated to that owner, while Codex Cloud and local owners continue through their supported evidence paths. Codex reclamation retains an owner as unknown when its CloudManager binding identifies a different historical provider, and rechecks that binding before retirement.
 
 ### PR Candidate Set Construction
 

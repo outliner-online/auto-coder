@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from auto_coder.cloud_manager import CloudManager
 from auto_coder.cloud_run import CloudRun, CloudRunRepository
 from auto_coder.codex_pr_recovery import CodexPRRecoveryStore, RecoveryOutcome
 from auto_coder.codex_retirement_observer import (
@@ -166,7 +167,8 @@ def test_due_codex_retention_reschedules_same_obligation(tmp_path: Path, monkeyp
     assert pending[0].last_reason == f"{status.value}|Codex task is active|task:active"
 
 
-def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("legacy_source", ["none", "slot", "cloud_manager"])
+def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp_path: Path, monkeypatch, legacy_source: str) -> None:
     from auto_coder.codex_work_reconstruction import reconstruct_active_codex_work
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -183,6 +185,11 @@ def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp
     assert recovery.save_observation(run, RecoveryOutcome.PR_OBSERVED, completion_turn=baseline, pr_number=91)
     assert recovery.mark_handoff(run)
     reconstruct_active_codex_work(repository, slots)
+    manager = CloudManager(repository)
+    if legacy_source == "slot":
+        assert slots.record_provider_session(owner, "historical-jules-session")
+    elif legacy_source == "cloud_manager":
+        assert manager.add_session(owner.number, "historical-jules-session", provider="jules")
 
     request = WhamTurn("request", "user", "completed", raw_data={"request_id": request_id})
     terminal = WhamTurn("task_e_terminal~asst_terminal", "assistant", "completed")
@@ -223,13 +230,20 @@ def test_production_reconstruction_and_observation_retire_on_first_due_check(tmp
         store,
         github_client=GitHub(),
         cloud_run_store=runs,
+        cloud_manager=manager,
         codex_wham_client=Wham(),
         now=100.0,
     )
 
-    assert released == 1
-    assert slots.owner_incarnation(owner) is None
-    assert slots.available_normal_slots() == 1
+    if legacy_source != "none":
+        assert released == 0
+        assert slots.owner_incarnation(owner) is not None
+        assert slots.available_normal_slots() == 0
+        assert "unknown" in (store.all()[0].last_reason or "").lower()
+    else:
+        assert released == 1
+        assert slots.owner_incarnation(owner) is None
+        assert slots.available_normal_slots() == 1
 
 
 def test_guarded_codex_commit_rejects_changed_final_source_evidence(tmp_path: Path, monkeypatch) -> None:

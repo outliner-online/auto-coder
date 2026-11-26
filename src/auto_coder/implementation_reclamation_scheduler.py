@@ -362,6 +362,8 @@ def _collect_settle_and_retire_codex(
     cloud_run_store: Optional[Any],
     wham_client: Optional[Any],
     routing: Optional[Any],
+    cloud_manager: Optional[Any] = None,
+    cloud_provider_stores_available: bool = True,
 ) -> Any:
     """Compose reconstruction, observation, settlement, and guarded removal.
 
@@ -375,6 +377,16 @@ def _collect_settle_and_retire_codex(
     from .codex_work_accounting import CodexWorkAccounting, CodexWorkPhase
     from .codex_work_reconstruction import production_codex_reconstructor
     from .implementation_retirement import RetirementResult, evaluate_retirement_predicate
+
+    if not cloud_provider_stores_available:
+        return RetirementResult(RetirementStatus.RETAINED_UNKNOWN, diagnostic="Cloud provider stores unavailable")
+    binding = cloud_manager.get_binding(owner.number) if cloud_manager is not None else None
+    if binding is not None and binding.provider.lower() != "codex-cloud":
+        return RetirementResult(
+            RetirementStatus.RETAINED_UNKNOWN,
+            responsible_members=(f"session:{binding.task_id}",),
+            diagnostic="Unsupported historical CloudManager provider evidence",
+        )
 
     incarnation = slots.owner_incarnation(owner)
     if incarnation is None:
@@ -450,6 +462,8 @@ def _collect_settle_and_retire_codex(
         )
 
     def _guarded_validation() -> bool:
+        if cloud_manager is not None and cloud_manager.get_binding(owner.number) != binding:
+            return False
         latest_accounting = accounting.snapshot(owner, incarnation)
         latest = collect_codex_retirement_observation(
             slots.repo_name,
@@ -520,6 +534,8 @@ def run_due_reclamation_checks(
                         cloud_run_store,
                         codex_wham_client,
                         routing,
+                        cloud_manager,
+                        cloud_provider_stores_available,
                     )
                 else:
                     observation = collect_retirement_observation(
