@@ -96,7 +96,7 @@ def test_definitive_rejection_preserves_actual_cloud_quota_producer_wait(tmp_pat
     assert service_entries[0].base_ref == "release/2.x"
 
 
-def test_definitive_jules_conflict_executes_once_through_service() -> None:
+def test_definitive_jules_conflict_does_not_reactivate_historical_session() -> None:
     api = MagicMock()
     pull = {**pr_data(), "mergeable": False, "body": "Session ID: session-existing"}
     api.pulls.get.return_value = pull
@@ -117,10 +117,8 @@ def test_definitive_jules_conflict_executes_once_through_service() -> None:
     ):
         assert not _handle_definitive_merge_rejection("owner/repo", 1589, AutomationConfig(), MagicMock(), api, "owner", "repo", MagicMock(), MagicMock(), MagicMock(), "H1")
 
-    assert len(service_entries) == 1
-    assert service_entries[0].expected_head == "H1"
-    assert service_entries[0].base_ref == "release/2.x"
-    jules.send_message.assert_called_once()
+    assert service_entries == []
+    jules.assert_not_called()
     local.assert_not_called()
 
 

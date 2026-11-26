@@ -9082,8 +9082,14 @@ def _handle_pr_merge(
                 return actions
 
             reason = "Jules CI repair is retired; historical sessions cannot authorize provider work"
-            actions.append(f"Jules CI repair was not sent for PR #{pr_number}; local fixes remain disabled")
-            jules_feedback = PRRepairResult(RepairDisposition.REFUSED, reason=reason)
+            refusal_action = f"Jules CI repair was not sent for PR #{pr_number}; local fixes remain disabled"
+            actions.append(refusal_action)
+            jules_feedback = PRRepairResult(
+                RepairDisposition.REFUSED,
+                (refusal_action,),
+                reason=reason,
+                attempt_started=False,
+            )
             actions.repair_result = jules_feedback
             actions.repair_attempt_started = False
             trace_outcome = Outcome.SKIPPED
