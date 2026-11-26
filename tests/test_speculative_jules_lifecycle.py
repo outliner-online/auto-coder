@@ -367,9 +367,13 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
 
     configure_speculative_jules_lifecycle(restarted)
     try:
-        loser = process_pull_request(github, AutomationConfig(), repository, strict_prs[42])
+        green_ci = Mock(success=True, in_progress=False)
+        with patch("auto_coder.pr_processor._check_github_actions_status", return_value=green_ci) as check_ci:
+            loser = process_pull_request(github, AutomationConfig(), repository, strict_prs[42])
         assert loser.outcome is PRProcessingOutcome.DEFERRED
         assert "retired artifact fenced" in loser.actions_taken[0]
+        # Even a green retired loser is fenced before CI can grant authority.
+        check_ci.assert_not_called()
         github.close_pr.assert_not_called()
 
         # Mixed input: strict human identity proves this PR unrelated while the
