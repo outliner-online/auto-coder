@@ -1690,7 +1690,5 @@ def test_unknown_retry_keeps_cloud_manager_session_attributable(tmp_path, monkey
     observed = collect_retirement_observation(ISSUE_100, slots, _make_github_client(), cloud_manager=manager)
 
     assert observed is not None
-    assert [(session.provider, session.session_id, session.state) for session in observed.provider_sessions] == [
-        ("jules", "known-jules", SessionTerminalState.UNKNOWN)
-    ]
+    assert [(session.provider, session.session_id, session.state) for session in observed.provider_sessions] == [("jules", "known-jules", SessionTerminalState.UNKNOWN)]
     assert observed.collection_reasons[0].boundary == "retry-dispatch:retry"
