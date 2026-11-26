@@ -209,3 +209,188 @@ def test_unavailable_ledger_allows_only_strictly_proven_human_pr(tmp_path: Path)
     assert ambiguous.classification is ArtifactClassification.BLOCKED
     assert ambiguous.mutation_allowed is False
     adapter.observe_candidate.assert_not_called()
+
+
+def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport(tmp_path: Path) -> None:
+    """REQ-006: exercise both production boundaries from durable retired state."""
+    from auto_coder.jules_candidate_observation import (
+        CandidateObservation,
+        CandidateObservationStore,
+        EvidenceStatus,
+        JulesCandidateObservationAdapter,
+        PullRequestIdentity,
+        VerifiedPullRequest,
+    )
+    from auto_coder.jules_competition_ledger import (
+        AcceptanceRecord,
+        CandidateBindingObservation,
+        JulesCompetitionLedger,
+        SpeculativeGenerationBundle,
+    )
+    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.speculative_jules_lifecycle import RetiredJulesReader
+
+    repository = "owner/repo"
+    issue_number = 7
+    ledger_path = tmp_path / "competition.db"
+    observation_path = tmp_path / "observations.db"
+    ledger = JulesCompetitionLedger(ledger_path)
+    created = ledger.create_generation(
+        repository,
+        issue_number,
+        "create",
+        0,
+        SpeculativeGenerationBundle(
+            candidate_ids=("selected", "loser"),
+            issue_oracle_snapshot="requirements-v1",
+            issue_oracle_fingerprint="oracle-v1",
+            source_branch="main",
+        ),
+    )
+    generation_id = created.generation_id
+    assert generation_id is not None
+    epoch = created.snapshot.epoch
+    store = CandidateObservationStore(observation_path)
+    for candidate_id, pr_number in (("selected", 41), ("loser", 42)):
+        claimed = ledger.claim_candidate_submission(repository, issue_number, generation_id, candidate_id, f"claim-{candidate_id}", epoch)
+        accepted = ledger.record_candidate_accepted(
+            repository,
+            issue_number,
+            generation_id,
+            candidate_id,
+            f"accept-{candidate_id}",
+            claimed.snapshot.epoch,
+            "jules",
+            f"session-{candidate_id}",
+        )
+        epoch = accepted.snapshot.epoch
+        scope = store.scope(repository, issue_number, generation_id, candidate_id)
+        read_id = store.begin_read(scope)
+        artifact = VerifiedPullRequest(
+            PullRequestIdentity(repository, pr_number),
+            repository,
+            f"candidate-{candidate_id}",
+            f"head-{pr_number}",
+            repository,
+            "main",
+            "base-sha",
+        )
+        assert store.publish(
+            scope,
+            CandidateObservation(
+                repository,
+                issue_number,
+                generation_id,
+                candidate_id,
+                "jules",
+                f"session-{candidate_id}",
+                read_id,
+                evidence_status=EvidenceStatus.KNOWN,
+                artifacts=(artifact,),
+            ),
+        )
+        bound = ledger.record_candidate_binding(
+            repository,
+            issue_number,
+            generation_id,
+            candidate_id,
+            f"bind-{candidate_id}",
+            epoch,
+            CandidateBindingObservation(repository, pr_number, f"head-{pr_number}", "base-sha"),
+        )
+        epoch = bound.snapshot.epoch
+
+    selected = ledger.select_winner(
+        repository,
+        issue_number,
+        generation_id,
+        "selected",
+        "select",
+        epoch,
+        AcceptanceRecord(
+            repository,
+            generation_id,
+            "selected",
+            repository,
+            41,
+            "head-41",
+            "base-sha",
+            "oracle-v1",
+            1,
+            1,
+            0,
+        ),
+    )
+    assert selected.selected
+
+    # Reopen both durable stores to model daemon restart. The retired reader is
+    # deliberately incapable of Jules GET/list traffic.
+    strict_prs = {
+        41: {
+            "number": 41,
+            "body": "Closes #7",
+            "user": {"login": "google-labs-jules[bot]", "type": "Bot"},
+            "head": {"repo": {"full_name": repository}, "ref": "candidate-selected", "sha": "changed-head"},
+            "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
+        },
+        42: {
+            "number": 42,
+            "body": "Closes #7",
+            "changed_files": 1,
+            "user": {"login": "google-labs-jules[bot]", "type": "Bot"},
+            "head": {"repo": {"full_name": repository}, "ref": "candidate-loser", "sha": "head-42"},
+            "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
+        },
+        50: {
+            "number": 50,
+            "state": "closed",
+            "body": "",
+            "changed_files": 1,
+            "user": {"login": "octocat", "type": "User"},
+            "head": {"repo": {"full_name": repository}, "ref": "ordinary", "sha": "head-50"},
+            "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
+        },
+    }
+    github = Mock(token="token")
+    github.get_pull_request_metadata_strict.side_effect = lambda _repo, number: strict_prs[number]
+    restarted_ledger = JulesCompetitionLedger(ledger_path)
+    restarted_adapter = JulesCandidateObservationAdapter(
+        restarted_ledger,
+        CandidateObservationStore(observation_path),
+        RetiredJulesReader(),
+        github,
+    )
+    restarted = SpeculativeJulesLifecycle(
+        RefreshingSpeculativeClassifier(restarted_adapter, restarted_ledger),
+        SpeculativeCleanupStore(tmp_path / "cleanup.db"),
+    )
+
+    configure_speculative_jules_lifecycle(restarted)
+    try:
+        loser = process_pull_request(github, AutomationConfig(), repository, strict_prs[42])
+        assert loser.outcome is PRProcessingOutcome.DEFERRED
+        assert "retired artifact fenced" in loser.actions_taken[0]
+        github.close_pr.assert_not_called()
+
+        # Mixed input: strict human identity proves this PR unrelated while the
+        # candidate remains fenced by the same restarted lifecycle.
+        _, ordinary = restarted.classifier.classify_pr(repository, repository, 50)
+        assert ordinary.classification is ArtifactClassification.LEGACY
+        ordinary_result = process_pull_request(github, AutomationConfig(), repository, strict_prs[50])
+        assert all("Speculative Jules" not in action for action in ordinary_result.actions_taken)
+
+        api = Mock()
+        api.pulls.get.return_value = strict_prs[41]
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
+        ):
+            github.get_issue.return_value = {"state": "open", "body": "requirements-v1"}
+            assert _merge_pr(repository, 41, {}, AutomationConfig(), github_client=github) is False
+        api.pulls.merge.assert_not_called()
+    finally:
+        configure_speculative_jules_lifecycle(None)
+
+    github.close_pr.assert_not_called()
+    restarted_adapter.jules.get_session  # proves the inert production transport was composed
