@@ -169,7 +169,7 @@ def is_verified_prompt_regression_advisory_comment(
         run_id = int(identity["run_id"])
         run_attempt = int(identity["run_attempt"])
         client = GitHubClient.get_instance()
-        api = client.api_for(repo_name, required_permissions={"actions": "write", "contents": "write", "workflows": "write"})
+        api = client.api_for(repo_name, required_permissions={"actions": "read"})
         owner, repo = repo_name.split("/")
         run = api.actions.get_workflow_run(owner, repo, run_id)
         observed_attempt = int(run.get("run_attempt") or 0)
@@ -592,7 +592,7 @@ def _get_jobs_for_run_filtered_by_pr_number(run_id: int, pr_number: Optional[int
     """
     try:
         client = GitHubClient.get_instance()
-        api = client.api_for(repo_name, required_permissions={"actions": "write", "contents": "write", "workflows": "write"})
+        api = client.api_for(repo_name, required_permissions={"actions": "read"})
         owner, repo = repo_name.split("/")
 
         # Check PR number if provided
