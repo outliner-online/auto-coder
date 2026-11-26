@@ -13109,16 +13109,16 @@ def _describe_merge_operation_outcome(result: Any) -> str:
 def _finalize_merge_success(repo_name: str, pr_number: int, method: str) -> bool:
     """Post-processing after a durably confirmed merge (REQ-009).
 
-    ``_close_linked_issues``/``_archive_jules_session`` already swallow their
-    own failures internally, so a post-processing problem is observable via
-    their own logging without ever turning a confirmed merge back into a
-    reported failure or triggering a re-merge/re-approval.
+    ``_close_linked_issues`` swallows its own failures internally, so a
+    post-processing problem is observable via its own logging without ever
+    turning a confirmed merge back into a reported failure or triggering a
+    re-merge/re-approval. Historical Jules sessions are intentionally left
+    untouched: a merged PR is not authority to mutate or replace them.
     """
     get_trace_logger().log("Merging", f"Successfully merged PR #{pr_number}", item_type="pr", item_number=pr_number, details={"method": method})
     log_action(f"Successfully merged PR #{pr_number} (method: {method})")
     _record_pr_stage(pr_number, "pr.merge-delivery", f"pr#{pr_number} merge delivery", Outcome.COMPLETED, {"method": method})
     _close_linked_issues(repo_name, pr_number)
-    _archive_jules_session(repo_name, pr_number)
     return True
 
 
@@ -13149,7 +13149,7 @@ def _merge_pr(
 
     After a successful merge, automatically closes any issues referenced in
     the PR body using GitHub's linking keywords (closes, fixes, resolves,
-    etc.) and archives any associated Jules session.
+    etc.). Historical provider sessions remain unchanged.
     """
     from .merge_operation_adapter import AdapterOutcomeKind, AdapterResult, attempt_approval, attempt_merge, reconcile_approval, reconcile_merge
     from .merge_operation_state import EffectName, EffectState, MergeOperationIdentity, get_merge_operation_store

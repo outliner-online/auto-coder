@@ -7,6 +7,11 @@ competition, and recurrent-task records remain available for inspection; their
 presence is not fresh dispatch authority and is never converted to another
 provider.
 
+A confirmed merge of a historical Jules PR leaves its session untouched and
+does not restart a matching recurrent prompt. Conflict rejection may retain
+the established PR-closing outcome, but it neither resolves an Issue from the
+old session binding nor advances or re-enters Issue work from that history.
+
 Provider-neutral workspace reclamation, update checks, the producer's fixed
 maintenance sleep, and PR merge/close wake-up remain independent of retired
 Jules state. Ordinary Issue admission continues to select supported Codex Cloud,
