@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from auto_coder.automation_config import AutomationConfig, Candidate, CandidateProcessingResult
 from auto_coder.automation_engine import AutomationEngine
+from auto_coder.implementation_reclamation_scheduler import ReclamationObligationStore, schedule_reevaluation
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository, ImplementationSlotUnavailable
 from auto_coder.util.gh_cache import OpenGitHubEntities, OpenGitHubIssue
 
@@ -25,6 +26,101 @@ def test_reclamation_propagates_provider_store_construction_failure(tmp_path):
     assert due_checks.call_count == 1
     assert "jules_client" not in due_checks.call_args.kwargs
     assert due_checks.call_args.kwargs["cloud_provider_stores_available"] is False
+
+
+def _terminal_reclamation_github(prs, connected):
+    github = MagicMock()
+    github.get_connected_prs.side_effect = lambda _repo, issue, strict=False: connected[issue]
+    github.get_open_pull_requests_strict.return_value = []
+    github.get_pull_request_metadata_strict.side_effect = lambda _repo, number: prs[number]
+    github.get_issue.side_effect = lambda _repo, number: {"number": number, "state": "open"}
+    return github
+
+
+def _finished_owner(slots, owner, pr_number, generation):
+    execution = slots.start_execution(owner, generation=generation)
+    assert execution is not None
+    assert slots.record_implementation_pr(owner, pr_number)
+    slots.finish_execution(owner, execution)
+    incarnation = slots.owner_incarnation(owner)
+    assert incarnation is not None
+    return incarnation
+
+
+def _run_engine_reclamation(engine, slots, jules_constructor):
+    cloud_manager = MagicMock()
+    cloud_manager.get_binding.return_value = None
+    cloud_runs = MagicMock()
+    cloud_runs.list_for_issue.return_value = []
+    with (
+        patch("auto_coder.cloud_manager.CloudManager", return_value=cloud_manager),
+        patch("auto_coder.cloud_run.CloudRunRepository", return_value=cloud_runs),
+        patch("auto_coder.codex_wham_client.CodexWhamClient", return_value=MagicMock()),
+        patch("auto_coder.jules_client.JulesClient", jules_constructor),
+    ):
+        return asyncio.run(engine._run_due_reclamation_checks("owner/repo", slots))
+
+
+def test_engine_reclamation_retires_local_owner_while_legacy_jules_stays_unknown(monkeypatch, tmp_path):
+    """REQ-001/002/004/005/006: cross the daemon's real scheduled boundary."""
+    monkeypatch.setenv("AUTO_CODER_ISSUE_STAGE_ROUTING_DB", str(tmp_path / "routing.sqlite3"))
+    legacy = ImplementationOwner("issue", 100)
+    local = ImplementationOwner("issue", 200)
+    github = _terminal_reclamation_github(
+        {
+            201: {"number": 201, "state": "closed", "merged": False},
+            202: {"number": 202, "state": "closed", "merged": False},
+        },
+        {100: [201], 200: [202]},
+    )
+    engine = AutomationEngine(github, AutomationConfig())
+    slots = ImplementationSlotRepository("owner/repo", 2, tmp_path / "slots.json")
+    legacy_incarnation = _finished_owner(slots, legacy, 201, "legacy-generation")
+    local_incarnation = _finished_owner(slots, local, 202, "local-generation")
+    assert slots.record_provider_session(legacy, "historical-jules-session")
+    obligations = ReclamationObligationStore.for_slots(slots)
+    assert schedule_reevaluation(legacy, slots, obligations, due_at=0)
+    assert schedule_reevaluation(local, slots, obligations, due_at=0)
+    jules_constructor = MagicMock(side_effect=AssertionError("scheduled reclamation constructed JulesClient"))
+
+    assert _run_engine_reclamation(engine, slots, jules_constructor) == 1
+
+    jules_constructor.assert_not_called()
+    assert slots.owner_incarnation(legacy) == legacy_incarnation
+    assert slots.owner_incarnation(local) is None
+    assert slots.available_normal_slots() == 1
+    assert local_incarnation in slots._read_retired()
+    assert legacy_incarnation not in slots._read_retired()
+    assert engine.issue_stage_routing.is_implementation_owned("owner/repo", 200, "local-generation")
+    (pending,) = obligations.all()
+    assert pending.owner == legacy
+    assert "historical-jules-session" in (pending.last_reason or "")
+
+
+def test_engine_reclamation_incomplete_github_discovery_retains_capacity(monkeypatch, tmp_path):
+    """REQ-003/006: incomplete strict discovery cannot cross the transaction."""
+    monkeypatch.setenv("AUTO_CODER_ISSUE_STAGE_ROUTING_DB", str(tmp_path / "routing.sqlite3"))
+    owner = ImplementationOwner("issue", 100)
+    github = _terminal_reclamation_github(
+        {201: {"number": 201, "state": "closed", "merged": False}},
+        {100: RuntimeError("connected PR discovery unavailable")},
+    )
+    github.get_connected_prs.side_effect = RuntimeError("connected PR discovery unavailable")
+    engine = AutomationEngine(github, AutomationConfig())
+    slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+    incarnation = _finished_owner(slots, owner, 201, "incomplete-generation")
+    obligations = ReclamationObligationStore.for_slots(slots)
+    assert schedule_reevaluation(owner, slots, obligations, due_at=0)
+    jules_constructor = MagicMock(side_effect=AssertionError("scheduled reclamation constructed JulesClient"))
+
+    assert _run_engine_reclamation(engine, slots, jules_constructor) == 0
+
+    jules_constructor.assert_not_called()
+    assert slots.owner_incarnation(owner) == incarnation
+    assert slots.available_normal_slots() == 0
+    assert incarnation not in slots._read_retired()
+    assert not engine.issue_stage_routing.is_implementation_owned("owner/repo", 100, "incomplete-generation")
+    assert len(obligations.all()) == 1
 
 
 def test_external_capacity_release_refills_fresh_ranking_past_rejection(monkeypatch, tmp_path):
