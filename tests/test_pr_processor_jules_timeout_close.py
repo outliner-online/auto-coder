@@ -492,6 +492,38 @@ class TestUnlockAndRetryLinkedIssue:
         assert outcomes[0] == outcomes[1]
         assert not any("Started a new attempt" in action for action in outcomes[0][0])
 
+    def test_stale_pr_admission_preserves_reopened_recovery_history(self, tmp_path):
+        from src.auto_coder.automation_config import Candidate
+        from src.auto_coder.automation_engine import AutomationEngine
+        from src.auto_coder.implementation_slots import ImplementationSlotRepository
+
+        path = tmp_path / "routing.sqlite3"
+        routing = IssueStageRoutingStore(path)
+        request_id = recovery_request_id("owner/repo", 4636, 4643)
+        historical = routing.accept_retry_request(request_id, "owner/repo", 4636, "old-generation")
+        github = Mock()
+        github.get_pr_review_threads_strict.return_value = []
+        config = AutomationConfig()
+        config.JULES_PR_CI_TIMEOUT_HOURS = 12
+        engine = AutomationEngine(github, config=config)
+        engine.issue_stage_routing = IssueStageRoutingStore(path)
+        engine.implementation_slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
+        candidate = Candidate(type="pr", data=_jules_pr_data(hours_old=30), priority=1)
+
+        with (
+            patch("src.auto_coder.pr_processor._check_github_actions_status", return_value=MagicMock(spec=GitHubActionsStatusResult, success=False, in_progress=False)),
+            patch("src.auto_coder.pr_processor.increment_attempt") as increment,
+            patch("src.auto_coder.issue_processor._take_issue_actions") as dispatch,
+        ):
+            result = engine._process_single_candidate_unified("owner/repo", candidate, config)
+
+        assert result.success
+        github.close_pr.assert_called_once()
+        github.add_comment_to_issue.assert_not_called()
+        increment.assert_not_called()
+        dispatch.assert_not_called()
+        assert engine.issue_stage_routing.retry_requests("owner/repo", 4636) == (historical,)
+
     @patch("src.auto_coder.pr_processor.increment_attempt")
     @patch("src.auto_coder.pr_processor._check_github_actions_status")
     def test_get_candidates_queues_unlocked_issue(self, mock_check_status, mock_increment):
