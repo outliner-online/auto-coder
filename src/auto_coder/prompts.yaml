@@ -705,8 +705,21 @@ pr:
 
   editable_review_permissions: |-
     This invocation permits edits in its private PR review workspace.
-    Inspect the current implementation, add focused regression tests, and correct
-    demonstrated defects within the supplied explicit Requirements and review scope.
+    Inspect the admitted input HEAD before deciding whether a correction is needed.
+    Before any retained edit, demonstrate a reachable violation of a current explicit
+    Requirement, a missing explicitly required test deliverable, or a material
+    test-oracle gap meeting every criterion in this review's response protocol.
+    Record the exact Requirement, pre-edit counterexample or missing oracle,
+    production boundary, material consequence, and focused corrective outcome.
+    Only then correct that defect and add focused regression tests for its scope.
+    A previous ordinary PASS does not prevent Strong Audit from reporting a new
+    demonstrated defect; the same evidence standard applies to both reviewers.
+    When the input-head assessment satisfies this response protocol's PASS criteria,
+    stop with PASS and no source edits. Do not retain optional test expansion,
+    extra input variants, stronger assertions,
+    refactoring, style cleanup, speculative hardening, or unrelated improvements.
+    INCONCLUSIVE permits bounded investigation and verification; it does not
+    authorize a speculative correction or retained source edits.
     You may run relevant focused tests and necessary noninteractive commands,
     including setup, dependency installation, builds, and formatting for that work.
     Verify that the target repository's test wrapper honors the selected test scope.
@@ -724,8 +737,17 @@ pr:
     and not-run checks. Test evidence describes the exact files that were tested;
     an unchanged HEAD does not prove an edited workspace still matches that commit.
     Return the required review response with the supplied identity values unchanged.
-    If you retain any source changes, your verdict cannot approve those changes:
-    the controller invalidates that verdict, publishes a new head, and requires
+    Its decision, findings, coverage and dispositions describe the admitted pre-edit
+    HEAD, even after you correct it. Preserve that defect's evidence in the response:
+    ordinary review uses NEEDS_FIX for an implementation or required-deliverable
+    finding and NEEDS_TESTS for a material test-oracle gap; Strong Audit uses FINDINGS.
+    Report the correction and any post-edit checks separately in the existing summary
+    or evidence fields, explicitly identifying them as post-edit observations.
+    Never replace the input-head blocking result with PASS because your own edit
+    passed a check, or claim that the edited test was committed at the input HEAD.
+    A changed workspace without valid input-head correction evidence is refused
+    before publication; PASS, INCONCLUSIVE or malformed output is not edit authority.
+    For an eligible correction the controller publishes a new head and requires
     independent review and CI for the new candidate before merge. Do not claim
     that your own correction establishes independent approval or closes a thread.
 
@@ -1108,7 +1130,7 @@ pr:
     }
     ```
 
-    RECORDED GAP REFERENCES: For an entry already present in the Persisted Material Test-Oracle Gap Registry, return only its exact `gap_id`, `status`, and `resolution_evidence` (the latter is required for RESOLVED or INVALID). You may also include its exact `requirement_id`, but do not reproduce, recalculate, paraphrase, or replace its recorded boundary, invariant, or requested regression scope. The persisted record owns that identity and scope. Use the full schema only to propose a genuinely new OPEN discovery.
+    RECORDED GAP REFERENCES: For a no-edit lifecycle update of an entry already present in the Persisted Material Test-Oracle Gap Registry, return only its exact `gap_id`, `status`, and `resolution_evidence` (the latter is required for RESOLVED or INVALID). You may also include its exact `requirement_id`, but do not reproduce, recalculate, paraphrase, or replace its recorded boundary, invariant, or requested regression scope. The persisted record owns that identity and scope. When retaining edits to correct an existing gap, you may instead return its complete report, preserving the exact recorded identity, Requirement association, boundary, invariant and original requested regression scope, with fresh admitted-input-head evidence in the existing material-gap fields such as `why_tests_still_pass`. That report must establish every material-gap criterion and remain OPEN for the input HEAD despite a local correction or passing post-edit check. All existing rereview admission and reopening restrictions still apply. Otherwise use the full schema only to propose a genuinely new OPEN discovery.
 
     If every material changed file and Issue requirement is sufficiently covered and no concrete specification violation is identified, return:
     ```json

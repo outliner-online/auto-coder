@@ -340,11 +340,6 @@ class TwoTierGateInputs:
     head_ref: str = ""
 
 
-def _numbered_requirements(body: str) -> List[str]:
-    """Return the complete numbered Requirement declarations from an Issue body."""
-    return [line.strip() for line in body.splitlines() if re.match(r"^REQ-\d{3}:\s*\S", line.strip())]
-
-
 def _two_tier_gate_inputs(
     github_client: Any,
     repo_name: str,
@@ -357,6 +352,7 @@ def _two_tier_gate_inputs(
     Issue-less result and silently bypass the gate.
     """
     from .llm_backend_config import get_llm_config
+    from .requirement_contract import parse_requirement_contract
 
     llm_config = get_llm_config()
     strong = llm_config.get_backend_strong_pr_adversarial_validation()
@@ -374,8 +370,10 @@ def _two_tier_gate_inputs(
     issue_ids: List[str] = []
     for issue in resolution.issues:
         issue_ids.append(f"#{issue.number}")
-        declarations = _numbered_requirements(issue.body)
-        requirements.extend(f"Issue #{issue.number} {line}" for line in declarations)
+        parsed_contract = parse_requirement_contract(issue.number, issue.body)
+        if parsed_contract.error:
+            raise RuntimeError(parsed_contract.error)
+        requirements.extend(f"Issue #{issue.number} {requirement_id}: {text}" for requirement_id, text in parsed_contract.entries)
     if not requirements:
         return None
 
@@ -429,6 +427,7 @@ def _execute_pending_strong_audit(
     current_target: Optional[Callable[[], Tuple[TwoTierGateInputs, str]]] = None,
     expected_lifecycle_token: str = "",
     publication_authority: Optional[Callable[[str, str], bool]] = None,
+    correction_basis_check: Optional[Callable[[str], bool]] = None,
     on_source_correction: Optional[Callable[[LocalReviewRepairOutcome], None]] = None,
 ) -> Tuple[bool, str]:
     """Claim, execute, and durably accept one production strong-audit round."""
@@ -541,7 +540,7 @@ def _execute_pending_strong_audit(
                 with bind_editable_review(source_snapshot), bind_pr_review_designation():
                     result = execute_review(review_input, availability.backend_manager, worktree)
                     assert_review_workspace_unchanged()
-            except ReviewChangesProduced:
+            except ReviewChangesProduced as changes:
                 ReviewerSessionRegistry().invalidate_transport_for_pr(repo_name, pr_number)
                 correction = publish_review_changes(
                     source_snapshot,
@@ -550,10 +549,15 @@ def _execute_pending_strong_audit(
                     head_repository=inputs.head_repository,
                     head_ref=inputs.head_ref,
                     review_identity=f"strong:{claim.claim_id}",
+                    correction_basis=changes.correction_basis,
+                    refusal_reason=changes.refusal_reason,
+                    correction_basis_check=correction_basis_check,
                     commit_identity_provider=lambda: resolve_controller_git_identity(repo_name),
                     authority_check=lambda sha, ref: publication_authority is not None and observe_current_target() and publication_authority(sha, ref),
                 )
-                reason = f"Strong reviewer produced source changes: {correction.reason}; fresh independent review and CI are required"
+                reason = f"Strong reviewer produced source changes: {correction.reason}"
+                if correction.phase != "not_started":
+                    reason += "; fresh independent review and CI are required"
                 inputs.gate.state.abandon_claim(pr_number, claim.claim_id, reason)
                 if on_source_correction is not None:
                     on_source_correction(correction)
@@ -633,6 +637,7 @@ def _renew_stale_strong_round(github_client: Any, repo_name: str, pr_number: int
         inputs,
         current_target=current_target,
         publication_authority=lambda sha, ref: _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
+        correction_basis_check=lambda basis: _review_correction_requirements_current(github_client, repo_name, pr_number, basis),
         on_source_correction=lambda correction: _record_reviewer_correction(repo_name, pr_number, inputs.head_sha, actions, processing_status, correction),
     )
     published, publication_reason = _consume_pending_two_tier_publication(repo_name, pr_number, inputs, observer, github_client=github_client)
@@ -728,6 +733,31 @@ def _review_publication_authorized(github_client: Any, repo_name: str, pr_number
     live = _strict_pull_request_target(github_client, repo_name, pr_number)
     head = live["head"]
     return bool(expected_ref) and (head.get("sha"), head.get("ref"), (head.get("repo") or {}).get("full_name")) == (expected_head, expected_ref, repo_name)
+
+
+def _review_correction_requirements_current(github_client: Any, repo_name: str, pr_number: int, basis_json: str) -> bool:
+    """Reconfirm every cited explicit Requirement before a new corrective effect."""
+    from .requirement_contract import parse_requirement_contract
+    from .review_correction_policy import validate_review_correction_basis_json
+
+    try:
+        live = _strict_pull_request_target(github_client, repo_name, pr_number)
+        if validate_review_correction_basis_json(basis_json, live["head"]["sha"]):
+            return False
+        basis = json.loads(basis_json)
+        resolution = resolve_issue_oracles(github_client, repo_name, pr_data=live, bypass_cache=True)
+        if resolution.error:
+            return False
+        requirements: dict[str, str] = {}
+        for issue in resolution.issues:
+            parsed = parse_requirement_contract(issue.number, issue.body)
+            if parsed.error:
+                return False
+            requirements.update((f"#{issue.number}/{requirement_id}", " ".join(text.split())) for requirement_id, text in parsed.entries)
+        return all(requirements.get(requirement_id) == " ".join(text.split()) for blocker in basis["blockers"] for requirement_id, text in zip(blocker["requirement_ids"], blocker["requirement_texts"]))
+    except Exception as exc:
+        logger.debug("Could not reconfirm reviewer correction Requirements for PR #{}: {}", pr_number, type(exc).__name__)
+        return False
 
 
 def _review_supersession_target(github_client: Any, repo_name: str, pr_number: int) -> ReviewSupersessionTarget:
@@ -5873,8 +5903,10 @@ def _record_reviewer_correction(
     *,
     resumed: bool = False,
 ) -> None:
-    """Expose a source candidate as pending independent validation, never PASS."""
-    reason = f"{correction.reason}; fresh independent review and CI are required"
+    """Expose refused edits or a pending candidate without granting PASS."""
+    reason = correction.reason
+    if correction.phase != "not_started":
+        reason += "; fresh independent review and CI are required"
     retry_at = time.time() + 60.0
     actions.append(f"Reviewer source changes for PR #{pr_number}: {reason}")
     if isinstance(actions, PRActionList):
@@ -6701,6 +6733,7 @@ def _coordinate_pr_review(
             pr_number=pr_number,
             root=lambda: _pr_validation_repository_cwd(repo_name),
             authority_check=lambda sha, ref: _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
+            correction_basis_check=lambda basis: _review_correction_requirements_current(github_client, repo_name, pr_number, basis),
             current_target=lambda: _review_supersession_target(github_client, repo_name, pr_number),
             commit_identity_provider=lambda: resolve_controller_git_identity(repo_name),
         )
@@ -7605,16 +7638,21 @@ def _coordinate_pr_review(
                                             closure_input=closure_input,
                                         )
                                         assert_review_workspace_unchanged()
-                                except ReviewChangesProduced:
-                                    # No verdict, checkpoint, closure, or accepted finding
-                                    # from the editing invocation can authorize its output.
+                                except ReviewChangesProduced as changes:
+                                    # The editing invocation cannot approve its output.
+                                    # Only its validated input-head blocker can authorize
+                                    # a candidate for fresh independent validation.
                                     ReviewerSessionRegistry().invalidate_transport_for_pr(repo_name, pr_number)
                                     runtime.active_attempt_status = "INCONCLUSIVE"
                                     if active_review_id:
                                         finish_executed_review(
                                             active_review_id,
                                             review_target,
-                                            AdversarialValidationResult(result="INCONCLUSIVE", summary="Reviewer produced source changes requiring independent validation", diagnostic_category="reviewer_source_changes"),
+                                            AdversarialValidationResult(
+                                                result="INCONCLUSIVE",
+                                                summary=changes.refusal_reason or "Reviewer produced source changes requiring independent validation",
+                                                diagnostic_category="reviewer_correction_refused" if changes.correction_basis is None else "reviewer_source_changes",
+                                            ),
                                         )
                                     correction = publish_review_changes(
                                         source_snapshot,
@@ -7623,6 +7661,9 @@ def _coordinate_pr_review(
                                         head_repository=str(((pr_data.get("head") or {}).get("repo") or {}).get("full_name") or ""),
                                         head_ref=str((pr_data.get("head") or {}).get("ref") or ""),
                                         review_identity=f"ordinary:{attempt.attempt_id}",
+                                        correction_basis=changes.correction_basis,
+                                        refusal_reason=changes.refusal_reason,
+                                        correction_basis_check=lambda basis: _review_correction_requirements_current(github_client, repo_name, pr_number, basis),
                                         commit_identity_provider=lambda: resolve_controller_git_identity(repo_name),
                                         authority_check=lambda sha, ref: attempt_repository.latest_sequence(pr_number, head_sha) == attempt.sequence and _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
                                     )
@@ -8374,6 +8415,7 @@ def _coordinate_pr_review(
                         current_target=current_strong_target,
                         expected_lifecycle_token=initial_lifecycle_token,
                         publication_authority=lambda sha, ref: _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
+                        correction_basis_check=lambda basis: _review_correction_requirements_current(github_client, repo_name, pr_number, basis),
                     )
                     reviewer_backend = two_tier_inputs.policy.strong_route
                     stage_id = "pr.strong-audit"

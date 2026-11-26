@@ -1,10 +1,11 @@
 import json
+from dataclasses import replace
 
 import pytest
 
 from auto_coder.invocation_admission import bind_pr_review_designation
 from auto_coder.pr_review_cycle import ContractSnapshot, Finding, StrongPolicyIdentity
-from auto_coder.pr_review_execution import ReviewExecutionInput, ReviewMode, ScopeAssessment, build_review_prompt, parse_review_result
+from auto_coder.pr_review_execution import ReviewExecutionInput, ReviewMode, ScopeAssessment, _review_correction_basis, build_review_prompt, parse_review_result
 
 
 def _input(mode: ReviewMode = ReviewMode.STRONG_AUDIT) -> ReviewExecutionInput:
@@ -73,6 +74,16 @@ def test_editable_review_prompt_preserves_scope_and_independent_approval(mode: R
     assert "strictly read-only" not in prompt
     assert "Do not execute test wrappers" not in prompt
     assert "$review_permissions" not in prompt
+    for rule in (
+        "Before any retained edit",
+        "stop with PASS and no source edits",
+        "optional test expansion",
+        "INCONCLUSIVE permits bounded investigation",
+        "admitted pre-edit",
+        "Strong Audit uses FINDINGS",
+        "before publication; PASS, INCONCLUSIVE or malformed output is not edit authority",
+    ):
+        assert rule in prompt
 
 
 @pytest.mark.parametrize("mode", list(ReviewMode))
@@ -237,3 +248,82 @@ def test_obsolete_verdict_key_is_rejected() -> None:
 def test_strong_prompt_cannot_be_embedded_as_ordinary_closure() -> None:
     with pytest.raises(ValueError):
         build_review_prompt(_input(), embedded_closure=True)
+
+
+def _correction_payload(expected: ReviewExecutionInput) -> dict:
+    return {
+        **_identity(expected),
+        "result": "FINDINGS",
+        "findings": [
+            {
+                "finding_id": "input-head-defect",
+                "requirement_ids": ["#2101/REQ-007"],
+                "requirement_texts": ["Verify every outstanding finding."],
+                "counterexample": "The second supported deletion path loses persisted state.",
+                "expected_behavior": "Both deletion paths preserve persisted state.",
+                "actual_behavior": "The admitted input head guards only delete_one.",
+                "evidence": "src/state.py:40 invokes delete_two without the required guard.",
+                "affected_boundary": "src/state.py:delete_two",
+                "focused_regression_scenario": "Exercise delete_two with persisted state and assert it is retained.",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("regression_gap", [False, True])
+def test_strong_correction_retains_complete_current_requirement_evidence(regression_gap):
+    expected = replace(_input(), contract=ContractSnapshot(("#2101",), "Issue #2101 REQ-007: Verify every outstanding finding."))
+    payload = _correction_payload(expected)
+    if regression_gap:
+        payload["findings"][0].update(
+            is_regression_gap=True,
+            plausible_incorrect_implementation="Remove the guard on delete_two.",
+            why_tests_admit_it="All existing regressions invoke delete_one.",
+            material_consequence="Persisted state is lost through the second supported entry point.",
+        )
+    result = parse_review_result(json.dumps(payload), expected, "strong/model")
+
+    basis, refusal = _review_correction_basis(expected, result)
+
+    assert refusal == ""
+    assert basis is not None
+    assert basis.head_sha == expected.head_sha
+    assert basis.contract_identity == expected.contract.identity
+    assert basis.verdict == "FINDINGS"
+    blocker = basis.blockers[0]
+    assert blocker.requirement_ids == ("#2101/REQ-007",)
+    assert blocker.actual_behavior == payload["findings"][0]["actual_behavior"]
+    assert blocker.kind == ("TEST_ORACLE" if regression_gap else "IMPLEMENTATION")
+    if regression_gap:
+        assert payload["findings"][0]["why_tests_admit_it"] in blocker.evidence
+        assert payload["findings"][0]["material_consequence"] in blocker.evidence
+
+
+@pytest.mark.parametrize("invalid", ["pass", "inconclusive", "malformed", "stale_head", "unknown_requirement", "changed_requirement_text", "duplicate_requirement", "missing_counterexample", "optional_test", "invalid_gap_type"])
+def test_strong_correction_requires_pre_edit_finding_bound_to_current_contract(invalid):
+    expected = _input()
+    payload = _correction_payload(expected)
+    if invalid in {"pass", "inconclusive"}:
+        payload.update(result=invalid.upper(), findings=[])
+    elif invalid == "stale_head":
+        payload["head_sha"] = "d" * 40
+    elif invalid == "unknown_requirement":
+        payload["findings"][0]["requirement_ids"] = ["#2101/REQ-999"]
+    elif invalid == "changed_requirement_text":
+        payload["findings"][0]["requirement_texts"] = ["Add optional coverage for every naming variant."]
+    elif invalid == "duplicate_requirement":
+        payload["findings"][0]["requirement_ids"] *= 2
+        payload["findings"][0]["requirement_texts"] *= 2
+    elif invalid == "missing_counterexample":
+        payload["findings"][0]["counterexample"] = ""
+    elif invalid == "invalid_gap_type":
+        payload["findings"][0]["is_regression_gap"] = []
+    elif invalid == "optional_test":
+        payload["findings"][0]["is_regression_gap"] = True
+        payload["findings"][0]["material_consequence"] = ""
+    response = "locally fixed, all tests now pass" if invalid == "malformed" else json.dumps(payload)
+
+    basis, refusal = _review_correction_basis(expected, parse_review_result(response, expected, "strong/model"))
+
+    assert basis is None
+    assert refusal

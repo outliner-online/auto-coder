@@ -1803,10 +1803,16 @@ class TestBuildAdversarialValidationContext:
         if editable:
             assert "permits edits in its private PR review workspace" in rendered_prompt
             assert "independent review and CI for the new candidate before merge" in rendered_prompt
+            assert "Before any retained edit" in rendered_prompt
+            assert "stop with PASS and no source edits" in rendered_prompt
+            assert "optional test expansion" in rendered_prompt
+            assert "admitted pre-edit" in rendered_prompt
+            assert "finding and NEEDS_TESTS for a material test-oracle gap" in rendered_prompt
             assert "strictly read-only" not in rendered_prompt
         else:
             assert "This invocation is strictly read-only" in rendered_prompt
             assert "Request any necessary dynamic check through" in rendered_prompt
+            assert "Before any retained edit" not in rendered_prompt
         assert "$review_permissions" not in rendered_prompt
         assert "src/early.py" in rendered_prompt
         assert "+early_line" in rendered_prompt
