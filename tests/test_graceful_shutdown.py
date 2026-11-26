@@ -132,7 +132,8 @@ def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch,
     assert recovered.generation == (2 if newer_invalidation else 1)
 
 
-def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure", [RuntimeError("validation unavailable"), asyncio.CancelledError()])
+def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch, tmp_path, failure):
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
     engine = AutomationEngine(MagicMock(), AutomationConfig())
     entered = threading.Event()
@@ -145,7 +146,7 @@ def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch
     def failed_validation(*_args):
         entered.set()
         assert release.wait(5)
-        raise RuntimeError("validation unavailable")
+        raise failure
 
     monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", failed_validation)
     engine._process_single_candidate = MagicMock()
@@ -155,6 +156,7 @@ def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch
         worker = asyncio.create_task(engine._worker_loop("owner/repo", 0, "issue"))
         assert await asyncio.to_thread(entered.wait, 2)
         assert engine.request_graceful_shutdown("SIGTERM")
+        assert await engine.invalidate_entity("owner/repo", "issue", 23, "newer-after-failure")
         graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
         await asyncio.sleep(0.05)
         assert not graceful_drain.done()
@@ -166,6 +168,10 @@ def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch
     routing.assert_called_once_with("owner/repo", 23, candidate.data)
     engine._process_single_candidate.assert_not_called()
     assert engine.invalidations.pending_count("owner/repo") == 1
+    recovered = AutomationEngine(MagicMock(), AutomationConfig()).invalidations.claim("owner/repo")
+    assert recovered is not None
+    assert recovered.identity == EntityIdentity("owner/repo", "issue", 23)
+    assert recovered.generation == 2
 
 
 def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(monkeypatch, tmp_path):
