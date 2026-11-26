@@ -3375,7 +3375,7 @@ class AutomationEngine:
         await asyncio.to_thread(self._resume_local_issue_publications, repo_name, slots)
         from .local_job_workspace_cleanup import reclaim_finalized_workspaces
 
-        await asyncio.to_thread(reclaim_finalized_workspaces, self._get_local_job_store())
+        await asyncio.to_thread(reclaim_finalized_workspaces, self._get_local_job_store(), repo_name)
         # Issue #2148 REQ-002: recover terminal-PR-backed reclamation candidates
         # and unfinished obligations, including owners whose PRs closed while
         # this daemon was offline and are therefore absent from the open-PR
@@ -3689,6 +3689,7 @@ class AutomationEngine:
                             "local job workspace reclamation",
                             reclaim_finalized_workspaces,
                             self._get_local_job_store(),
+                            repo_name,
                         )
                     except Exception as exc:
                         # The claimed deadline intentionally remains advanced:

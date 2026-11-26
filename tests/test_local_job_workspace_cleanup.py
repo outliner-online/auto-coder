@@ -16,9 +16,10 @@ from loguru import logger
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.automation_engine import AutomationEngine
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
+from auto_coder.issue_dispatch import CandidateHandoff, IssueAttemptIdentity, IssueDispatchGuard
 from auto_coder.issue_job_finalizer import IssueJobFinalizer
 from auto_coder.issue_job_workspace import IssueJobSource, IssueJobWorkspaceProducer
-from auto_coder.local_job_handoff import InvocationOutcome, LocalJobClaim, LocalJobState, LocalJobStore, WorkspaceReclamationPhase
+from auto_coder.local_job_handoff import InvocationOutcome, LocalJobClaim, LocalJobKind, LocalJobOffer, LocalJobState, LocalJobStore, WorkspaceReclamationPhase
 from auto_coder.local_job_runner import process_owner
 from auto_coder.local_job_workspace_cleanup import (
     DEFAULT_RETENTION_SECONDS,
@@ -30,7 +31,7 @@ from auto_coder.pr_repair_finalizer import PRRepairJobFinalizer, PRRepairPublica
 from auto_coder.runtime_locks import ensure_lock_directory, file_lock
 from auto_coder.workspace_ownership import MARKER, verify_ownership
 
-from .test_issue_job_finalizer import _completed_job, claim, repository
+from .test_issue_job_finalizer import _completed_job, claim, git, repository
 from .test_pr_repair_finalizer import completed_job as completed_pr_job
 from .test_pr_repair_finalizer import observer
 from .test_pr_repair_finalizer import repository as pr_repository
@@ -42,6 +43,39 @@ def _published(tmp_path: Path, number: int = 2583):
     finalizer = IssueJobFinalizer(store, slots, lambda *_: existing, lambda *_: None)
     assert finalizer.finalize(checkpoint.job_id).disposition == "published"
     return store, checkpoint, finalizer
+
+
+def _published_for_repository(store: LocalJobStore, tmp_path: Path, repository_name: str, number: int):
+    owner, name = repository_name.split("/", 1)
+    source_root = tmp_path / f"source-{owner}-{name}"
+    source_root.mkdir()
+    source, _ = repository(source_root)
+    attempt = f"attempt-{number}"
+    offer = LocalJobOffer(LocalJobKind.ISSUE_IMPLEMENTATION, repository_name, number, attempt, "codex", f"prompt-{number}")
+    identity = IssueAttemptIdentity(owner, name, number, attempt)
+    guard = IssueDispatchGuard(tmp_path / f"dispatch-{owner}-{name}.sqlite3")
+    assert guard.reserve(identity, CandidateHandoff("codex", "local")).admitted
+    assert store.offer_issue(offer, identity, guard) is not None
+    acquired = store.claim(offer.job_id)
+    assert acquired is not None and acquired.acquired
+    slots = ImplementationSlotRepository(repository_name, 1, tmp_path / f"slots-{owner}-{name}.json", tmp_path / f"retired-{owner}-{name}.json")
+    assert slots.reserve_new(ImplementationOwner("issue", number))
+
+    def edit(workspace: Path, _prompt: str) -> str:
+        git(workspace, "config", "user.email", "test@example.com")
+        git(workspace, "config", "user.name", "Test")
+        (workspace / "result.txt").write_text("implemented\n", encoding="utf-8")
+        return "ACTION_SUMMARY: implemented"
+
+    checkpoint = IssueJobWorkspaceProducer(store, tmp_path / "workspaces", slots).execute(
+        acquired,
+        IssueJobSource(repository_name, source, "main", f"issue-{number}"),
+        edit,
+    )
+    existing = {"number": number + 1000, "head": {"ref": checkpoint.work_branch}, "body": f"Closes #{number}"}
+    result = IssueJobFinalizer(store, slots, lambda *_: existing, lambda *_: None).finalize(checkpoint.job_id)
+    assert result.disposition == "published"
+    return checkpoint
 
 
 def _record_settled_observation(store, record, workspace: Path, executor: str) -> None:
@@ -57,6 +91,7 @@ def _record_settled_observation(store, record, workspace: Path, executor: str) -
 def test_producer_reclamation_is_provider_neutral_and_failure_is_hourly(tmp_path: Path, monkeypatch, _use_real_commands) -> None:
     """The production producer owns cleanup independently of Jules listing."""
     store, finalized, _ = _published(tmp_path, 2892)
+    other_repository = _published_for_repository(store, tmp_path, "other/repo", 3892)
     live_source_root = tmp_path / "live-source"
     live_source_root.mkdir()
     source, _ = repository(live_source_root)
@@ -87,9 +122,9 @@ def test_producer_reclamation_is_provider_neutral_and_failure_is_hourly(tmp_path
     real_reclaim = reclaim_finalized_workspaces
     cleanup_calls = []
 
-    def scoped_reclaim(local_store):
-        cleanup_calls.append(local_store)
-        return real_reclaim(local_store, retention_seconds=0, issue_root=tmp_path / "workspaces")
+    def scoped_reclaim(local_store, repository_name):
+        cleanup_calls.append((local_store, repository_name))
+        return real_reclaim(local_store, repository_name, retention_seconds=0, issue_root=tmp_path / "workspaces")
 
     monkeypatch.setattr("auto_coder.local_job_workspace_cleanup.reclaim_finalized_workspaces", scoped_reclaim)
     update_checks = []
@@ -118,11 +153,12 @@ def test_producer_reclamation_is_provider_neutral_and_failure_is_hourly(tmp_path
         logger.remove(sink)
 
     assert store_reads == 2
-    assert cleanup_calls == [store]
+    assert cleanup_calls == [(store, "owner/repo")]
     assert len(update_checks) == 3
     assert any("Local job workspace reclamation failed" in message and "temporary local job store failure" in message for message in errors)
     assert not finalized.workspace.parent.exists()
     assert live_workspace.parent.is_dir()
+    assert other_repository.workspace.parent.is_dir()
 
 
 def test_due_reclamation_survives_repeated_provider_maintenance_failure(tmp_path: Path, monkeypatch, _use_real_commands) -> None:
@@ -134,7 +170,7 @@ def test_due_reclamation_survives_repeated_provider_maintenance_failure(tmp_path
     real_reclaim = reclaim_finalized_workspaces
     monkeypatch.setattr(
         "auto_coder.local_job_workspace_cleanup.reclaim_finalized_workspaces",
-        lambda local_store: real_reclaim(local_store, retention_seconds=0, issue_root=tmp_path / "workspaces"),
+        lambda local_store, repository_name: real_reclaim(local_store, repository_name, retention_seconds=0, issue_root=tmp_path / "workspaces"),
     )
     failures = []
 
