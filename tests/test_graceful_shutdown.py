@@ -292,6 +292,33 @@ def test_parent_validation_routes_normally_while_admission_is_open(monkeypatch, 
     assert engine.invalidations.pending_count("owner/repo") == 0
 
 
+def test_running_parent_validation_error_keeps_precedence_over_routing_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    candidate = Candidate(type="issue", data={"number": 26, "state": "open"}, priority=0, issue_number=26)
+    routing = MagicMock(side_effect=[None, ValueError("routing failure")])
+    monitor = MagicMock()
+    monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args: candidate)
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+    monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", MagicMock(side_effect=RuntimeError("validation failure")))
+    monkeypatch.setattr("auto_coder.automation_engine.get_health_monitor", lambda: monitor)
+    engine._process_single_candidate = MagicMock()
+
+    async def scenario():
+        assert await engine.invalidate_entity("owner/repo", "issue", 26, "validation-error")
+        worker = asyncio.create_task(engine._worker_loop("owner/repo", 0, "issue"))
+        await asyncio.wait_for(engine.queue.join(), 2)
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    asyncio.run(scenario())
+    assert routing.call_count == 2
+    monitor.record_event.assert_any_call("worker_error", "worker 0: RuntimeError: validation failure", "issue #26")
+    engine._process_single_candidate.assert_not_called()
+    assert engine.invalidations.pending_count("owner/repo") == 1
+
+
 def test_parent_validation_error_joins_running_sibling_before_releasing_claim(monkeypatch, tmp_path):
     """An early batch ERROR cannot outlive production worker ownership."""
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
