@@ -16,7 +16,7 @@ class TestGithubActionPreload(unittest.TestCase):
         # Setup mock API
         mock_api = MagicMock()
         mock_ci_api_for.return_value = mock_api
-        mock_github_client.get_instance.return_value.token = "token"
+        controller_client = mock_github_client.get_instance.return_value
 
         # Mock list_workflow_runs_for_repo response
         # Using snake_case keys as typical for GhApi/GitHub REST API
@@ -33,6 +33,11 @@ class TestGithubActionPreload(unittest.TestCase):
         preload_github_actions_status("owner/repo", prs)
 
         # Verify API called once
+        mock_ci_api_for.assert_called_once_with(
+            controller_client,
+            "owner/repo",
+            required_permissions={"actions": "read"},
+        )
         mock_api.actions.list_workflow_runs_for_repo.assert_called_once_with("owner", "repo", per_page=100)
 
         # Verify cache population
