@@ -1065,7 +1065,15 @@ class GitHubClient:
         )
 
     @retry_with_backoff()
-    def graphql_query(self, query: str, variables: Optional[Dict[str, Any]] = None, extra_headers: Optional[Dict[str, str]] = None, *, repo_name: str | None = None) -> Dict[str, Any]:
+    def graphql_query(
+        self,
+        query: str,
+        variables: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+        *,
+        repo_name: str | None = None,
+        required_permissions: Mapping[str, str] | None = None,
+    ) -> Dict[str, Any]:
         """
         Executes a GraphQL query against the GitHub API using a caching client.
 
@@ -1090,7 +1098,7 @@ class GitHubClient:
                 repo_name = f"{owner}/{name}"
             else:
                 raise ValueError("App-mode GraphQL requests require repository context")
-        credential = self._credential_for(repo_name or "", {"metadata": "read"})
+        credential = self._credential_for(repo_name or "", required_permissions or {"metadata": "read"})
         headers = {
             "Authorization": f"bearer {credential.token}",
             "Content-Type": "application/json",
@@ -2074,9 +2082,13 @@ class GitHubClient:
             logger.warning(f"Failed to search for PR with head branch '{branch_name}': {e}")
             return None
 
-    def _find_pr_by_head_branch(self, repo_name: str, branch_name: str, *, state: str) -> Optional[Dict[str, Any]]:
+    def _find_pr_by_head_branch(self, repo_name: str, branch_name: str, *, state: str, fresh: bool = False) -> Optional[Dict[str, Any]]:
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"})
+        api = self.api_for(
+            repo_name,
+            required_permissions={"pull_requests": "read"},
+            extra_headers={"Cache-Control": "no-cache"} if fresh else None,
+        )
         page = 1
         while True:
             prs = api.pulls.list(owner, repo, state=state, head=f"{owner}:{branch_name}", per_page=100, page=page)
@@ -2108,7 +2120,7 @@ class GitHubClient:
                 if len(prs) < 100:
                     return None
                 page += 1
-        return self._find_pr_by_head_branch(repo_name, branch_name, state="all")
+        return self._find_pr_by_head_branch(repo_name, branch_name, state="all", fresh=True)
 
     def _get_issue_timeline(
         self,

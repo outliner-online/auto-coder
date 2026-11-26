@@ -6165,8 +6165,7 @@ class AutomationEngine:
                 if _is_jules_pr(pr_data) and pr_data.get("draft"):
                     logger.info(f"Jules PR #{pr_number} is a draft, marking as ready for review")
                     try:
-                        token = self.github.token
-                        api = get_ghapi_client(token)
+                        api = self.github.api_for(repo_name, required_permissions={"pull_requests": "read"})
                         node_id = pr_data.get("node_id")
 
                         if not node_id:
@@ -6194,7 +6193,12 @@ class AutomationEngine:
                               }
                             }
                             """
-                            self.github.graphql_query(query=mutation, variables={"id": node_id})
+                            self.github.graphql_query(
+                                query=mutation,
+                                variables={"id": node_id},
+                                repo_name=repo_name,
+                                required_permissions={"pull_requests": "write"},
+                            )
                             logger.info(f"Successfully marked Jules PR #{pr_number} as ready for review (via GraphQL)")
                             # Update local data
                             pr_data["draft"] = False

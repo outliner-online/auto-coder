@@ -3806,7 +3806,7 @@ def _is_feature_slotless_dependabot_pr(pr_obj: Any) -> bool:
     return True
 
 
-def _is_dependabot_pr(pr_obj: Any) -> bool:
+def _is_dependabot_pr(pr_obj: Any, controller_identity: Optional[Any] = None) -> bool:
     """Return True if the PR is authored by a dependency bot.
 
     Dependency bots include Dependabot, Renovate, and accounts whose login
@@ -3821,12 +3821,16 @@ def _is_dependabot_pr(pr_obj: Any) -> bool:
             return False
         if "dependabot" in login_lower or "renovate" in login_lower:
             return True
-        # Controller-App PRs retain the same explicit publication evidence as
-        # their former controller-user authored equivalents.  A generic bot
-        # suffix must not override that stronger origin evidence and bypass
-        # ordinary review or local repair routing.
+        # Only the proven repository controller may combine its App identity
+        # with local-origin evidence to retain the ordinary local route.  Text
+        # alone must never let an unrelated bot escape dependency-bot policy.
         body = str(pr_obj.get("body") or "") if isinstance(pr_obj, dict) else str(getattr(pr_obj, "body", "") or "")
-        if login_lower.endswith("[bot]") and any(marker in body for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
+        identity_login = str(getattr(controller_identity, "login", "") or "").casefold()
+        identity_id = getattr(controller_identity, "account_id", None)
+        author = pr_obj.get("user", {}) if isinstance(pr_obj, dict) else getattr(pr_obj, "user", {})
+        author_id = author.get("id") if isinstance(author, dict) else getattr(author, "id", None)
+        proven_controller = login_lower.casefold() == identity_login and (identity_id is None or author_id == identity_id)
+        if proven_controller and any(marker in body for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
             return False
         if login_lower.endswith("[bot]"):
             return True
@@ -3977,7 +3981,12 @@ def evaluate_dependency_bot_admission(
     candidate, and it always obtains fresh, same-HEAD facts rather than
     reusing whatever the caller's candidate data already carries (REQ-005).
     """
-    flag_decision = _dependency_bot_flag_decision(_is_dependabot_pr(pr_data), config.IGNORE_DEPENDABOT_PRS, config.AUTO_MERGE_DEPENDABOT_PRS)
+    client = github_client or GitHubClient.get_instance()
+    try:
+        controller_identity = client.get_authenticated_controller_identity(repo_name)
+    except Exception:
+        controller_identity = None
+    flag_decision = _dependency_bot_flag_decision(_is_dependabot_pr(pr_data, controller_identity), config.IGNORE_DEPENDABOT_PRS, config.AUTO_MERGE_DEPENDABOT_PRS)
     if flag_decision is not None:
         return flag_decision
 
@@ -3988,8 +3997,6 @@ def evaluate_dependency_bot_admission(
             outcome=ExplicitTargetOutcome.DEFERRED,
             reason="dependency-bot PR number is unavailable for readiness evaluation",
         )
-
-    client = github_client or GitHubClient.get_instance()
 
     def _fetch() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         return _fetch_authoritative_dependency_bot_pr(client, repo_name, pr_data, pr_number)
@@ -9099,13 +9106,17 @@ def _handle_pr_merge(
             return actions
 
         # Step 5: Skip to process PR if it is dependabot PR
-        if _is_dependabot_pr(pr_data):
+        try:
+            controller_identity = github_client.get_authenticated_controller_identity(repo_name)
+        except Exception:
+            controller_identity = None
+        if _is_dependabot_pr(pr_data, controller_identity):
             actions.append(f"PR #{pr_number} is a dependabot PR, skipping fixes")
             _record_pr_stage(pr_number, "pr.repair-delegation", f"pr#{pr_number} repair delegation", Outcome.SKIPPED, {"effect": "ci-failure-repair", "reason": "dependabot PR"})
             return actions
 
         # Step 6: Only PRs created by local LLM execution (or explicit local checkout) are fixed by local LLM
-        if not _is_local_llm_pr(pr_data) and not already_on_pr_branch:
+        if not _is_local_llm_pr(pr_data, controller_identity) and not already_on_pr_branch:
             actions.append(f"PR #{pr_number} was not created by local LLM, skipping local LLM fixes")
             _record_pr_stage(pr_number, "pr.repair-delegation", f"pr#{pr_number} repair delegation", Outcome.SKIPPED, {"effect": "ci-failure-repair", "reason": "not created by local LLM"})
             return actions
@@ -10052,7 +10063,7 @@ def _is_jules_pr(pr_data: Dict[str, Any]) -> bool:
     return False
 
 
-def _is_local_llm_pr(pr_data: Dict[str, Any]) -> bool:
+def _is_local_llm_pr(pr_data: Dict[str, Any], controller_identity: Optional[Any] = None) -> bool:
     """Check if a PR was created by local LLM execution.
 
     Returns True if:
@@ -10071,7 +10082,7 @@ def _is_local_llm_pr(pr_data: Dict[str, Any]) -> bool:
         return False
     if _is_codex_or_claude_pr(pr_data):
         return False
-    if _is_dependabot_pr(pr_data):
+    if _is_dependabot_pr(pr_data, controller_identity):
         return False
 
     pr_body = pr_data.get("body", "") or ""
@@ -10288,16 +10299,14 @@ def _close_linked_issues(repo_name: str, pr_number: int, github_client: Optional
         github_client: Optional GitHubClient instance
     """
     try:
-        from auto_coder.util.gh_cache import get_ghapi_client
-
         client = github_client or GitHubClient.get_instance()
-        token = getattr(client, "token", None) or GitHubClient.get_instance().token
-        api = get_ghapi_client(token)
         owner, repo = repo_name.split("/")
+        read_api = client.api_for(repo_name, required_permissions={"pull_requests": "read"})
+        write_api = client.api_for(repo_name, required_permissions={"issues": "write"})
 
         # Get PR body
         try:
-            pr_info = api.pulls.get(owner, repo, pr_number)
+            pr_info = read_api.pulls.get(owner, repo, pr_number)
             pr_body = pr_info.get("body", "") or ""
         except Exception as e:
             logger.debug(f"Could not retrieve PR #{pr_number} body for issue linking: {e}")
@@ -10322,12 +10331,12 @@ def _close_linked_issues(repo_name: str, pr_number: int, github_client: Optional
             try:
                 # Add comment
                 try:
-                    api.issues.create_comment(owner, repo, issue_num, body=f"Closed by PR #{pr_number}")
+                    write_api.issues.create_comment(owner, repo, issue_num, body=f"Closed by PR #{pr_number}")
                 except Exception as e:
                     logger.warning(f"Failed to comment on issue #{issue_num}: {e}")
 
                 # Close issue
-                api.issues.update(owner, repo, issue_num, state="closed")
+                write_api.issues.update(owner, repo, issue_num, state="closed")
 
                 logger.info(f"Closed issue #{issue_num} linked from PR #{pr_number}")
                 log_action(f"Closed issue #{issue_num} (linked from PR #{pr_number})")
@@ -13098,7 +13107,7 @@ def _describe_merge_operation_outcome(result: Any) -> str:
     return f"status={status}, outcome={result.kind.value}, reason={result.reason or 'pending'}"
 
 
-def _finalize_merge_success(repo_name: str, pr_number: int, method: str) -> bool:
+def _finalize_merge_success(repo_name: str, pr_number: int, method: str, github_client: Any) -> bool:
     """Post-processing after a durably confirmed merge (REQ-009).
 
     ``_close_linked_issues``/``_archive_jules_session`` already swallow their
@@ -13109,7 +13118,7 @@ def _finalize_merge_success(repo_name: str, pr_number: int, method: str) -> bool
     get_trace_logger().log("Merging", f"Successfully merged PR #{pr_number}", item_type="pr", item_number=pr_number, details={"method": method})
     log_action(f"Successfully merged PR #{pr_number} (method: {method})")
     _record_pr_stage(pr_number, "pr.merge-delivery", f"pr#{pr_number} merge delivery", Outcome.COMPLETED, {"method": method})
-    _close_linked_issues(repo_name, pr_number)
+    _close_linked_issues(repo_name, pr_number, github_client)
     _archive_jules_session(repo_name, pr_number)
     return True
 
@@ -13245,7 +13254,7 @@ def _merge_pr(
         result = _try_merge(config.MERGE_METHOD.replace("--", ""), head_sha)
 
         if result.operation.effect(EffectName.MERGE).state is EffectState.CONFIRMED_COMPLETE:
-            return _finalize_merge_success(repo_name, pr_number, config.MERGE_METHOD)
+            return _finalize_merge_success(repo_name, pr_number, config.MERGE_METHOD, client)
 
         approval_effect = result.operation.effect(EffectName.APPROVAL)
         if needs_approval and approval_effect.state not in (EffectState.NOT_NEEDED, EffectState.CONFIRMED_COMPLETE):
@@ -13345,7 +13354,7 @@ def _handle_definitive_merge_rejection(
                 store.manual_reset_effect(identity, EffectName.MERGE)
                 alt_result = try_merge(alt.replace("--", ""), head_sha)
                 if alt_result.operation.effect(EffectName.MERGE).state is EffectState.CONFIRMED_COMPLETE:
-                    return _finalize_merge_success(repo_name, pr_number, alt)
+                    return _finalize_merge_success(repo_name, pr_number, alt, client)
             log_action(f"Failed to merge PR #{pr_number} with any currently allowed merge method", False, "Merge API failed")
             _record_pr_stage(pr_number, "pr.merge-delivery", f"pr#{pr_number} merge delivery", Outcome.FAILED, {"examined_head": head_sha, "reason": "no allowed alternate merge method succeeded"})
             if route_disposition is not None:

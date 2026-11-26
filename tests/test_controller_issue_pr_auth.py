@@ -3,8 +3,9 @@ from unittest.mock import Mock, patch
 
 import httpx
 
+from auto_coder.automation_config import AutomationConfig
 from auto_coder.github_controller_auth import ControllerCredential, ControllerIdentity
-from auto_coder.pr_processor import _is_dependabot_pr, _is_local_llm_pr
+from auto_coder.pr_processor import _is_dependabot_pr, _is_local_llm_pr, evaluate_dependency_bot_admission
 from auto_coder.util.gh_cache import GitHubClient
 
 
@@ -59,8 +60,9 @@ def test_controller_bot_local_origin_is_not_dependency_bot():
         "body": "<!-- auto-coder:local-llm -->\n\nCloses #2876",
         "head": {"ref": "issue-2876-attempt-0-codex-cloud"},
     }
-    assert _is_dependabot_pr(pr) is False
-    assert _is_local_llm_pr(pr) is True
+    identity = ControllerIdentity("auto-coder[bot]")
+    assert _is_dependabot_pr(pr, identity) is False
+    assert _is_local_llm_pr(pr, identity) is True
 
 
 def test_unrelated_bot_behavior_is_unchanged():
@@ -86,3 +88,75 @@ def test_issue_comments_use_controller_credentials_at_each_page():
         "Bearer installation-one",
         "Bearer installation-two",
     ]
+
+
+def test_same_local_marker_only_exempts_proven_controller_actor():
+    identity = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    body = "<!-- auto-coder:local-llm -->\n\nCloses #2876"
+    controller = {"user": {"login": "auto-coder[bot]", "id": 101}, "body": body}
+    unrelated = {"user": {"login": "other[bot]", "id": 202}, "body": body}
+
+    assert _is_dependabot_pr(controller, identity) is False
+    assert _is_local_llm_pr(controller, identity) is True
+    assert _is_dependabot_pr(unrelated, identity) is True
+    assert _is_local_llm_pr(unrelated, identity) is False
+
+
+def test_strict_head_lookup_preserves_no_cache_header_on_repository_adapter():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    api = Mock()
+    api.pulls.list.return_value = []
+
+    with patch.object(client, "api_for", return_value=api) as api_for:
+        assert client.find_pr_by_head_branch_strict("owner/repo", "issue-2876") is None
+
+    api_for.assert_called_once_with(
+        "owner/repo",
+        required_permissions={"pull_requests": "read"},
+        extra_headers={"Cache-Control": "no-cache"},
+    )
+
+
+def test_linked_issue_cleanup_uses_injected_scoped_read_and_write_apis():
+    from auto_coder.pr_processor import _close_linked_issues
+
+    client = Mock()
+    read_api = Mock()
+    write_api = Mock()
+    read_api.pulls.get.return_value = {"body": "Closes #42"}
+    client.api_for.side_effect = [read_api, write_api]
+
+    _close_linked_issues("owner/repo", 9, client)
+
+    assert client.api_for.call_args_list == [
+        __import__("unittest.mock").mock.call("owner/repo", required_permissions={"pull_requests": "read"}),
+        __import__("unittest.mock").mock.call("owner/repo", required_permissions={"issues": "write"}),
+    ]
+    read_api.pulls.get.assert_called_once_with("owner", "repo", 9)
+    write_api.issues.create_comment.assert_called_once_with("owner", "repo", 42, body="Closed by PR #9")
+    write_api.issues.update.assert_called_once_with("owner", "repo", 42, state="closed")
+
+
+def test_confirmed_merge_finalizer_keeps_success_when_scoped_cleanup_fails():
+    from auto_coder.pr_processor import _finalize_merge_success
+
+    client = Mock()
+    client.api_for.side_effect = RuntimeError("installation unavailable")
+    with patch("auto_coder.pr_processor._archive_jules_session"):
+        assert _finalize_merge_success("owner/repo", 9, "--squash", client) is True
+
+
+def test_common_admission_distinguishes_same_body_controller_and_unrelated_bot():
+    client = Mock()
+    identity = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    client.get_authenticated_controller_identity.return_value = identity
+    config = AutomationConfig()
+    config.IGNORE_DEPENDABOT_PRS = True
+    body = "<!-- auto-coder:local-llm -->\n\nCloses #2876"
+
+    controller = {"number": 1, "user": {"login": "auto-coder[bot]", "id": 101}, "body": body}
+    unrelated = {"number": 2, "user": {"login": "other[bot]", "id": 202}, "body": body}
+
+    assert evaluate_dependency_bot_admission(client, "owner/repo", controller, config).allowed is True
+    assert evaluate_dependency_bot_admission(client, "owner/repo", unrelated, config).allowed is False
