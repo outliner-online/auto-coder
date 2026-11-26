@@ -223,7 +223,10 @@ def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(mon
             raise AssertionError("post-validation routing was not queued behind the executor blocker")
 
         assert engine.request_graceful_shutdown("SIGTERM")
-        assert await engine.invalidate_entity("owner/repo", "issue", 25, "newer-queued-routing")
+        # The only executor thread is deliberately occupied. Persist the
+        # delivery directly so the test can begin draining while it remains
+        # occupied; invalidate_entity itself submits to that same executor.
+        assert engine.invalidations.invalidate(EntityIdentity("owner/repo", "issue", 25), "newer-queued-routing")
         graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
         # The supervisor must finish while the unrelated executor occupant is
         # still held: the prohibited queued routing stage is not a drain wait.
