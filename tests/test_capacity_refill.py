@@ -23,6 +23,7 @@ def test_reclamation_propagates_provider_store_construction_failure(tmp_path):
         assert asyncio.run(engine._run_due_reclamation_checks("owner/repo", slots)) == 0
 
     assert due_checks.call_count == 1
+    assert "jules_client" not in due_checks.call_args.kwargs
     assert due_checks.call_args.kwargs["cloud_provider_stores_available"] is False
 
 

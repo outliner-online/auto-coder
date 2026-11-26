@@ -4738,14 +4738,6 @@ class AutomationEngine:
         freed slot can admit a new Issue without waiting for an unrelated
         webhook or the next scheduled tick.
         """
-        jules_client: Optional[Any] = None
-        try:
-            from .jules_client import JulesClient
-
-            jules_client = JulesClient()
-        except Exception as exc:
-            logger.debug(f"Jules client unavailable for reclamation checks on {repo_name}: {exc}")
-
         cloud_manager: Optional[Any] = None
         cloud_run_store: Optional[Any] = None
         cloud_provider_stores_available = True
@@ -4771,7 +4763,6 @@ class AutomationEngine:
                 slots,
                 None,
                 github_client=self.github,
-                jules_client=jules_client,
                 cloud_manager=cloud_manager,
                 cloud_run_store=cloud_run_store,
                 cloud_provider_stores_available=cloud_provider_stores_available,

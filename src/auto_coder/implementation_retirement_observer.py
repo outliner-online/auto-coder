@@ -1,7 +1,7 @@
 """Evidence collection for terminal PR-backed implementation slot retirement.
 
 Derives authoritative ImplementationRetirementObservation from fresh GitHub PR
-metadata, individual Jules session reads, CloudManager/CloudRun bindings, and
+ metadata, durable CloudManager/CloudRun bindings, optional legacy Jules reads, and
 local execution liveness checks (Issue #2147).
 
 Retirement scope: ordinary Issue-owned reservations with Jules or local work.
@@ -1194,7 +1194,10 @@ def collect_retirement_observation(
 
     attributed_sessions = jules_resolution.attributed_sessions
 
-    # Fetch raw Jules session data for PR candidate set construction
+    # A live Jules client is deliberately optional.  Scheduled reclamation does
+    # not construct one: durable membership remains visible below as UNKNOWN,
+    # while strict GitHub discovery can still settle an independent local owner.
+    # The seam is retained for explicit legacy diagnostics only.
     jules_session_raws: Dict[str, Dict[str, Any]] = {}
     session_collection_reasons: List[RetirementCollectionReason] = []
     if jules_client is not None:

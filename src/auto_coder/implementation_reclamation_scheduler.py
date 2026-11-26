@@ -482,6 +482,11 @@ def run_due_reclamation_checks(
 ) -> int:
     """Service every currently-due reclamation obligation once (REQ-003, REQ-004).
 
+    ``jules_client`` remains an optional compatibility seam for callers that
+    explicitly recheck legacy Jules work.  Scheduled production reclamation
+    never constructs or supplies one; durable legacy membership is therefore
+    collected as UNKNOWN without coupling other owners to the Jules API.
+
     Each owner's check runs under ``slots.serialize(owner)``, the same
     per-owner cross-process lock ordinary admission/mutation paths already
     use, so two overlapping checks for the same incarnation never run.
