@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
@@ -16,6 +17,49 @@ from auto_coder.pr_processor import (
 )
 from auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
 from auto_coder.util.gh_cache import GitHubClient
+
+
+def test_strict_pr_readers_use_current_installation_at_each_send():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    payload = {"number": 7, "state": "open", "body": "", "head": {"sha": "abc", "ref": "branch", "repo": {"full_name": "owner/repo"}}, "base": {"ref": "main"}}
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7")
+    with patch("auto_coder.util.gh_cache._strict_request", side_effect=lambda *a, **kw: httpx.Response(200, json=payload, request=request)) as send:
+        assert client.get_pull_request_metadata_strict("owner/repo", 7) == payload
+        assert client.get_pull_request_head_sha_strict("owner/repo", 7) == "abc"
+        assert client.get_pull_request_repair_metadata_strict("owner/repo", 7).head_sha == "abc"
+        assert client.get_pull_request_routing_metadata_strict("owner/repo", 7).head_sha == "abc"
+    assert [call.kwargs["headers"]["Authorization"] for call in send.call_args_list] == ["Bearer installation-one", "Bearer installation-two", "Bearer installation-two", "Bearer installation-two"]
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"})] * 4
+
+
+def test_provider_link_projection_uses_installation_for_read_and_update():
+    from auto_coder.codex_pr_attribution import AttributionDisposition
+    from auto_coder.pr_processor import _link_codex_cloud_pr_to_issue
+
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    origin = SimpleNamespace(repository="owner/repo", pr_number=7, provider="codex-cloud", task_id="task-123")
+    attribution = SimpleNamespace(disposition=AttributionDisposition.VERIFIED, origin=origin)
+    bindings = Mock()
+    bindings.get.return_value = attribution
+    transport = Mock()
+    request = httpx.Request("PATCH", "https://api.github.com/repos/owner/repo/pulls/7")
+    transport.request.return_value = httpx.Response(200, json={"number": 7}, request=request)
+    read_request = httpx.Request("GET", str(request.url))
+    with (
+        patch("auto_coder.util.gh_cache._strict_request", return_value=httpx.Response(200, json={"number": 7, "body": "body"}, request=read_request)) as read,
+        patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport),
+        patch("auto_coder.pr_processor.CodexPrAttributionRepository", return_value=bindings),
+        patch("auto_coder.pr_processor.resolve_codex_pr_origin", return_value=attribution),
+        patch("auto_coder.pr_processor.canonical_codex_cloud_task_url", return_value="https://example.test/task-123"),
+        patch("auto_coder.pr_processor.validate_issue_references"),
+    ):
+        result = _link_codex_cloud_pr_to_issue("owner/repo", {"number": 7}, client)
+    assert result.status == "updated"
+    assert read.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-one"
+    assert transport.request.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-two"
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"}), ("owner/repo", {"pull_requests": "write"})]
 
 
 class RenewableProvider:
@@ -44,6 +88,82 @@ class RenewableProvider:
 
     def invalidate(self, credential):
         return None
+
+
+def test_candidate_and_review_reads_use_renewed_installation_credentials():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls")
+    transport.request.side_effect = [
+        httpx.Response(200, json=[{"number": 7}], request=request),
+        httpx.Response(200, json={"number": 7, "head": {"ref": "issue-7"}, "base": {}, "user": {"login": "auto-coder[bot]", "id": 101}}, request=request),
+        httpx.Response(200, json=[], request=request),
+    ]
+    sent = []
+    responses = iter(transport.request.side_effect)
+    transport.request.side_effect = lambda *args, **kwargs: (sent.append(kwargs["headers"]["Authorization"]), next(responses))[1]
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        candidate = client.get_open_prs_json("owner/repo")[0]
+        assert candidate["number"] == 7
+        assert _is_dependabot_pr(candidate, ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)) is False
+        assert client.get_pr_reviews_strict("owner/repo", 7) == []
+    assert sent == ["Bearer installation-one", "Bearer installation-two", "Bearer installation-two"]
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"})] * 3
+
+
+def test_sub_issue_link_reads_and_writes_use_installation_credentials():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues/42/sub_issues")
+    transport.request.side_effect = [httpx.Response(200, json=[], request=request), httpx.Response(201, json={}, request=request)]
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        assert client.add_sub_issue("owner/repo", 42, 43, sub_issue_id=101) is True
+    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == ["bearer installation-one", "bearer installation-two"]
+    assert provider.requests == [("owner/repo", {"issues": "read"}), ("owner/repo", {"issues": "write"})]
+
+
+def test_issue_declaration_discovery_uses_installation_credentials():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues")
+    transport.request.side_effect = [httpx.Response(200, json=[{"number": 42}], request=request), httpx.Response(200, json=[], request=request)]
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        assert client.get_open_issue_declarations("owner/repo", limit=1) == [{"number": 42}]
+    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == ["Bearer installation-one", "Bearer installation-two"]
+    assert provider.requests == [("owner/repo", {"issues": "read"})] * 2
+
+
+def test_jules_projection_and_timeline_use_installation_credentials():
+    from auto_coder.pr_processor import _update_jules_pr_body
+
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("PATCH", "https://api.github.com/repos/owner/repo/pulls/7")
+    transport.request.return_value = httpx.Response(200, json={}, request=request)
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport), patch("auto_coder.pr_processor.validate_issue_references"):
+        assert _update_jules_pr_body("owner/repo", 7, "body", 42, client) is True
+    assert transport.request.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-one"
+    with patch("auto_coder.util.gh_cache._strict_request", return_value=httpx.Response(200, json=[], request=request)) as send:
+        assert client.get_issue_timeline_strict("owner/repo", 7) == []
+    assert send.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-two"
+    assert provider.requests == [("owner/repo", {"pull_requests": "write"}), ("owner/repo", {"issues": "read"})]
+
+
+def test_open_pr_membership_observation_renews_on_each_page():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls")
+    responses = iter([httpx.Response(200, json=[{"number": 7}], headers={"Link": '<https://api.github.com/repos/owner/repo/pulls?page=2>; rel="next"'}, request=request), httpx.Response(200, json=[{"number": 8}], request=request)])
+    sent = []
+    transport.request.side_effect = lambda *args, **kwargs: (sent.append(kwargs["headers"]["Authorization"]), next(responses))[1]
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        assert client.get_open_pull_requests("owner/repo") == [{"number": 7}, {"number": 8}]
+    assert sent == ["Bearer installation-one", "Bearer installation-two"]
 
 
 def test_held_api_resolves_renewed_installation_credential_for_each_send():

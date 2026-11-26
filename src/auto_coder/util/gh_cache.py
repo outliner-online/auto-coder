@@ -1281,8 +1281,6 @@ class GitHubClient:
             owner, repo = repo_name.split("/")
             client = get_caching_client()
             headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
 
             per_page = min(limit, 100) if limit else 100
             url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&sort=created&direction=asc&per_page={per_page}"
@@ -1293,6 +1291,9 @@ class GitHubClient:
                 if url in visited_urls or len(visited_urls) >= 1000:
                     raise RuntimeError("GitHub open-PR pagination did not terminate safely")
                 visited_urls.add(url)
+                credential = self._credential_for(repo_name, {"pull_requests": "read"})
+                if credential.token:
+                    headers["Authorization"] = f"Bearer {credential.token}"
                 resp = _caching_request(client, "GET", url, headers=headers, path_template=f"/repos/{owner}/{repo}/pulls")
                 resp.raise_for_status()
                 page = resp.json()
@@ -1347,8 +1348,6 @@ class GitHubClient:
         """Read the complete live Issue timeline without the shared cache."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/timeline?per_page=100"
         events: List[Dict[str, Any]] = []
         visited: set[str] = set()
@@ -1356,6 +1355,9 @@ class GitHubClient:
             if url in visited or len(visited) >= TIMELINE_MAX_PAGES:
                 raise RuntimeError("GitHub Issue timeline pagination did not terminate safely")
             visited.add(url)
+            credential = self._credential_for(repo_name, {"issues": "read"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
             response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
             response.raise_for_status()
             page = response.json()
@@ -1426,8 +1428,9 @@ class GitHubClient:
         """
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        if credential.token:
+            headers["Authorization"] = f"Bearer {credential.token}"
 
         response = _strict_request(
             "GET",
@@ -1453,8 +1456,9 @@ class GitHubClient:
         """
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        if credential.token:
+            headers["Authorization"] = f"Bearer {credential.token}"
 
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
         response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
@@ -1471,8 +1475,9 @@ class GitHubClient:
         """Fetch current repair branches and head directly, bypassing every cache."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        if credential.token:
+            headers["Authorization"] = f"Bearer {credential.token}"
 
         response = _strict_request(
             "GET",
@@ -1501,8 +1506,9 @@ class GitHubClient:
         """Fetch the authoritative PR declaration and complete target identity."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        if credential.token:
+            headers["Authorization"] = f"Bearer {credential.token}"
         api_origin = "https://api.github.com"
         response = _strict_request(
             "GET",
@@ -1541,8 +1547,9 @@ class GitHubClient:
             owner, repo = repo_name.split("/")
             client = get_caching_client()
             headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
 
             per_page = min(limit, 100) if limit else 100
             list_url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page={per_page}"
@@ -1557,6 +1564,9 @@ class GitHubClient:
                 try:
                     pr_num = pr_summary["number"] if isinstance(pr_summary, dict) else pr_summary.number
                     detail_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}"
+                    credential = self._credential_for(repo_name, {"pull_requests": "read"})
+                    if credential.token:
+                        headers["Authorization"] = f"Bearer {credential.token}"
                     detail_resp = _caching_request(client, "GET", detail_url, headers=headers, path_template=f"/repos/{owner}/{repo}/pulls/{{id}}")
                     detail_resp.raise_for_status()
                     pr_details = detail_resp.json()
@@ -1650,7 +1660,7 @@ class GitHubClient:
     def _list_open_issue_declarations(self, repo_name: str, limit: int, labels: Optional[List[str]]) -> list[dict]:
         """Read raw paginated Issue bodies through the persistent HTTP cache."""
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
 
         # GitHub's Issues endpoint interleaves pull requests with Issues. Fetch
         # every page before filtering so a page filled by PRs cannot hide later
@@ -3406,7 +3416,7 @@ class GitHubClient:
 
     def _get_pr_reviews(self, repo_name: str, pr_number: int) -> List[Dict[str, Any]]:
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
 
         per_page = 100
         result: List[Dict[str, Any]] = []
@@ -3628,8 +3638,9 @@ class GitHubClient:
 
             client = get_caching_client()
             url = f"https://api.github.com/repos/{owner}/{repo}/issues/{parent_issue_number}/sub_issues"
+            credential = self._credential_for(repo_name, {"issues": "write"})
             headers = {
-                "Authorization": f"bearer {self.token}",
+                "Authorization": f"bearer {credential.token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             }
@@ -3709,7 +3720,8 @@ class GitHubClient:
             client = get_caching_client()
 
             url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/sub_issues"
-            headers = {"Authorization": f"bearer {self.token}", "Accept": "application/vnd.github.v3+json", "X-GitHub-Api-Version": "2022-11-28"}  # As hinted by user docs
+            credential = self._credential_for(repo_name, {"issues": "read"})
+            headers = {"Authorization": f"bearer {credential.token}", "Accept": "application/vnd.github.v3+json", "X-GitHub-Api-Version": "2022-11-28"}  # As hinted by user docs
 
             response = _caching_request(client, "GET", url, headers=headers, path_template=f"/repos/{owner}/{repo}/issues/{{id}}/sub_issues")
 

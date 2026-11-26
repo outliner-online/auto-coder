@@ -3846,6 +3846,8 @@ def _is_dependabot_pr(pr_obj: Any, controller_identity: Optional[Any] = None) ->
         identity_id = getattr(controller_identity, "account_id", None)
         author = pr_obj.get("user", {}) if isinstance(pr_obj, dict) else getattr(pr_obj, "user", {})
         author_id = author.get("id") if isinstance(author, dict) else getattr(author, "id", None)
+        if author_id is None and isinstance(pr_obj, dict):
+            author_id = pr_obj.get("author_id")
         proven_controller = login_lower.casefold() == identity_login and (identity_id is None or author_id == identity_id)
         if proven_controller and _has_local_implementation_origin(pr_obj):
             return False
@@ -9752,8 +9754,12 @@ def _update_jules_pr_body(
             # and has the necessary methods. Otherwise, use get_ghapi_client.
             token = getattr(github_client, "token", None)
 
-            # Prefer get_ghapi_client when a valid string token is provided
-            if isinstance(token, str):
+            if isinstance(github_client, GitHubClient):
+                api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
+                owner, repo_name_split = repo_name.split("/")
+                validate_issue_references(new_body, github_client, repo_name)
+                api.pulls.update(owner, repo_name_split, pr_number, body=new_body)
+            elif isinstance(token, str):
                 api = get_ghapi_client(token)
                 owner, repo_name_split = repo_name.split("/")
                 # Validate issue references in new body
@@ -10030,7 +10036,12 @@ def _link_codex_cloud_pr_to_issue(
         # Update PR body on GitHub
         try:
             token = getattr(github_client, "token", None)
-            if isinstance(token, str):
+            if isinstance(github_client, GitHubClient):
+                api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
+                owner, repo_split = repo_name.split("/")
+                validate_issue_references(new_body, github_client, repo_name)
+                api.pulls.update(owner, repo_split, pr_number, body=new_body)
+            elif isinstance(token, str):
                 api = get_ghapi_client(token)
                 owner, repo_split = repo_name.split("/")
                 validate_issue_references(new_body, github_client, repo_name)
