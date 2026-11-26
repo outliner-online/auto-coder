@@ -24,6 +24,7 @@ from .issue_stage_routing import ImplementationRetryRequest, IssueStageRoutingSt
 from .local_job_handoff import ContinuationState, LocalJobContinuation, LocalJobRecord, LocalJobState, LocalJobStore
 from .local_job_runner import runner_owner_alive, writer_group_settled
 from .logger_config import get_logger
+from .stale_jules_recovery import is_recovery_request_id
 
 logger = get_logger(__name__)
 
@@ -134,8 +135,15 @@ class IssueRetryAdmissionService:
         """Acquire one existing request without performing provider submission."""
         authority: Optional[ImplementationRetryRequest] = None
         try:
+            if origin is IssueRetryOrigin.STALE_JULES:
+                authority = self._routing.retry_request(request_id)
+                return IssueRetryAdmission(
+                    IssueRetryDisposition.DEFERRED,
+                    authority,
+                    "automatic stale-Jules retry authority is retired",
+                )
             if origin is IssueRetryOrigin.MANUAL:
-                blockers = tuple(request for request in self._routing.retry_requests(repository, target_number) if request.status == "pending" and request.request_id != request_id)
+                blockers = tuple(request for request in self._routing.retry_requests(repository, target_number) if request.status == "pending" and request.request_id != request_id and not is_recovery_request_id(request.request_id))
                 if blockers:
                     blocker = blockers[0]
                     return IssueRetryAdmission(
@@ -153,22 +161,6 @@ class IssueRetryAdmissionService:
                         reason = self._retire_stopped_predecessors(predecessors, authority)
                         if reason is not None:
                             return IssueRetryAdmission(IssueRetryDisposition.DEFERRED, authority, reason)
-            else:
-                authority = self._routing.retry_request(request_id)
-                if authority is None:
-                    return IssueRetryAdmission(IssueRetryDisposition.FAILED, None, "durable retry request is missing")
-                if authority.repository != repository or authority.target_number != target_number:
-                    return IssueRetryAdmission(IssueRetryDisposition.FAILED, authority, "durable retry request targets a different Issue")
-                if authority.generation != generation or authority.status == "invalidated":
-                    return IssueRetryAdmission(IssueRetryDisposition.STALE, authority, "retry request no longer matches the current generation")
-                owner = ImplementationOwner("issue", target_number)
-                if self._slots.has_qualifying_implementation_activity(owner):
-                    return IssueRetryAdmission(
-                        IssueRetryDisposition.DEFERRED,
-                        authority,
-                        "stale-Jules predecessor retains implementation activity",
-                    )
-
             assert authority is not None
             acquired = acquire_explicit_retry(
                 self._routing,

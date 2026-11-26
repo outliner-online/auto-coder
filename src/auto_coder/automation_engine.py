@@ -180,7 +180,6 @@ from .specification_validation_lifecycle import (
     configured_provider_identity,
     validation_publication_identity,
 )
-from .stale_jules_recovery import find_pending_stale_jules_recovery
 from .test_log_utils import extract_important_errors
 from .test_result import TestResult
 from .trace_logger import get_trace_logger
@@ -3961,25 +3960,8 @@ class AutomationEngine:
         return execution_id, False
 
     def _pending_stale_jules_recovery(self, repo_name: str, item_number: int, generation: str) -> Optional[ImplementationRetryRequest]:
-        """Return this Issue's pending automatic stale-Jules recovery, if still current.
-
-        A pending recovery captured (by ``_close_stale_jules_pr``, Issue
-        #2286) against a since-superseded Implementation generation is
-        permanently invalidated here rather than silently reused or left to
-        linger (REQ-005); the caller then falls through to ordinary
-        admission with no special retry semantics.
-        """
-        pending = find_pending_stale_jules_recovery(self.issue_stage_routing, repo_name, item_number)
-        if pending is None:
-            return None
-        if pending.generation != generation:
-            self.issue_stage_routing.invalidate_retry_request(
-                pending.request_id,
-                generation,
-                reason="Implementation generation changed since the automatic stale-Jules recovery was captured",
-            )
-            return None
-        return pending
+        """Never turn a historical stale-Jules row into fresh authority."""
+        return None
 
     def _routing_members_are_stable(self, repo_name: str, members: List[Dict[str, Any]]) -> bool:
         """Retain creation-anchored invalidations until every member is stable."""

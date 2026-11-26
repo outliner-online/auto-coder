@@ -27,7 +27,6 @@ from .issue_retry_admission import IssueRetryAdmissionService, IssueRetryDisposi
 from .issue_stage_routing import ImplementationRetryRequest, IssueStageRoutingStore
 from .local_job_handoff import LocalJobStore
 from .logger_config import get_logger
-from .stale_jules_recovery import find_pending_stale_jules_recovery
 
 logger = get_logger(__name__)
 
@@ -124,31 +123,7 @@ class IssueImplementationService:
                     if admission.disposition is IssueRetryDisposition.DEFERRED:
                         result.actions = [f"Deferred - {admission.reason}"]
                 else:
-                    pending = find_pending_stale_jules_recovery(self._routing, request.repository, request.target_number)
-                    if pending is not None and pending.generation != generation:
-                        self._routing.invalidate_retry_request(
-                            pending.request_id,
-                            generation,
-                            reason="Implementation generation changed since the automatic stale-Jules recovery was captured",
-                        )
-                        pending = None
-                    if pending is not None:
-                        admission = IssueRetryAdmissionService(self._routing, self._slots).admit(
-                            request.repository,
-                            request.target_number,
-                            generation,
-                            pending.request_id,
-                            IssueRetryOrigin.STALE_JULES,
-                            github_client=ports.github_client,
-                        )
-                        if admission.disposition is IssueRetryDisposition.FAILED:
-                            result.error = f"Cannot acquire durable Issue retry authority: {admission.reason}"
-                            return result
-                        retry_authority = admission.authority if admission.disposition is IssueRetryDisposition.OWNED else None
-                        execution_id = retry_authority.ownership_reference if retry_authority is not None else None
-                        retry_deferred = admission.disposition in {IssueRetryDisposition.DEFERRED, IssueRetryDisposition.STALE}
-                    else:
-                        execution_id, already_owned = self._start(owner, generation, request, ports.github_client)
+                    execution_id, already_owned = self._start(owner, generation, request, ports.github_client)
 
             if execution_id is None and not already_owned and not request.explicit_only and not retry_deferred:
                 self._slots.reconcile(ports.reconciliation_client)
