@@ -886,7 +886,7 @@ class TestOutcomeMatrixCoverage:
         assert result.success is False
         assert result.in_progress is True
         assert event.facts["availability"] == "known_empty"
-        assert event.outcome == Outcome.SKIPPED.value
+        assert event.outcome == Outcome.DEFERRED.value
 
     @patch("auto_coder.util.github_action.get_ghapi_client", return_value=MagicMock())
     @patch("auto_coder.util.github_action.observe_ci")
