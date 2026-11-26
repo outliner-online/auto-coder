@@ -127,6 +127,10 @@ class TestIsLocalLLMPrDetection:
         }
         assert _is_local_llm_pr(external_pr) is False
 
+    def test_human_issue_named_feature_branch_is_not_local_origin(self):
+        pr = {"number": 1, "body": "Fix bug", "user": {"login": "contributor"}, "head": {"ref": "issue-123-custom"}}
+        assert _is_local_llm_pr(pr) is False
+
     def test_empty_pr_data(self):
         """Empty pr_data returns False."""
         assert _is_local_llm_pr({}) is False

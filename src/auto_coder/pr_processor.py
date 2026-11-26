@@ -3819,7 +3819,7 @@ def _has_local_implementation_origin(pr_obj: Any) -> bool:
     if any(marker in body for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
         return True
     head_branch = pr_obj.get("head_branch") or (pr_obj.get("head") or {}).get("ref") or ""
-    if re.match(r"^issue-\d+(?:[_/]attempt-\d+)?(?:-[a-z0-9-]+)?$", str(head_branch)):
+    if re.match(r"^issue-\d+(?:[_/]attempt-\d+)?$", str(head_branch)):
         return True
     return bool(re.search(r"\bThis PR addresses issue #\d+", body) or "Auto-Coder: Address issue #" in body)
 
