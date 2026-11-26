@@ -1,20 +1,24 @@
-# One-way Codex authentication publication
+# Retired Codex authentication publication
 
-An optional `[github_secrets]` table in `config.toml` publishes the exact local
-Codex login file (`$CODEX_HOME/auth.json`, or `~/.codex/auth.json`) to a
-repository Actions secret. Publication is disabled by default. Enabling it
-requires a dedicated `token` and explicit `repository = "owner/name"`; the
-optional `secret_name` defaults to `CODEX_AUTH_JSON`. This credential is used
-only by the Actions Secrets publisher and is never shared with ordinary GitHub
-Issue, PR, repository, or workflow operations. Invalid or unavailable local
-JSON is never published, remote secret values are never read, and publication
-failures do not stop normal processing. A later run republishes the complete
-current file, allowing refreshed local login state to replace stale CI state.
+Auto-Coder no longer publishes local Codex login state to repository Actions
+secrets during `process-issues` startup. The `[github_secrets]` configuration
+table, dedicated publisher, and `--skip-codex-auth-secret-sync` option have
+been removed. Existing configuration tables no longer trigger publication.
 
-```toml
-[github_secrets]
-enabled = true
-token = "a-dedicated-secrets-write-token"
-repository = "owner/name"
-secret_name = "CODEX_AUTH_JSON"
-```
+Before upgrading or restarting an externally configured launcher with this
+version, remove `--skip-codex-auth-secret-sync` from its command line. The
+option is no longer accepted. Remove the unused `[github_secrets]` table and
+its dedicated publication credential from configuration when updating the
+deployment. Updating source does not alter a running process or its launch
+configuration.
+
+Selective prompt evaluations use an independently configured OpenAI API key;
+see [Selective Promptfoo prompt-regression CI](selective-promptfoo-prompt-regression-ci.md).
+They no longer consume the `CODEX_AUTH_JSON` Actions secret. Operators may
+delete that secret after confirming no other repository workflows use it.
+The retirement does not delete or modify a developer's Codex login file;
+ordinary Codex clients retain ownership of their local authentication.
+
+This retirement is observability-neutral for the dashboard: startup publication
+had no dashboard trace producer or view contract. The shared GitHub request
+observation boundary remains in place for its active consumers.

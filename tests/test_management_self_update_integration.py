@@ -257,7 +257,7 @@ def _snapshot_source(root: Path, revision: str) -> str:
     if not source.exists():
         shutil.copytree(ROOT / "src" / "auto_coder", source, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "build_provenance.json"))
         (source / "cli.py").write_text(_CHILD_ENTRYPOINT, encoding="utf-8")
-        dependencies = ["requests", "pydantic", "pydantic-settings", "click", "python-dotenv", "GitPython", "pyyaml", "loguru", "httpx", "hishel", "ghapi", "fastcore", "PyGithub", "PyJWT", "PyNaCl", "fastapi", "uvicorn", "firebase-admin", "mcp", "pytest", "tomli-w"]
+        dependencies = ["requests", "pydantic", "pydantic-settings", "click", "python-dotenv", "GitPython", "pyyaml", "loguru", "httpx", "hishel", "ghapi", "fastcore", "PyGithub", "PyJWT", "fastapi", "uvicorn", "firebase-admin", "mcp", "pytest", "tomli-w"]
         requirements = [f"{name}=={importlib.metadata.version(name)}" for name in dependencies]
         (root / "pyproject.toml").write_text(
             "[build-system]\nrequires=['setuptools>=68','wheel']\nbuild-backend='setuptools.build_meta'\n"

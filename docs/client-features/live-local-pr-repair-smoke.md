@@ -30,9 +30,8 @@ Add `<!-- auto-coder:local-llm -->` to each fixture PR body. This is the
 supported local ownership marker used by ordinary CI and conflict repair; a
 branch prefix alone is not attribution. The harness blocks before processing
 when the marker (or another supported local Auto-Coder identity) is absent.
-Both harness invocations explicitly disable optional Codex-auth secret
-synchronization, preventing an unrelated configured secret publisher from
-mutating another repository.
+Codex-auth secret publication has been retired from production startup, so
+neither harness invocation needs a secret-synchronization bypass option.
 
 ## CI-failure flow
 
