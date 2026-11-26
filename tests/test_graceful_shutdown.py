@@ -244,6 +244,16 @@ def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(mon
     assert recovered.generation == 2
 
 
+def test_post_validation_handoff_rejects_closed_admission(monkeypatch):
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    routing = MagicMock()
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+    assert engine.request_graceful_shutdown("SIGTERM")
+
+    assert engine._route_issue_stages_after_validation_if_admitted("owner/repo", 24, {"number": 24}) is False
+    routing.assert_not_called()
+
+
 def test_parent_validation_routes_normally_while_admission_is_open(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
     engine = AutomationEngine(MagicMock(), AutomationConfig())
