@@ -15,6 +15,7 @@ from .ci_observation import (
     WorkflowObservation,
 )
 from .github_ci_observer import ci_observation_merge_authority, ci_read_phase, observe_ci
+from .util.gh_cache import get_ghapi_client
 
 if TYPE_CHECKING:
     from .ci_cancellation_recovery import CancellationEvidence, RecoveryPolicy
@@ -165,8 +166,12 @@ def current_ci_failure_authority(
     stack = ExitStack()
     try:
         permissions = {"actions": "read", "checks": "read", "pull_requests": "read"}
-        api = github_client.api_for(repository, required_permissions=permissions, subsystem="github-ci-observer", extra_headers={"Cache-Control": "no-cache"})
-        authority_key = github_client.authority_key_for(repository, required_permissions=permissions)
+        if callable(getattr(type(github_client), "api_for", None)):
+            api = github_client.api_for(repository, required_permissions=permissions, subsystem="github-ci-observer", extra_headers={"Cache-Control": "no-cache"})
+            authority_key = github_client.authority_key_for(repository, required_permissions=permissions)
+        else:
+            api = get_ghapi_client(github_client.token, subsystem="github-ci-observer", extra_headers={"Cache-Control": "no-cache"})
+            authority_key = f"legacy:{repository}:{tuple(sorted(permissions.items()))}"
         stack.enter_context(ci_read_phase("ci-repair-final-admission"))
         snapshot = observe_ci(api, authority_key, repository, pr_number, expected_head)
         original_snapshot = snapshot

@@ -10096,7 +10096,10 @@ class AutomationEngine:
                 # Check if this commit has associated GitHub Actions runs
                 try:
                     # Use GhApi to list workflow runs for this commit
-                    api = self.github.api_for(repo_name, required_permissions={"actions": "read"})
+                    if callable(getattr(type(self.github), "api_for", None)):
+                        api = self.github.api_for(repo_name, required_permissions={"actions": "read"})
+                    else:
+                        api = get_ghapi_client(self.github.token)
                     owner, repo = repo_name.split("/")
 
                     runs_resp = api.actions.list_workflow_runs_for_repo(owner, repo, head_sha=commit_hash, per_page=1)

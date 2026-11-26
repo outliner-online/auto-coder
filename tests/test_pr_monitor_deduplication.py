@@ -8,6 +8,7 @@ from src.auto_coder.dispatch_claim_store import DispatchClaimStore, DispatchOutc
 from src.auto_coder.entity_invalidation import DurableInvalidationQueue
 from src.auto_coder.github_controller_auth import ControllerIdentity
 from src.auto_coder.pr_processor import _handle_pr_merge
+from src.auto_coder.pr_progress_policy import CIEvidenceState, ProgressRoute, PRProgressDecision
 from src.auto_coder.util.github_action import WorkflowDispatchResult
 from tests.ci_observation_fakes import authoritative_ci_status
 
@@ -35,3 +36,30 @@ def test_dispatch_creates_restart_safe_watch_and_claim():
         assert any("No current CI observations are available for PR #123" in action for action in actions)
         reopened = DurableInvalidationQueue(root / "invalidations.db")
         assert reopened.seconds_until_next_ci("owner/repo") == 0
+
+
+def test_dispatch_admission_forwards_the_injected_controller_client():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        claims = DispatchClaimStore(root / "claims.db")
+        controller = MagicMock(name="controller-client")
+        controller.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
+        controller.get_pr_review_threads_strict.return_value = []
+        pr = {"number": 124, "head": {"sha": "controller-head", "ref": "feature"}, "labels": []}
+        decisions = [
+            PRProgressDecision(ProgressRoute.ADMIT_CANDIDATE, "mergeable", CIEvidenceState.MISSING),
+            PRProgressDecision(ProgressRoute.DISPATCH_CI, "no CI", CIEvidenceState.MISSING),
+        ]
+        with (
+            patch.dict(os.environ, {"AUTO_CODER_INVALIDATION_DB": str(root / "invalidations.db")}),
+            patch("src.auto_coder.pr_processor.get_dispatch_claim_store", return_value=claims),
+            patch("src.auto_coder.pr_processor.select_pr_progress", side_effect=decisions),
+            patch("src.auto_coder.pr_processor._check_github_actions_status", side_effect=authoritative_ci_status(success=True, ids=[])),
+            patch("src.auto_coder.pr_processor.get_detailed_checks_from_history"),
+            patch("src.auto_coder.pr_processor.LabelManager"),
+            patch("auto_coder.util.github_action.trigger_workflow_dispatch", return_value=WorkflowDispatchResult(outcome=DispatchOutcome.ACCEPTED)) as dispatch,
+        ):
+            actions = _handle_pr_merge(controller, "owner/repo", pr, AutomationConfig(), {})
+
+        dispatch.assert_called_once_with("owner/repo", "ci.yml", "feature", controller)
+        assert any("Triggered ci.yml" in action for action in actions)

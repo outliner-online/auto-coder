@@ -9034,7 +9034,7 @@ def _handle_pr_merge(
                     actions.append(f"Blocked triggering {workflow_id} for PR #{pr_number}: durable CI watch unavailable")
                     _record_pr_stage(pr_number, "pr.manual-ci-dispatch", f"pr#{pr_number} manual CI dispatch", Outcome.DEFERRED, {"workflow": workflow_id, "reason": "invalid CI watch identity"})
                     return actions
-                dispatch_result = trigger_workflow_dispatch(repo_name, workflow_id, head_branch)
+                dispatch_result = trigger_workflow_dispatch(repo_name, workflow_id, head_branch, github_client)
                 recorded = claim_store.record_outcome(dispatch_identity, dispatch_result.outcome, holder_id=claim.holder_id)
                 if not recorded:
                     logger.error(f"Failed to durably record dispatch outcome {dispatch_result.outcome.value} for {dispatch_identity.key()}; claim remains suppressing")
