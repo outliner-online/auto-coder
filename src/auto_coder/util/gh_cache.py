@@ -2457,11 +2457,22 @@ class GitHubClient:
             if not isinstance(cache, ControllerHistoryCache):
                 cache = ControllerHistoryCache()
                 self._controller_history_cache = cache
-            selected_token = self.token
-            current = controller_author_set_for_client(_ControllerCredentialSnapshot(self, selected_token, cache), repo_name)
+            if self._auth_provider is not None:
+                path = request.url.path
+                permissions = {"issues": "write"} if "/issues/" in path else {"pull_requests": "write"}
+                credential = self._credential_for(repo_name, permissions)
+                selected_token = credential.token
+                proven_identity = self._auth_provider.identity_for(repo_name)
+            else:
+                selected_token = self.token
+                proven_identity = None
+            current = controller_author_set_for_client(
+                _ControllerCredentialSnapshot(self, selected_token, cache, proven_identity),
+                repo_name,
+            )
             if current.fingerprint != author_set.fingerprint:
                 raise ControllerIdentityHistoryError("Controller identity or history changed before dispatch")
-            if self.token != selected_token:
+            if self._auth_provider is None and self.token != selected_token:
                 raise ControllerIdentityHistoryError("Controller credential selection changed during authority proof")
             # A private successful-resolution copy makes final revalidation
             # local-only, without taking a peer's lock while holding admission.
@@ -2476,12 +2487,12 @@ class GitHubClient:
                 raise ControllerIdentityHistoryError("Controller operation target changed before dispatch")
             if prepared is None:
                 raise ControllerIdentityHistoryError("Controller operation credential proof is unavailable")
-            if self.token != prepared.token:
+            if self._auth_provider is None and self.token != prepared.token:
                 raise GitHubMutationAuthorityRetry("Controller credential changed while waiting for dispatch")
             current = controller_author_set_for_client(prepared, repo_name)
             if current.fingerprint != author_set.fingerprint:
                 raise ControllerIdentityHistoryError("Controller identity or history changed before dispatch")
-            if self.token != prepared.token:
+            if self._auth_provider is None and self.token != prepared.token:
                 raise GitHubMutationAuthorityRetry("Controller credential changed during dispatch validation")
             request.headers["Authorization"] = f"Bearer {prepared.token}"
 
@@ -2694,7 +2705,7 @@ class GitHubClient:
         recorded explanation (fail-closed for automatic thread resolution).
         """
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "write"})
         api.pulls.create_reply_for_review_comment(owner, repo, pr_number, root_comment_database_id, body=body)
 
     def update_review_thread_comment(self, repo_name: str, comment_database_id: int, body: str) -> None:
@@ -2702,12 +2713,12 @@ class GitHubClient:
         if not isinstance(comment_database_id, int) or isinstance(comment_database_id, bool) or comment_database_id <= 0:
             raise ValueError("A positive observed review-comment identity is required")
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "write"})
         response = api.pulls.update_review_comment(owner, repo, comment_database_id, body=body)
         if not isinstance(response, dict) or not isinstance(response.get("id"), int) or isinstance(response.get("id"), bool) or response.get("id") != comment_database_id or response.get("body") != body:
             raise RuntimeError(f"GitHub did not confirm the exact update of review comment {comment_database_id}")
 
-    def resolve_review_thread(self, thread_id: str) -> None:
+    def resolve_review_thread(self, thread_id: str, *, repo_name: str | None = None) -> None:
         """Resolve a GitHub PR review thread via the ``resolveReviewThread`` mutation.
 
         Raises on any failure, including a response that does not confirm
@@ -2724,12 +2735,17 @@ class GitHubClient:
               }
             }
         """
-        response = self.graphql_query(mutation, {"threadId": thread_id})
+        response = self.graphql_query(
+            mutation,
+            {"threadId": thread_id},
+            repo_name=repo_name or self._auth_repository,
+            required_permissions={"pull_requests": "write"},
+        )
         thread = (((response or {}).get("data") or {}).get("resolveReviewThread") or {}).get("thread") or {}
         if thread.get("id") != thread_id or thread.get("isResolved") is not True:
             raise RuntimeError(f"GitHub did not confirm review thread {thread_id} as resolved")
 
-    def unresolve_review_thread(self, thread_id: str) -> None:
+    def unresolve_review_thread(self, thread_id: str, *, repo_name: str | None = None) -> None:
         """Revert a GitHub PR review thread to unresolved via ``unresolveReviewThread``.
 
         Used to undo a resolution performed against a PR head that turned out
@@ -2747,7 +2763,12 @@ class GitHubClient:
               }
             }
         """
-        response = self.graphql_query(mutation, {"threadId": thread_id})
+        response = self.graphql_query(
+            mutation,
+            {"threadId": thread_id},
+            repo_name=repo_name or self._auth_repository,
+            required_permissions={"pull_requests": "write"},
+        )
         thread = (((response or {}).get("data") or {}).get("unresolveReviewThread") or {}).get("thread") or {}
         # Fail closed on an ambiguous confirmation: a missing/empty payload or
         # a payload missing "isResolved" must not be mistaken for success just
@@ -3261,13 +3282,14 @@ class GitHubClient:
             # Use low-level client to get raw text, bypassing GhApi's json assumption
             client = get_caching_client()
             url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
-            headers = {"Authorization": f"bearer {self.token}", "Accept": "application/vnd.github.v3.diff", "X-GitHub-Api-Version": "2022-11-28"}
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            headers = {"Authorization": f"bearer {credential.token}", "Accept": "application/vnd.github.v3.diff", "X-GitHub-Api-Version": "2022-11-28"}
             response = _caching_request(client, "GET", url, headers=headers, path_template=f"/repos/{owner}/{repo}/pulls/{{id}}")
             response.raise_for_status()
             return response.text
         except Exception as e:
             logger.error(f"Failed to get PR diff for #{pr_number}: {e}")
-            return ""
+            raise
 
     @retry_with_backoff()
     def get_pr_changed_file_count(self, repo_name: str, pr_number: int) -> int:

@@ -7,6 +7,7 @@ from auto_coder.automation_config import AutomationConfig
 from auto_coder.github_controller_auth import ControllerCredential, ControllerIdentity
 from auto_coder.pr_processor import (
     _is_dependabot_pr,
+    _is_empty_pr,
     _is_local_llm_pr,
     _start_mergeability_remediation,
     evaluate_dependency_bot_admission,
@@ -168,6 +169,76 @@ def test_issue_comments_use_controller_credentials_at_each_page():
         "Bearer installation-one",
         "Bearer installation-two",
     ]
+
+
+def test_pr_diff_uses_repository_installation_credential():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7")
+    transport.request.return_value = httpx.Response(200, text="diff --git a/a b/a", request=request)
+
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        assert client.get_pr_diff("owner/repo", 7) == "diff --git a/a b/a"
+
+    sent = transport.request.call_args
+    assert sent.kwargs["headers"]["Authorization"] == "bearer installation-one"
+    assert sent.kwargs["headers"]["Accept"] == "application/vnd.github.v3.diff"
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"})]
+
+
+def test_empty_pr_fallback_uses_app_diff_and_unavailable_diff_is_not_empty():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7")
+    transport.request.side_effect = [
+        httpx.Response(200, text="diff --git a/a b/a\n+content", request=request),
+        RuntimeError("installation read unavailable"),
+    ]
+    pr_data = {"number": 7}
+
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        assert _is_empty_pr(pr_data, repo_name="owner/repo", github_client=client) is False
+        assert _is_empty_pr(pr_data, repo_name="owner/repo", github_client=client) is False
+
+    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == [
+        "bearer installation-one",
+        "bearer installation-two",
+    ]
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"})] * 2
+
+
+def test_review_thread_mutations_use_repository_installation_credentials():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+
+    def respond(*args, **kwargs):
+        method = kwargs["method"] if "method" in kwargs else args[0]
+        url = kwargs["url"] if "url" in kwargs else args[1]
+        request = httpx.Request(method, url)
+        if url.endswith("/graphql"):
+            operation = "unresolveReviewThread" if "unresolveReviewThread" in kwargs["json"]["query"] else "resolveReviewThread"
+            body = {"data": {operation: {"thread": {"id": "thread-1", "isResolved": operation == "resolveReviewThread"}}}}
+        else:
+            body = {"id": 22, "body": kwargs["json"]["body"]}
+        return httpx.Response(200, json=body, request=request)
+
+    transport.request.side_effect = respond
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        client.reply_to_review_thread("owner/repo", 7, 11, "reply")
+        client.update_review_thread_comment("owner/repo", 22, "updated")
+        client.resolve_review_thread("thread-1")
+        client.unresolve_review_thread("thread-1")
+
+    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == [
+        "Bearer installation-one",
+        "Bearer installation-two",
+        "bearer installation-two",
+        "bearer installation-two",
+    ]
+    assert provider.requests == [("owner/repo", {"pull_requests": "write"})] * 4
 
 
 def test_issue_authority_read_renews_repository_credential_on_each_page():
