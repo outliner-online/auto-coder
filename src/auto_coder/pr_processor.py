@@ -4541,14 +4541,14 @@ def _close_empty_pr(
         logger.info(f"PR #{pr_number} has zero effective diff against base branch. Closing it.")
 
         # Resolve the issue(s) that this PR was created for
-        issue_numbers = _resolve_pr_issue_numbers(
-            repo_name,
-            pr_data,
-            github_client,
-            include_session_history=not _is_jules_pr(pr_data),
-        )
+        # Older daemons wrote session-derived links into Jules PR bodies with
+        # no provenance marker. Those links cannot authorize a new attempt.
+        historical_jules = _is_jules_pr(pr_data)
+        issue_numbers = [] if historical_jules else _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
 
-        close_comment = f"Auto-Coder: Closing PR #{pr_number} because it has no effective diff against the base branch. " "The linked issue(s) will be retried with an incremented attempt count."
+        close_comment = f"Auto-Coder: Closing PR #{pr_number} because it has no effective diff against the base branch."
+        if issue_numbers:
+            close_comment += " Eligible linked issue(s) will be retried with an incremented attempt count."
         client = github_client or GitHubClient.get_instance()
         client.close_pr(repo_name, pr_number, close_comment)
         _remove_reviewer_sessions_for_closed_pr(repo_name, pr_number)
