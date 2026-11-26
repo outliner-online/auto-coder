@@ -1020,11 +1020,12 @@ class TestOutcomeMatrixCoverage:
         with get_trace_collector().start_execution("owner/repo", "pr", 3001, origin="worker"):
             actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
 
-        assert any("Jules CI repair was attempted" in a for a in actions)
+        assert any("Jules CI repair was not sent" in a for a in actions)
+        mock_send_feedback.assert_not_called()
         snapshot = get_trace_collector().get_snapshot(item_type="pr", item_number=3001)
         repair_events = [e for e in snapshot.events if e.stage_id == "pr.repair-delegation"]
         assert len(repair_events) == 1
-        assert repair_events[0].outcome == Outcome.ACCEPTED_HANDOFF.value
+        assert repair_events[0].outcome == Outcome.SKIPPED.value
         assert repair_events[0].facts["backend"] == "jules"
         # Accepting the continuation is not proof of a repair, passing CI, or
         # a merge (REQ-006 of Issue #1946, REQ-007 of Issue #1948).
@@ -1068,12 +1069,12 @@ class TestOutcomeMatrixCoverage:
                 actions = _handle_pr_merge(github, "owner/repo", pr_data, config, {})
 
         assert actions.repair_result is not None
-        assert actions.repair_result.disposition is RepairDisposition.DEFERRED
+        assert actions.repair_result.disposition is RepairDisposition.REFUSED
         assert actions.repair_result.attempt_started is False
         provider.assert_not_called()
         snapshot = get_trace_collector().get_snapshot(item_type="pr", item_number=3002)
         event = next(event for event in snapshot.events if event.stage_id == "pr.repair-delegation")
-        assert event.outcome == Outcome.DEFERRED.value
+        assert event.outcome == Outcome.SKIPPED.value
         assert event.facts["attempt_started"] is False
         diagram = _mounted_detail(mock_ui, "pr", 3002)
         _assert_required_stage_visible(diagram, "repair delegation")

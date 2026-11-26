@@ -260,7 +260,7 @@ class TestHandlePrMergeJulesPR:
     @patch("src.auto_coder.pr_processor.get_detailed_checks_from_history")
     @patch("src.auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress")
     @patch("src.auto_coder.pr_processor._get_mergeable_state")
-    def test_fresh_jules_pr_is_delegated_to_jules_regardless_of_failure_count(
+    def test_fresh_historical_jules_pr_never_sends_ci_feedback(
         self,
         mock_mergeable,
         mock_check_in_progress,
@@ -288,23 +288,21 @@ class TestHandlePrMergeJulesPR:
         mock_detailed_checks.return_value = MagicMock(spec=DetailedChecksResult, success=False, failed_checks=[{"name": "test"}])
         mock_run_command.return_value = CommandResult(success=True, stdout="main", stderr="", returncode=0)
 
-        # Many previous failure comments used to trigger the removed local fallback
-        mock_send_feedback.return_value = PRRepairResult(
-            RepairDisposition.ACCEPTED_OR_UNCERTAIN,
-            ("Jules provider was called",),
-            attempt_started=True,
-        )
+        # Historical comments and failure counts cannot revive provider authority.
         target_message = "🤖 Auto-Coder: CI checks failed. I've sent the error logs to the Jules session and requested a fix. Please wait for the updates."
         old_time = (datetime.now(timezone.utc) - timedelta(hours=240)).isoformat()
         github_client.get_pr_comments.return_value = [{"body": target_message, "created_at": old_time}] * 20
 
         actions = _handle_pr_merge(github_client, "owner/repo", pr_data, config, {})
 
-        mock_send_feedback.assert_called_once()
+        mock_send_feedback.assert_not_called()
         mock_fix_issues.assert_not_called()
         mock_checkout.assert_not_called()
         github_client.close_pr.assert_not_called()
-        assert "Jules CI repair was attempted for PR #4643; awaiting a provider update without local fixes" in actions[-1]
+        assert "Jules CI repair was not sent for PR #4643; local fixes remain disabled" in actions
+        assert actions.repair_result is not None
+        assert actions.repair_result.disposition is RepairDisposition.REFUSED
+        assert actions.repair_attempt_started is False
 
 
 class TestStaleJulesPRWithAutoCoderLabel:

@@ -75,7 +75,7 @@ def test_perform_base_merge_closes_jules_pr_on_degrade_with_linked_issues():
         patch("src.auto_coder.conflict_resolver.scan_conflict_markers") as mock_scan,
         patch("src.auto_coder.conflict_resolver.run_llm_noedit_prompt") as mock_llm,
         patch("src.auto_coder.conflict_resolver.create_high_score_backend_manager") as mock_create_backend,
-        patch("src.auto_coder.conflict_resolver._archive_jules_session") as mock_archive,
+        patch("src.auto_coder.jules_client.JulesClient", side_effect=AssertionError("historical Jules session accessed")),
         patch("src.auto_coder.conflict_resolver.check_mergeability_with_llm") as mock_check_mergeability,
     ):
         mock_check_mergeability.return_value = False
@@ -116,7 +116,6 @@ def test_perform_base_merge_closes_jules_pr_on_degrade_with_linked_issues():
 
         assert ok is False
         mock_client.close_pr.assert_called_once()
-        mock_archive.assert_called_once()
 
 
 def test_perform_base_merge_enriches_pr_data_when_missing_fields():
@@ -165,17 +164,14 @@ def test_perform_base_merge_enriches_pr_data_when_missing_fields():
         mock_client.get_pr_details.assert_called()
 
 
-def test_perform_base_merge_closes_jules_pr_recreates_session_on_degrade():
-    """Test that Jules PR is closed on degradation and its session is recreated."""
-    from src.auto_coder.issue_dispatch import DispatchOutcome, DispatchResult, IssueAttemptIdentity
-    from src.auto_coder.issue_processor import IssueDispatchExecution
-
+def test_perform_base_merge_closes_jules_pr_without_replaying_historical_session():
+    """Conflict rejection closes the PR without using Jules history as authority."""
     config = AutomationConfig()
     with (
         patch("src.auto_coder.conflict_resolver.cmd") as mock_cmd,
         patch("src.auto_coder.conflict_resolver.GitHubClient") as mock_gh_client_class,
         patch("src.auto_coder.conflict_resolver.scan_conflict_markers") as mock_scan,
-        patch("src.auto_coder.conflict_resolver._archive_jules_session") as mock_archive,
+        patch("src.auto_coder.jules_client.JulesClient", side_effect=AssertionError("historical Jules session accessed")),
         patch("src.auto_coder.conflict_resolver._close_pr") as mock_close,
         patch("src.auto_coder.conflict_resolver.check_mergeability_with_llm") as mock_check_mergeability,
         patch("src.auto_coder.conflict_resolver._extract_session_id_from_pr_body") as mock_extract_session_id,
@@ -222,16 +218,7 @@ def test_perform_base_merge_closes_jules_pr_recreates_session_on_degrade():
 
         dispatch_order = []
         mock_increment_attempt.side_effect = lambda *_args: dispatch_order.append("increment") or 2
-        mock_process_issue.side_effect = lambda *_args, **_kwargs: dispatch_order.append("dispatch") or IssueDispatchExecution(
-            DispatchResult(
-                IssueAttemptIdentity("test", "repo", 123, "2"),
-                DispatchOutcome.REMOTE_ACCEPTED,
-                "jules",
-                "jules",
-                "sessions/replacement",
-            ),
-            ["dispatched"],
-        )
+        mock_process_issue.side_effect = lambda *_args, **_kwargs: dispatch_order.append("dispatch")
 
         # Sequence: reset, clean, abort, fetch pr, checkout, fetch base, rev-parse, merge (fails)
         mock_cmd.run_command.side_effect = [
@@ -259,10 +246,11 @@ def test_perform_base_merge_closes_jules_pr_recreates_session_on_degrade():
 
         assert ok is False
         mock_close.assert_called_once_with("test/repo", 1253)
-        mock_archive.assert_called_once_with("test/repo", 1253, "Session ID: session_xyz")
-        mock_increment_attempt.assert_called_once_with("test/repo", 123)
-        mock_process_issue.assert_called_once()
-        assert dispatch_order == ["increment", "dispatch"]
+        mock_extract_session_id.assert_not_called()
+        mock_cloud_manager_class.assert_not_called()
+        mock_increment_attempt.assert_not_called()
+        mock_process_issue.assert_not_called()
+        assert dispatch_order == []
         mock_client.try_add_labels.assert_not_called()
         mock_client.remove_labels.assert_not_called()
 

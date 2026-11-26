@@ -626,7 +626,7 @@ class TestPRProcessorMerge:
             # Verify merge was called for the expected head
             mock_api.pulls.merge.assert_called_once_with("owner", "repo", 123, merge_method="squash", sha=head_sha)
             mock_close.assert_called_once_with("owner/repo", 123, mock_instance)
-            mock_archive.assert_called_once_with("owner/repo", 123)
+            mock_archive.assert_not_called()
 
     @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")
     @patch("auto_coder.util.gh_cache.get_ghapi_client")
@@ -789,6 +789,74 @@ class TestPRProcessorMerge:
         assert disposition.outcome is PRProcessingOutcome.FAILED
         assert disposition.reason == "Definitive merge rejection"
         mock_resolve.assert_not_called()
+
+    @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")
+    @patch("auto_coder.util.gh_cache.get_ghapi_client")
+    @patch("src.auto_coder.pr_processor.GitHubClient")
+    @patch("src.auto_coder.pr_processor._get_allowed_merge_methods", return_value=[])
+    def test_definitive_rejection_never_messages_historical_jules_session(
+        self,
+        _allowed_methods,
+        github_client_class,
+        get_ghapi_client,
+        get_ghapi_client_adapter,
+        tmp_path,
+    ):
+        """The production merge sender leaves a conflicted Jules session inert."""
+        from src.auto_coder.automation_config import AutomationConfig
+        from src.auto_coder.pr_processor import _merge_pr
+        from src.auto_coder.util.github_request_outcome import (
+            DeliveryCertainty,
+            GitHubApiOutcome,
+            GitHubRequestContext,
+            GitHubRequestError,
+            GitHubRequestOutcome,
+            GitHubResponseMetadata,
+            RequestProvenance,
+        )
+
+        github_client_class.get_instance.return_value.token = "token"
+        api = MagicMock()
+        get_ghapi_client.return_value = api
+        get_ghapi_client_adapter.return_value = api
+        head_sha = "e" * 40
+        api.pulls.get.return_value = {
+            "number": 127,
+            "user": {"login": "google-labs-jules"},
+            "body": "https://jules.google.com/session/historical-conflict",
+            "head": {"sha": head_sha},
+            "mergeable": False,
+        }
+        context = GitHubRequestContext(
+            operation_id="op",
+            attempt_id="attempt",
+            subsystem="test",
+            api_origin="https://api.github.com",
+            method="PUT",
+            kind="mutation",
+            endpoint_template="/pulls/{n}/merge",
+        )
+        outcome = GitHubRequestOutcome(
+            context=context,
+            status=405,
+            classification=GitHubApiOutcome.REMOTE_ERROR,
+            provenance=RequestProvenance.NETWORK,
+            delivery=DeliveryCertainty.HTTP_RESPONSE_RECEIVED,
+            metadata=GitHubResponseMetadata(),
+            elapsed_ms=1.0,
+            message="Method Not Allowed",
+        )
+        api.pulls.merge.side_effect = GitHubRequestError(outcome)
+
+        with (
+            self._patch_merge_operation_store(tmp_path),
+            patch("src.auto_coder.pr_processor.get_speculative_jules_lifecycle", return_value=None),
+            patch("src.auto_coder.jules_client.JulesClient", side_effect=AssertionError("historical Jules session accessed")),
+            patch("src.auto_coder.pr_processor._extract_session_id_from_pr_body", side_effect=AssertionError("historical session binding read")),
+        ):
+            assert _merge_pr("owner/repo", 127, {}, AutomationConfig()) is False
+
+        api.pulls.merge.assert_called_once()
 
 
 class TestUpdateWithBaseBranchDependabot:

@@ -1124,7 +1124,7 @@ def test_terminal_ci_failure_retains_cloud_owner_without_local_repair(tmp_path, 
             RepairDisposition.DEFERRED,
             "temporary provider wait",
         ),
-        ("jules", None, RepairDisposition.ACCEPTED_OR_UNCERTAIN, "Jules producer does not expose delivery certainty"),
+        ("jules", None, RepairDisposition.REFUSED, "Jules CI repair is retired; historical sessions cannot authorize provider work"),
     ],
 )
 def test_public_processing_preserves_cloud_ci_executor_result(
@@ -1396,12 +1396,12 @@ def test_terminal_ci_jules_owner_enters_typed_dispatch_once(tmp_path, monkeypatc
         unsafe.return_value = SimpleNamespace(metadata_error=None, actions=[], authoritative_pr_data=pr_data, closed=False)
         actions = _handle_pr_merge(github, REPOSITORY, pr_data, config, {})
 
-    producer.assert_called_once()
-    assert len(requests) == 1
-    assert requests[0].origin is RepairOrigin.JULES
-    assert requests[0].owner_identity == "session_jules_ci"
-    assert requests[0].kind.value == "ci_failure"
-    assert "existing Jules helper sent feedback" in actions
+    producer.assert_not_called()
+    assert requests == []
+    assert actions.repair_result is not None
+    assert actions.repair_result.disposition is RepairDisposition.REFUSED
+    assert actions.repair_attempt_started is False
+    assert "Jules CI repair was not sent" in " ".join(actions)
 
 
 def _retire_public_jules_session(repo_name: str, session_id: str) -> None:
@@ -1436,16 +1436,7 @@ def _retire_public_jules_session(repo_name: str, session_id: str) -> None:
 @pytest.mark.parametrize("force", [False, True], ids=["ordinary", "explicit-force"])
 @pytest.mark.parametrize(
     ("scenario", "expected_disposition", "expected_attempt", "expected_outcome"),
-    [
-        ("changed-head", RepairDisposition.DEFERRED, False, Outcome.DEFERRED),
-        ("changed-head-wording", RepairDisposition.DEFERRED, False, Outcome.DEFERRED),
-        ("draining", RepairDisposition.DEFERRED, False, Outcome.DEFERRED),
-        ("retired", RepairDisposition.DEFERRED, False, Outcome.DEFERRED),
-        ("preparation-failed", RepairDisposition.FAILED, False, Outcome.FAILED),
-        ("sent", RepairDisposition.ACCEPTED_OR_UNCERTAIN, True, Outcome.ACCEPTED_HANDOFF),
-        ("response-unknown", RepairDisposition.ACCEPTED_OR_UNCERTAIN, True, Outcome.ACCEPTED_HANDOFF),
-        ("notice-failed", RepairDisposition.ACCEPTED_OR_UNCERTAIN, True, Outcome.ACCEPTED_HANDOFF),
-    ],
+    [("retired", RepairDisposition.REFUSED, False, Outcome.SKIPPED)],
 )
 def test_public_jules_ci_repair_retains_actual_send_boundary(tmp_path, monkeypatch, force, scenario, expected_disposition, expected_attempt, expected_outcome):
     """Issue #2771: public PR routes preserve real no-send and attempted-send evidence."""
@@ -1547,7 +1538,7 @@ def test_public_jules_ci_repair_retains_actual_send_boundary(tmp_path, monkeypat
     if scenario == "draining":
         assert "graceful shutdown" in result.repair_result.reason
     if scenario == "retired":
-        assert result.repair_result.reason == "outbound Jules admission refused"
+        assert result.repair_result.reason == "Jules CI repair is retired; historical sessions cannot authorize provider work"
     if scenario == "notice-failed":
         assert any("Failed to post comment" in action for action in result.repair_result.actions)
     if scenario == "response-unknown":

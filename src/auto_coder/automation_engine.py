@@ -125,8 +125,6 @@ from .issue_stage_routing import (
     review_classification,
     standalone_review_generation,
 )
-from .jules_client import invalidate_jules_sessions_cache
-from .jules_engine import check_and_resume_or_archive_sessions, check_and_start_recurrent_jules_tasks
 from .label_manager import LabelManager
 from .llm_backend_config import active_repo_context, get_pr_review_allowlist_from_config, get_review_adjudicator_allowlist_from_config
 from .local_job_handoff import LocalJobClaim, LocalJobKind, LocalJobRecord, LocalJobStore, LocalJobStoreUnavailable
@@ -244,7 +242,6 @@ def _reconciliation_request_error(error: BaseException) -> GitHubRequestError | 
     return None
 
 
-JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS = 60 * 60
 LOCAL_JOB_WORKSPACE_RECLAMATION_INTERVAL_SECONDS = 60 * 60
 MAINTENANCE_INTERVAL_SECONDS = 60
 CAPACITY_STATE_CHECK_INTERVAL_SECONDS = 1
@@ -1089,10 +1086,6 @@ class AutomationEngine:
         self._pr_local_job_runner: Optional[LocalJobRunner] = None
         self._issue_job_runtimes: Dict[str, IssueJobRuntime] = {}
         self._issue_runtime_composition: Optional[IssueRuntimeComposition] = None
-        # Full Jules discovery is deliberately delayed after startup.  Claiming
-        # a cycle advances this deadline before any HTTP work begins, so a
-        # failed listing cannot cause a hot retry on the next loop iteration.
-        self._next_jules_session_list_refresh = time.monotonic() + JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS
         # Local workspace reclamation has its own provider-neutral cadence.
         # Claiming advances the deadline before store access so a broken store
         # cannot turn the producer into a cleanup retry hot loop.
@@ -1328,15 +1321,6 @@ class AutomationEngine:
                 await asyncio.gather(force_wait, return_exceptions=True)
             await asyncio.sleep(0)
 
-    def _claim_jules_session_list_refresh(self) -> bool:
-        """Claim the hourly full-list maintenance cycle when it is due."""
-        now = time.monotonic()
-        if now < self._next_jules_session_list_refresh:
-            return False
-
-        self._next_jules_session_list_refresh = now + JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS
-        return True
-
     def _claim_local_job_workspace_reclamation(self) -> bool:
         """Claim the hourly provider-neutral local workspace cleanup cycle."""
         now = time.monotonic()
@@ -1394,18 +1378,6 @@ class AutomationEngine:
             if "closed pr #" in action_lower or "closed unfixable pr" in action_lower or "closed stale jules pr" in action_lower or "closed empty jules pr" in action_lower or "closing pr" in action_lower:
                 return True
         return False
-
-    async def check_and_start_recurrent_jules_tasks_async(self, repo_name: str) -> None:
-        """Scan .auto-coder/prompts/*.md files and start recurrent Jules tasks if not already running."""
-        try:
-            await self._run_local_critical(
-                "recurrent provider scan",
-                check_and_start_recurrent_jules_tasks,
-                repo_name,
-                self._get_implementation_slots(repo_name),
-            )
-        except Exception as e:
-            logger.error(f"Error checking/starting recurrent Jules tasks: {e}")
 
     def handle_stale_jules_issue_sessions(self, repo_name: str) -> List[str]:
         """Hand issues over to backend_with_high_score when Jules times out without a PR."""
@@ -3699,7 +3671,6 @@ class AutomationEngine:
             logger.info("Closed item handled on startup, continuing to producer loop")
             get_health_monitor().record_event("producer_startup", "closed item handled on startup", repo_name)
 
-        skip_jules_sessions = False
         iteration = 0
         while True:
             try:
@@ -3723,58 +3694,17 @@ class AutomationEngine:
                     if self.is_draining:
                         return
 
-                # This targeted durable consumer runs immediately on startup and
-                # at the 60-second maintenance cadence. It never calls the
-                # account-wide Jules listing used by the separate hourly cycle.
-                from .speculative_jules_lifecycle import consume_due_speculative_work
-
-                await self._run_local_critical(
-                    "speculative Jules competition maintenance",
-                    consume_due_speculative_work,
-                    repo_name,
-                    self.github,
-                    lambda number: self.invalidate_entity(repo_name, "issue", number),
-                    lambda number: self.invalidate_entity(repo_name, "pr", number),
-                )
-                if self.is_draining:
-                    return
                 heartbeat("producer:check-updates", f"iteration {iteration}")
                 # Check updates
                 await self._run_local_critical("update check", check_for_updates_and_restart)
                 if self.is_draining:
                     return
 
-                if not skip_jules_sessions and self._claim_jules_session_list_refresh():
-                    # All list-dependent maintenance shares this cycle's fresh listing.
-                    invalidate_jules_sessions_cache()
-
-                    # Resume sessions
-                    heartbeat("producer:jules-sessions", f"iteration {iteration}")
-                    await self._run_local_critical("remote session reconciliation", check_and_resume_or_archive_sessions, repo_name)
-                    if self.is_draining:
-                        return
-
-                    # Take issues away from Jules sessions that timed out without creating a PR
-                    await self._run_local_critical("stale remote session reconciliation", self.handle_stale_jules_issue_sessions, repo_name)
-
-                    if self.is_draining:
-                        return
-
-                    # Check and start recurrent Jules tasks
-                    await self.check_and_start_recurrent_jules_tasks_async(repo_name)
-                    if self.is_draining:
-                        return
-                elif skip_jules_sessions:
-                    logger.info("Resumed loop early after PR merge/close; skipping Jules session enumeration")
-                    skip_jules_sessions = False
-
                 if self.is_draining:
                     return
 
                 heartbeat("producer:maintenance-sleep", f"{MAINTENANCE_INTERVAL_SECONDS}s")
-                woken_early = await self._sleep_or_wake(MAINTENANCE_INTERVAL_SECONDS)
-                if woken_early:
-                    skip_jules_sessions = True
+                await self._sleep_or_wake(MAINTENANCE_INTERVAL_SECONDS)
 
             except asyncio.CancelledError:
                 logger.info("Producer loop cancelled")
@@ -9112,28 +9042,6 @@ class AutomationEngine:
 
                 # Check for updates and restart if necessary
                 check_for_updates_and_restart()
-
-                if self._claim_jules_session_list_refresh():
-                    # All list-dependent maintenance shares this cycle's fresh listing.
-                    invalidate_jules_sessions_cache()
-
-                    # Check and resume failed Jules sessions. Passing the real
-                    # ImplementationSlotRepository is required so retired-session
-                    # guards (REQ-009) actually apply in this production maintenance
-                    # loop instead of silently no-opping on the None default.
-                    check_and_resume_or_archive_sessions(
-                        repo_name,
-                        self._get_implementation_slots(repo_name),
-                    )
-
-                    # Take issues away from Jules sessions that timed out without creating a PR
-                    self.handle_stale_jules_issue_sessions(repo_name)
-
-                    # Check and start recurrent Jules tasks
-                    check_and_start_recurrent_jules_tasks(
-                        repo_name,
-                        self._get_implementation_slots(repo_name),
-                    )
 
                 # Pull latest changes for monitored repository
                 try:

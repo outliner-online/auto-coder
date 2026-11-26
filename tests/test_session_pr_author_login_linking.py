@@ -139,6 +139,12 @@ class TestSessionPrLinkingAuthorRepresentations:
         with patch("auto_coder.pr_processor.CloudManager", return_value=manager):
             result = _link_jules_pr_to_issue(repo_name, pr_data, mock_client_instance)
 
+        if body == JULES_BODY:
+            assert result is False
+            mock_api.pulls.update.assert_not_called()
+            assert pr_data["body"] == body
+            return
+
         assert result is True
         mock_api.pulls.update.assert_called_once()
         call_args, call_kwargs = mock_api.pulls.update.call_args
@@ -194,15 +200,9 @@ class TestSessionPrLinkingAlphanumericJulesTaskUrl:
         with patch("auto_coder.pr_processor.CloudManager", return_value=manager):
             result = _link_jules_pr_to_issue(repo_name, pr_data, mock_client_instance)
 
-        assert result is True
-        mock_api.pulls.update.assert_called_once()
-        call_args, call_kwargs = mock_api.pulls.update.call_args
-        assert call_args[:3] == ("owner", "repo", pr_number)
-        updated_body = call_kwargs["body"]
-        assert JULES_TASK_BODY in updated_body
-        assert "close #9100" in updated_body
-        assert "https://github.com/owner/repo/issues/9100" in updated_body
-        assert pr_data["body"] == updated_body
+        assert result is False
+        mock_api.pulls.update.assert_not_called()
+        assert pr_data["body"] == JULES_TASK_BODY
 
 
 class TestSessionPrLinkingNoFalseSuccess:
