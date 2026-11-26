@@ -105,7 +105,7 @@ class OriginScenario:
         monkeypatch.setattr(self.github, "remove_labels", lambda *a, **kw: None)
         monkeypatch.setattr(self.github, "get_pull_request_head_sha_strict", lambda *a, **kw: self.head)
         api = SimpleNamespace(checks=_Checks("completed", "success", 1, False), actions=_Actions())
-        monkeypatch.setattr("auto_coder.util.github_action.get_ghapi_client", lambda *a, **kw: api)
+        monkeypatch.setattr(self.github, "api_for", lambda *a, **kw: api)
         monkeypatch.setattr(usage_module, "read_account_data", self.account)
         monkeypatch.setattr("auto_coder.pr_processor.run_adversarial_validation", lambda *a, **kw: AdversarialValidationResult(result="PASS", summary="Current ordinary contract verified"))
         monkeypatch.setattr("auto_coder.pr_processor.publish_adversarial_review", self.publish_ordinary)
