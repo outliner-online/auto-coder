@@ -1660,7 +1660,7 @@ class GitHubClient:
     def _list_open_issue_declarations(self, repo_name: str, limit: int, labels: Optional[List[str]]) -> list[dict]:
         """Read raw paginated Issue bodies through the persistent HTTP cache."""
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
 
         # GitHub's Issues endpoint interleaves pull requests with Issues. Fetch
         # every page before filtering so a page filled by PRs cannot hide later
@@ -1839,7 +1839,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
             return api.issues.get(owner, repo, issue_number)
         except Exception as e:
             logger.warning(f"Failed to get issue #{issue_number} from {repo_name}: {e}")
@@ -1849,7 +1849,7 @@ class GitHubClient:
     def get_issue_strict(self, repo_name: str, issue_number: int) -> Any:
         """Get an issue while preserving REST lookup failures for merge gates."""
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         return api.issues.get(owner, repo, issue_number)
 
     @retry_with_backoff()
@@ -1924,7 +1924,7 @@ class GitHubClient:
             items: list[object] = []
             page = 1
             while True:
-                if self._auth_provider is not None:
+                if getattr(self, "_auth_provider", None) is not None:
                     credential = self._credential_for(repo_name, {"issues": "read"})
                     headers["Authorization"] = f"Bearer {credential.token}"
                 response = _caching_request(
@@ -2715,7 +2715,7 @@ class GitHubClient:
         recorded explanation (fail-closed for automatic thread resolution).
         """
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"pull_requests": "write"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "write"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         api.pulls.create_reply_for_review_comment(owner, repo, pr_number, root_comment_database_id, body=body)
 
     def update_review_thread_comment(self, repo_name: str, comment_database_id: int, body: str) -> None:
@@ -2723,7 +2723,7 @@ class GitHubClient:
         if not isinstance(comment_database_id, int) or isinstance(comment_database_id, bool) or comment_database_id <= 0:
             raise ValueError("A positive observed review-comment identity is required")
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"pull_requests": "write"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "write"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         response = api.pulls.update_review_comment(owner, repo, comment_database_id, body=body)
         if not isinstance(response, dict) or not isinstance(response.get("id"), int) or isinstance(response.get("id"), bool) or response.get("id") != comment_database_id or response.get("body") != body:
             raise RuntimeError(f"GitHub did not confirm the exact update of review comment {comment_database_id}")
@@ -3238,7 +3238,7 @@ class GitHubClient:
     def _get_issue_comments(self, repo_name: str, issue_number: int, fresh: bool = False) -> List[Dict[str, Any]]:
         """Fetch every comment page and let callers decide how to handle errors."""
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
 
         per_page = 100
         result = []
@@ -3306,7 +3306,7 @@ class GitHubClient:
     def get_pr_changed_file_count(self, repo_name: str, pr_number: int) -> int:
         """Fetch the authoritative changed-file count independently of raw diff."""
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         pr_data = api.pulls.get(owner, repo, pr_number)
         changed_files = pr_data.get("changed_files")
         if isinstance(changed_files, bool) or not isinstance(changed_files, int) or changed_files < 0:
@@ -3325,7 +3325,7 @@ class GitHubClient:
         failure.
         """
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         return _paginate_pr_changed_files(pr_number, lambda page: api.pulls.list_files(owner, repo, pr_number, per_page=100, page=page))
 
     @retry_with_backoff()
@@ -3416,7 +3416,7 @@ class GitHubClient:
 
     def _get_pr_reviews(self, repo_name: str, pr_number: int) -> List[Dict[str, Any]]:
         owner, repo = repo_name.split("/")
-        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
 
         per_page = 100
         result: List[Dict[str, Any]] = []

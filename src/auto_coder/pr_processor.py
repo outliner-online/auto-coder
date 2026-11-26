@@ -9754,7 +9754,7 @@ def _update_jules_pr_body(
             # and has the necessary methods. Otherwise, use get_ghapi_client.
             token = getattr(github_client, "token", None)
 
-            if isinstance(github_client, GitHubClient):
+            if vars(github_client).get("_auth_provider") is not None:
                 api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
                 owner, repo_name_split = repo_name.split("/")
                 validate_issue_references(new_body, github_client, repo_name)
@@ -10036,7 +10036,7 @@ def _link_codex_cloud_pr_to_issue(
         # Update PR body on GitHub
         try:
             token = getattr(github_client, "token", None)
-            if isinstance(github_client, GitHubClient):
+            if vars(github_client).get("_auth_provider") is not None:
                 api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
                 owner, repo_split = repo_name.split("/")
                 validate_issue_references(new_body, github_client, repo_name)

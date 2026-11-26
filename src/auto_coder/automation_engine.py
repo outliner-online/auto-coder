@@ -6796,6 +6796,7 @@ class AutomationEngine:
                 deferred_result = self._defer_wrapped_reconciliation(repo_name, item_number, candidate.data, exc, result)
                 if deferred_result is not None:
                     result = deferred_result
+                    result.actions = ["Deferred - Parent-Issue reconciliation requires retry"]
                 logger.warning("Deferred relationship reconciliation for {}/#{}: {}", repo_name, item_number, exc)
                 if deferred_result is None:
                     _record_issue_stage_result(item_number, "issue.parent-reconciliation", f"issue#{item_number} parent reconciliation", Outcome.DEFERRED, {"reason": result.error})
@@ -7007,6 +7008,7 @@ class AutomationEngine:
                 except ParentOperationalError as exc:
                     deferred_result = self._defer_wrapped_reconciliation(repo_name, item_number, candidate.data, exc, result)
                     if deferred_result is not None:
+                        deferred_result.actions = ["Deferred - Parent-Issue reconciliation requires retry"]
                         return deferred_result
                     result.error = f"Parent-Issue reconciliation is temporarily unavailable: {exc}"
                     result.target_outcome = ExplicitTargetOutcome.DEFERRED
