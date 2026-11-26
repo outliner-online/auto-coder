@@ -4,7 +4,9 @@ from unittest.mock import Mock, patch
 import httpx
 
 from auto_coder.automation_config import AutomationConfig
+from auto_coder.execution_trace import get_trace_collector
 from auto_coder.github_controller_auth import ControllerCredential, ControllerIdentity
+from auto_coder.issue_processor import _create_pr_for_issue
 from auto_coder.pr_processor import (
     _is_dependabot_pr,
     _is_empty_pr,
@@ -239,6 +241,70 @@ def test_review_thread_mutations_use_repository_installation_credentials():
         "bearer installation-two",
     ]
     assert provider.requests == [("owner/repo", {"pull_requests": "write"})] * 4
+
+
+def test_issue_pr_publication_retains_server_author_observation():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("POST", "https://api.github.com/repos/owner/repo/pulls")
+    transport.request.return_value = httpx.Response(
+        201,
+        json={
+            "number": 73,
+            "html_url": "https://github.com/owner/repo/pull/73",
+            "user": {"login": "server-observed[bot]", "id": 909},
+        },
+        request=request,
+    )
+    config = AutomationConfig()
+    config.PR_LABEL_COPYING_ENABLED = False
+
+    with (
+        patch("auto_coder.issue_processor.validate_issue_references"),
+        patch("auto_coder.issue_processor.get_commit_log", return_value="commit"),
+        patch(
+            "auto_coder.issue_processor.run_llm_noedit_prompt",
+            return_value='{"title":"Controller PR","body":"Publication body"}',
+        ),
+        patch(
+            "auto_coder.issue_processor.parse_llm_output_as_json",
+            return_value={"title": "Controller PR", "body": "Publication body"},
+        ),
+        patch("time.sleep"),
+        patch.object(client, "find_pr_by_head_branch", return_value=None),
+        patch.object(client, "get_pr_closing_issues", return_value=[42]),
+        patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport),
+        get_trace_collector().start_execution("owner/repo", "issue", 42, origin="worker"),
+    ):
+        result = _create_pr_for_issue(
+            "owner/repo",
+            {"number": 42, "title": "Route controller auth", "body": "Body", "labels": []},
+            "issue-42",
+            "main",
+            "Implemented",
+            client,
+            config,
+        )
+
+    assert result.startswith("Successfully created PR")
+    sent = transport.request.call_args
+    assert sent.kwargs["headers"]["Authorization"] == "Bearer installation-one"
+    assert sent.kwargs["json"] == {
+        "title": "Controller PR",
+        "body": "<!-- auto-coder:local-llm -->\n\nCloses #42\n\nPublication body",
+        "head": "issue-42",
+        "base": "main",
+    }
+    snapshot = get_trace_collector().get_snapshot(item_type="issue", item_number=42)
+    publication = [event for event in snapshot.events if event.stage_id == "issue.pr-publication"]
+    assert len(publication) == 1
+    assert publication[0].facts == {
+        "issue_number": 42,
+        "pr_number": 73,
+        "pr_url": "https://github.com/owner/repo/pull/73",
+        "pr_author": {"login": "server-observed[bot]", "id": 909},
+    }
 
 
 def test_issue_authority_read_renews_repository_credential_on_each_page():
