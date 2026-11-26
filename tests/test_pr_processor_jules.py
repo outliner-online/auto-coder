@@ -370,12 +370,12 @@ class TestProcessJulesPr:
 
             # Assert
             assert result is False
-            mock_cloud_manager.get_issue_by_session.assert_called_once_with("nonexistent123")
+            mock_cloud_manager_class.assert_not_called()
 
     @patch("auto_coder.pr_processor._update_jules_pr_body")
     @patch("auto_coder.pr_processor.CloudManager")
-    def test_process_jules_pr_success(self, mock_cloud_manager_class, mock_update_body):
-        """Test successful Jules PR processing."""
+    def test_process_jules_pr_session_binding_is_inert(self, mock_cloud_manager_class, mock_update_body):
+        """A recorded historical Jules binding cannot create a body link."""
         # Setup
         pr_data = {
             "number": 123,
@@ -396,9 +396,9 @@ class TestProcessJulesPr:
         result = _process_jules_pr(repo_name, pr_data, github_client)
 
         # Assert
-        assert result is True
-        mock_cloud_manager.get_issue_by_session.assert_called_once_with("sessionABC123")
-        mock_update_body.assert_called_once_with(repo_name, 123, "Session ID: sessionABC123", 456, github_client)
+        assert result is False
+        mock_cloud_manager_class.assert_not_called()
+        mock_update_body.assert_not_called()
 
     @patch("auto_coder.pr_processor._update_jules_pr_body")
     @patch("auto_coder.pr_processor.CloudManager")
@@ -425,8 +425,8 @@ class TestProcessJulesPr:
 
         # Assert
         assert result is False
-        mock_cloud_manager.get_issue_by_session.assert_called_once_with("sessionXYZ789")
-        mock_update_body.assert_called_once_with(repo_name, 123, "Session ID: sessionXYZ789", 789, github_client)
+        mock_cloud_manager_class.assert_not_called()
+        mock_update_body.assert_not_called()
 
     @patch("auto_coder.pr_processor.CloudManager")
     def test_process_jules_pr_exception_handling(self, mock_cloud_manager_class):
@@ -478,10 +478,10 @@ class TestProcessJulesPr:
         result = _process_jules_pr(repo_name, pr_data, github_client)
 
         # Assert
-        assert result is True
-        mock_extract_session.assert_called_once_with("https://example.com/session=urlSession123")
-        mock_cloud_manager.get_issue_by_session.assert_called_once_with("urlSession123")
-        mock_update_body.assert_called_once_with(repo_name, 123, "https://example.com/session=urlSession123", 999, github_client)
+        assert result is False
+        mock_extract_session.assert_not_called()
+        mock_cloud_manager_class.assert_not_called()
+        mock_update_body.assert_not_called()
 
     @patch("auto_coder.pr_processor.CloudManager")
     def test_process_jules_pr_empty_body(self, mock_cloud_manager_class):
@@ -556,9 +556,9 @@ class TestProcessJulesPr:
             result = _process_jules_pr(repo_name, pr_data, github_client)
 
             # Assert
-            assert result is True
-            # CloudManager is instantiated with the correct repo_name
-            mock_cloud_manager_class.assert_called_with(repo_name)
+            assert result is False
+            mock_cloud_manager_class.assert_not_called()
+            mock_update_body.assert_not_called()
 
     @patch("auto_coder.pr_processor._update_jules_pr_body")
     @patch("auto_coder.pr_processor.CloudManager")
@@ -585,8 +585,9 @@ class TestProcessJulesPr:
         result = _process_jules_pr(repo_name, pr_data, github_client)
 
         # Assert
-        assert result is True
-        mock_cloud_manager.get_issue_by_session.assert_called_once_with(long_session_id)
+        assert result is False
+        mock_cloud_manager_class.assert_not_called()
+        mock_update_body.assert_not_called()
 
 
 class TestIsJulesPr:
