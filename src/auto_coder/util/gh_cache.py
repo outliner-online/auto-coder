@@ -1829,7 +1829,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
             return api.issues.get(owner, repo, issue_number)
         except Exception as e:
             logger.warning(f"Failed to get issue #{issue_number} from {repo_name}: {e}")
@@ -1839,7 +1839,7 @@ class GitHubClient:
     def get_issue_strict(self, repo_name: str, issue_number: int) -> Any:
         """Get an issue while preserving REST lookup failures for merge gates."""
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
         return api.issues.get(owner, repo, issue_number)
 
     @retry_with_backoff()
@@ -3172,10 +3172,11 @@ class GitHubClient:
         """Read every native conversation page without cached or partial results."""
         owner, repo = repo_name.split("/")
         url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
-        headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json", "Cache-Control": "no-cache"}
         result: list[dict] = []
         observed_ids: set[int] = set()
         for page in range(1, COMMENTS_MAX_PAGES + 1):
+            credential = self._credential_for(repo_name, {"issues": "read"})
+            headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json", "Cache-Control": "no-cache"}
             response = _strict_request("GET", url, headers=headers, params={"per_page": 100, "page": page}, follow_redirects=False, timeout=30)
             response.raise_for_status()
             try:
@@ -3295,7 +3296,7 @@ class GitHubClient:
     def get_pr_changed_file_count(self, repo_name: str, pr_number: int) -> int:
         """Fetch the authoritative changed-file count independently of raw diff."""
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
         pr_data = api.pulls.get(owner, repo, pr_number)
         changed_files = pr_data.get("changed_files")
         if isinstance(changed_files, bool) or not isinstance(changed_files, int) or changed_files < 0:
@@ -3314,7 +3315,7 @@ class GitHubClient:
         failure.
         """
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
         return _paginate_pr_changed_files(pr_number, lambda page: api.pulls.list_files(owner, repo, pr_number, per_page=100, page=page))
 
     @retry_with_backoff()
@@ -3326,7 +3327,8 @@ class GitHubClient:
         before authorizing a verdict).
         """
         owner, repo = repo_name.split("/")
-        headers = {"Authorization": f"bearer {self.token}", "Accept": "application/vnd.github.v3.diff", "X-GitHub-Api-Version": "2022-11-28"}
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        headers = {"Authorization": f"bearer {credential.token}", "Accept": "application/vnd.github.v3.diff", "X-GitHub-Api-Version": "2022-11-28"}
         response = _strict_request("GET", f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}", headers=headers, timeout=30)
         response.raise_for_status()
         return response.text
@@ -3335,9 +3337,8 @@ class GitHubClient:
     def get_pr_changed_file_count_strict(self, repo_name: str, pr_number: int) -> int:
         """Fetch the authoritative changed-file count directly, bypassing every cache."""
         owner, repo = repo_name.split("/")
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         response = _strict_request("GET", f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}", headers=headers, timeout=30)
         response.raise_for_status()
         payload = response.json()
@@ -3354,11 +3355,10 @@ class GitHubClient:
         cached listing while still preserving any successfully fetched pages.
         """
         owner, repo = repo_name.split("/")
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
 
         def _fetch_page(page: int) -> Any:
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
             response = _strict_request("GET", f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files", headers=headers, params={"per_page": 100, "page": page}, timeout=30)
             response.raise_for_status()
             return response.json()

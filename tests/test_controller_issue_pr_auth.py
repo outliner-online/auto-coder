@@ -173,6 +173,70 @@ def test_issue_comments_use_controller_credentials_at_each_page():
     ]
 
 
+def test_management_issue_and_changed_file_reads_use_installation_credentials():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    transport.request.side_effect = [
+        httpx.Response(200, json={"number": 42}, request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues/42")),
+        httpx.Response(200, json={"number": 43}, request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues/43")),
+        httpx.Response(200, json={"changed_files": 1}, request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7")),
+        httpx.Response(200, json=[{"filename": "src/app.py"}], request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7/files")),
+    ]
+
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        assert client.get_issue("owner/repo", 42)["number"] == 42
+        assert client.get_issue_strict("owner/repo", 43)["number"] == 43
+        assert client.get_pr_changed_file_count("owner/repo", 7) == 1
+        assert client.get_pr_changed_files("owner/repo", 7) == [{"filename": "src/app.py"}]
+
+    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == [
+        "Bearer installation-one",
+        "Bearer installation-two",
+        "Bearer installation-two",
+        "Bearer installation-two",
+    ]
+    assert provider.requests == [
+        ("owner/repo", {"issues": "read"}),
+        ("owner/repo", {"issues": "read"}),
+        ("owner/repo", {"pull_requests": "read"}),
+        ("owner/repo", {"pull_requests": "read"}),
+    ]
+
+
+def test_strict_management_readers_refresh_installation_credentials_per_request():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    first_page = [{"id": number + 1, "body": f"comment {number + 1}", "user": {"id": 101, "login": "writer"}} for number in range(100)]
+    responses = [
+        httpx.Response(
+            200,
+            json=first_page,
+            headers={"Link": '<https://api.github.com/repos/owner/repo/issues/7/comments?per_page=100&page=2>; rel="next"'},
+            request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues/7/comments"),
+        ),
+        httpx.Response(200, json=[], request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues/7/comments")),
+        httpx.Response(200, text="diff --git a/a b/a", request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7")),
+        httpx.Response(200, json={"changed_files": 1}, request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7")),
+        httpx.Response(200, json=[{"filename": "a"}], request=httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7/files")),
+    ]
+
+    with patch("auto_coder.util.gh_cache._strict_request", side_effect=responses) as strict_request:
+        assert len(client.get_pr_comments_strict("owner/repo", 7)) == 100
+        assert client.get_pr_diff_strict("owner/repo", 7).startswith("diff --git")
+        assert client.get_pr_changed_file_count_strict("owner/repo", 7) == 1
+        assert client.get_pr_changed_files_strict("owner/repo", 7) == [{"filename": "a"}]
+
+    assert [call.kwargs["headers"]["Authorization"] for call in strict_request.call_args_list] == [
+        "Bearer installation-one",
+        "Bearer installation-two",
+        "bearer installation-two",
+        "Bearer installation-two",
+        "Bearer installation-two",
+    ]
+    assert provider.requests == [("owner/repo", {"issues": "read"})] * 2 + [("owner/repo", {"pull_requests": "read"})] * 3
+
+
 def test_pr_diff_uses_repository_installation_credential():
     provider = RenewableProvider()
     client = GitHubClient(auth_provider=provider, repository="owner/repo")
