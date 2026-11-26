@@ -9,9 +9,9 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from .durable_repair_allowance import (
     CompletionAvailability,
@@ -29,6 +29,9 @@ from .llm_backend_config import TASK_ONLY_BACKEND_TYPES, active_repo_context, ge
 from .logger_config import get_logger
 from .process_identity import ProcessIdentity, process_is_dead, read_process_identity
 from .utils import bind_command_execution_cwd, reset_command_execution_cwd
+
+if TYPE_CHECKING:
+    from .controller_git_identity import ControllerGitIdentity
 
 logger = get_logger(__name__)
 
@@ -89,6 +92,20 @@ class LocalReviewRepairSupersession:
     replacement_head: str
     evidence_json: str
     settled_at: float
+
+
+@dataclass(frozen=True)
+class ReviewCommitRecovery:
+    """Immutable source and identity evidence for one controller commit entry."""
+
+    attempt_id: str
+    incarnation: int
+    original_record_json: str
+    evidence_json: str
+    identity_json: str
+    phase: str = "started"
+    result_sha: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -258,6 +275,13 @@ class LocalReviewRepairStore:
                 attempt_id TEXT NOT NULL, incarnation INTEGER NOT NULL,
                 replacement_head TEXT NOT NULL, evidence_json TEXT NOT NULL,
                 settled_at REAL NOT NULL,
+                PRIMARY KEY(repository, pr_number, attempt_id))""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS local_review_commit_recoveries (
+                repository TEXT NOT NULL, pr_number INTEGER NOT NULL,
+                attempt_id TEXT NOT NULL, incarnation INTEGER NOT NULL,
+                original_record_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                identity_json TEXT NOT NULL, phase TEXT NOT NULL,
+                result_sha TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(repository, pr_number, attempt_id))""")
             connection.commit()
 
@@ -512,6 +536,77 @@ class LocalReviewRepairStore:
             connection.commit()
             return True
 
+    def _get_commit_recovery(self, connection: sqlite3.Connection, request: LocalReviewRepairRequest) -> Optional[ReviewCommitRecovery]:
+        row = connection.execute(
+            "SELECT attempt_id, incarnation, original_record_json, evidence_json, identity_json, phase, result_sha, reason " "FROM local_review_commit_recoveries WHERE repository=? AND pr_number=? AND attempt_id=?",
+            (request.repository, request.pr_number, request.attempt_id),
+        ).fetchone()
+        return ReviewCommitRecovery(*row) if row is not None else None
+
+    def get_commit_recovery(self, request: LocalReviewRepairRequest) -> Optional[ReviewCommitRecovery]:
+        """Read the original recovery proof without changing attempt ownership."""
+        with self._connect() as connection:
+            return self._get_commit_recovery(connection, request)
+
+    def begin_commit_recovery(
+        self,
+        request: LocalReviewRepairRequest,
+        expected: LocalReviewRepairRecord,
+        evidence_json: str,
+        identity_json: str,
+        confirm: Callable[[], bool],
+    ) -> Optional[ReviewCommitRecovery]:
+        """Persist one commit-entry intent after an exact-attempt comparison."""
+        if expected.phase != "indeterminate" or expected.result_sha or expected.publication_started or request.attempt_id != expected.attempt_id or not evidence_json or not identity_json:
+            return None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._get_record(connection, request, request.attempt_id) != expected or self._get_commit_recovery(connection, request) is not None or not confirm():
+                connection.rollback()
+                return None
+            recovery = ReviewCommitRecovery(
+                request.attempt_id,
+                expected.incarnation,
+                json.dumps(asdict(expected), sort_keys=True, separators=(",", ":")),
+                evidence_json,
+                identity_json,
+            )
+            connection.execute(
+                "INSERT INTO local_review_commit_recoveries " "(repository, pr_number, attempt_id, incarnation, original_record_json, evidence_json, identity_json, phase) " "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (request.repository, request.pr_number, recovery.attempt_id, recovery.incarnation, recovery.original_record_json, recovery.evidence_json, recovery.identity_json, recovery.phase),
+            )
+            connection.commit()
+            return recovery
+
+    def finish_commit_recovery(
+        self,
+        request: LocalReviewRepairRequest,
+        expected: LocalReviewRepairRecord,
+        recovery: ReviewCommitRecovery,
+        *,
+        result_sha: str = "",
+        reason: str = "",
+        confirm: Callable[[], bool],
+    ) -> bool:
+        """Checkpoint a candidate before push, preserving original failure evidence."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._get_record(connection, request, request.attempt_id) != expected or self._get_commit_recovery(connection, request) != recovery or not confirm():
+                connection.rollback()
+                return False
+            phase = "candidate" if result_sha else "failed"
+            connection.execute(
+                "UPDATE local_review_commit_recoveries SET phase=?, result_sha=?, reason=? " "WHERE repository=? AND pr_number=? AND attempt_id=?",
+                (phase, result_sha, reason, request.repository, request.pr_number, request.attempt_id),
+            )
+            if result_sha:
+                connection.execute(
+                    "UPDATE local_review_repair_attempts SET phase='publication_pending', result_sha=?, publication_started=1, updated_at=? " "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=?",
+                    (result_sha, time.time(), request.repository, request.pr_number, request.attempt_id, expected.incarnation),
+                )
+            connection.commit()
+            return True
+
     def get_unfinished(self, request: LocalReviewRepairRequest, *, feedback_prefix: str) -> Optional[LocalReviewRepairRecord]:
         """Observe owned unfinished output, recovering only proven dead owners."""
         with self._connect() as connection:
@@ -752,6 +847,7 @@ def execute_local_review_repair(
     allow_commit_repair: bool = True,
     resume_other_attempts: bool = True,
     publication_authorizer: Optional[Callable[[], bool]] = None,
+    commit_identity_provider: Optional[Callable[[], ControllerGitIdentity]] = None,
 ) -> LocalReviewRepairOutcome:
     """Run one fenced correction in a detached exact-head checkout and publish it."""
     if request.head_repository != request.repository:
@@ -860,7 +956,32 @@ def execute_local_review_repair(
             preserve_worktree = True
             return LocalReviewRepairOutcome("indeterminate", f"corrective output could not be staged: {stage.stderr}", executed=True)
         commit_message = f"Fix unresolved review findings for PR #{request.pr_number}"
-        commit = git_commit_with_retry(commit_message, cwd=worktree) if allow_commit_repair else git_commit_with_retry(commit_message, cwd=worktree, allow_repair=False)
+        commit_env = None
+        if commit_identity_provider is not None:
+            from .review_publication_recovery import review_commit_message, verified_commit_identity
+
+            commit_message = review_commit_message(request)
+            try:
+                identity = verified_commit_identity(request, commit_identity_provider)
+                commit_env = identity.env()
+            except Exception as exc:
+                from .review_supersession import capture_pre_push_evidence
+
+                reason = f"Controller Git identity unavailable: {exc}"
+                try:
+                    retained = store.get(request)
+                    if retained is not None:
+                        evidence = capture_pre_push_evidence(request, retained, repo_root)
+                        store.checkpoint_pre_push(request, claim, evidence)
+                except Exception as evidence_error:
+                    logger.warning("PR #{} pre-push evidence unavailable: {}", request.pr_number, evidence_error)
+                store.transition(request, claim, "indeterminate", reason=reason, workspace_path=worktree)
+                preserve_worktree = True
+                return LocalReviewRepairOutcome("indeterminate", reason, executed=True)
+        if commit_env is not None:
+            commit = git_commit_with_retry(commit_message, cwd=worktree, allow_repair=False, commit_env=commit_env)
+        else:
+            commit = git_commit_with_retry(commit_message, cwd=worktree) if allow_commit_repair else git_commit_with_retry(commit_message, cwd=worktree, allow_repair=False)
         if not commit.success:
             if not allow_commit_repair and all(identity.startswith("review-output:") for identity in request.feedback_identities):
                 # The captured-output copier has returned and Git staging has

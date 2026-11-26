@@ -19,6 +19,7 @@ import pytest
 from auto_coder import pr_processor
 from auto_coder.automation_config import ProcessedPRResult, PRProcessingOutcome
 from auto_coder.cli_helpers import AdversarialValidationAvailability
+from auto_coder.controller_git_identity import ControllerGitIdentity, ControllerGitIdentityError
 from auto_coder.execution_trace import get_trace_collector
 from auto_coder.github_app_reviewer import ReviewPublicationResult
 from auto_coder.reviewer_session_registry import ReviewerSession, ReviewerSessionRegistry
@@ -130,6 +131,7 @@ def flow(tmp_path, monkeypatch, _use_real_commands, audit_store, request):
     monkeypatch.chdir(outside)
 
     _apply_standard_merge_gates(monkeypatch, merge_result=True)
+    monkeypatch.setattr(pr_processor, "resolve_controller_git_identity", lambda repository: ControllerGitIdentity(repository, "controller[bot]", 98765, 123))
     merge = Mock(return_value=True)
     publication = Mock(return_value=ReviewPublicationResult(True, "APPROVE", ""))
     monkeypatch.setattr(pr_processor, "_merge_pr", merge)
@@ -581,8 +583,17 @@ def test_legacy_retained_correction_supersession_still_requires_new_ci_and_indep
 
     before = _caller_snapshot(flow.repository)
     flow.reviewer.mutation = _edit_source
-    with missing_git_identity(flow.repository, monkeypatch):
-        first_actions = flow.run()
+    original_commit = local_review_repair.git_commit_with_retry
+
+    def legacy_commit(*args, **kwargs):
+        # Reproduce the historical publisher, before per-command identity existed.
+        kwargs.pop("commit_env", None)
+        return original_commit(*args, **kwargs)
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(local_review_repair, "git_commit_with_retry", legacy_commit)
+        with missing_git_identity(flow.repository, monkeypatch):
+            first_actions = flow.run()
     assert flow.head() == flow.initial_head, first_actions
     assert flow.reviewer.calls == ["fresh"]
     flow.publication.assert_not_called()
@@ -654,4 +665,73 @@ def test_legacy_retained_correction_supersession_still_requires_new_ci_and_indep
     assert retained_workspace.is_dir()
     assert (retained_workspace / "sample.py").read_bytes() == retained_contents
     assert _git(["rev-parse", "HEAD"], retained_workspace) == flow.initial_head
+    assert _caller_snapshot(flow.repository) == before
+
+
+def test_controller_identity_failure_resumes_without_review_and_waits_for_fresh_ci(flow, monkeypatch):
+    from auto_coder import editable_review
+    from auto_coder.local_review_repair import LocalReviewRepairRequest, LocalReviewRepairStore, local_review_repair_db_path
+
+    before = _caller_snapshot(flow.repository)
+    flow.reviewer.mutation = _edit_source
+
+    def unavailable(_repository):
+        raise ControllerGitIdentityError("Controller App installation is unavailable")
+
+    with monkeypatch.context() as offline:
+        offline.setattr(pr_processor, "resolve_controller_git_identity", unavailable)
+        first_actions = flow.run()
+    assert flow.head() == flow.initial_head, first_actions
+    assert flow.reviewer.calls == ["fresh"]
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    store = LocalReviewRepairStore(local_review_repair_db_path(REPO_NAME))
+    lookup = LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, "", "", (), "")
+    old = store.get_unfinished(lookup, feedback_prefix=editable_review.REVIEW_OUTPUT_PREFIX)
+    assert old is not None and old.phase == "indeterminate" and not old.result_sha
+    assert old.pre_push_evidence_json
+    request = LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, old.head_ref, old.head_sha, old.feedback_identities, "", expected_push_url=old.expected_push_url)
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+
+    recovery_actions = flow.run()
+    candidate = flow.head()
+    assert candidate != flow.initial_head, recovery_actions
+    assert _git(["rev-parse", f"{candidate}^"], flow.remote) == flow.initial_head
+    assert flow.reviewer.calls == ["fresh"]
+    recovered = store.get(request)
+    assert recovered is not None and recovered.phase == "awaiting_validation"
+    assert recovered.result_sha == candidate
+    assert _git(["show", "-s", "--format=%an%n%ae%n%cn%n%ce", candidate], flow.remote).splitlines() == [
+        "controller[bot]",
+        "98765+controller[bot]@users.noreply.github.com",
+        "controller[bot]",
+        "98765+controller[bot]@users.noreply.github.com",
+    ]
+    events = _correction_events(trace_start)
+    assert len(events) == 1
+    assert events[0].outcome == "deferred"
+    assert events[0].facts["effect"] == "reviewer-publication-resumed"
+    assert events[0].facts["local_phase"] == "awaiting_validation"
+    assert events[0].facts["published"] is True
+    assert events[0].facts["review_disposition"] == "CORRECTIVE_HANDOFF"
+    from auto_coder.dashboard_detail import evidence_rows
+
+    display = evidence_rows(events)
+    assert "effect: reviewer-publication-resumed" in display[0]["facts"]
+    assert "published: true" in display[0]["facts"]
+    assert flow.last_status.outcome is PRProcessingOutcome.DEFERRED
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+
+    monkeypatch.setattr(pr_processor, "_check_github_actions_status", authoritative_ci_status(success=False, ids=[20], in_progress=True))
+    flow.run()
+    assert flow.reviewer.calls == ["fresh"]
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+    monkeypatch.setattr(pr_processor, "_check_github_actions_status", authoritative_ci_status(success=True, ids=[21]))
+    final_actions = flow.run()
+    assert flow.reviewer.calls == ["fresh", "fresh"], final_actions
+    assert [head for _, head, _ in flow.seen] == [flow.initial_head, candidate]
+    flow.publication.assert_called_once()
+    flow.merge.assert_called_once()
     assert _caller_snapshot(flow.repository) == before
