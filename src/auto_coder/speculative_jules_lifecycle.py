@@ -164,12 +164,7 @@ class RefreshingSpeculativeClassifier:
             result = self.adapter.classify(repository, issue_number, pr_repository, pr_number)  # type: ignore[attr-defined]
             if result.classification is ArtifactClassification.LEGACY:
                 snapshot = self.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
-                if any(
-                    binding.pr_repository.lower() == pr_repository.lower() and binding.pr_number == pr_number
-                    for generation in snapshot.generations
-                    for candidate in generation.candidates
-                    for binding in candidate.bindings
-                ):
+                if any(binding.pr_repository.lower() == pr_repository.lower() and binding.pr_number == pr_number for generation in snapshot.generations for candidate in generation.candidates for binding in candidate.bindings):
                     return ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("ledger binding lacks matching observation authority",))
                 if snapshot.generations and not self.adapter.store.has_legacy_membership(repository, pr_repository, pr_number):  # type: ignore[attr-defined]
                     pr = self.adapter.github.get_pull_request_metadata_strict(pr_repository, pr_number)  # type: ignore[attr-defined]

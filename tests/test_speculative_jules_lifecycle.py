@@ -446,9 +446,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
 
         # A surviving ledger binding must remain authoritative even if the
         # separate observation database has been lost after restart.
-        missing_observations = JulesCandidateObservationAdapter(
-            restarted_ledger, CandidateObservationStore(tmp_path / "missing.db"), RetiredJulesReader(), github
-        )
+        missing_observations = JulesCandidateObservationAdapter(restarted_ledger, CandidateObservationStore(tmp_path / "missing.db"), RetiredJulesReader(), github)
         configure_speculative_jules_lifecycle(
             SpeculativeJulesLifecycle(
                 RefreshingSpeculativeClassifier(missing_observations, restarted_ledger),
