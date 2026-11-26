@@ -717,3 +717,70 @@ def test_strict_relationship_mutations_send_renewed_installation_credentials(mon
         "/repos/owner/repo/issues/42/sub_issues",
     ]
     assert provider.requests == [("owner/repo", {"issues": "write"})] * 2
+
+
+def test_merge_entry_and_rejection_recheck_use_installation_pr_reads(tmp_path):
+    from auto_coder.merge_operation_state import MergeOperationStore
+    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.util.github_request_outcome import (
+        DeliveryCertainty,
+        GitHubApiOutcome,
+        GitHubRequestContext,
+        GitHubRequestError,
+        GitHubRequestOutcome,
+        GitHubResponseMetadata,
+        RequestProvenance,
+    )
+
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    head_sha = "a" * 40
+    pr = {
+        "number": 7,
+        "user": {"login": "developer"},
+        "head": {"ref": "feature", "sha": head_sha},
+        "mergeable": True,
+    }
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7")
+    transport = Mock()
+    transport.request.side_effect = [
+        httpx.Response(200, json=pr, request=request),
+        httpx.Response(200, json=pr, request=request),
+    ]
+
+    terminal_api = Mock()
+    context = GitHubRequestContext(
+        operation_id="op",
+        attempt_id="attempt",
+        subsystem="test",
+        api_origin="https://api.github.com",
+        method="PUT",
+        kind="mutation",
+        endpoint_template="/pulls/{n}/merge",
+    )
+    outcome = GitHubRequestOutcome(
+        context=context,
+        status=405,
+        classification=GitHubApiOutcome.REMOTE_ERROR,
+        provenance=RequestProvenance.NETWORK,
+        delivery=DeliveryCertainty.HTTP_RESPONSE_RECEIVED,
+        metadata=GitHubResponseMetadata(),
+        elapsed_ms=1.0,
+        message="Method Not Allowed",
+    )
+    terminal_api.pulls.merge.side_effect = GitHubRequestError(outcome)
+    store = MergeOperationStore(db_path=tmp_path / "merge-operations.db")
+
+    with (
+        patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport),
+        patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=terminal_api),
+        patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=store),
+        patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+        patch("auto_coder.pr_processor.get_speculative_jules_lifecycle", return_value=None),
+        patch("auto_coder.pr_processor._get_allowed_merge_methods", return_value=["--squash"]),
+        patch("auto_coder.pr_processor._trigger_fallback_for_pr_failure"),
+    ):
+        assert _merge_pr("owner/repo", 7, {}, AutomationConfig(), github_client=client) is False
+
+    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == ["Bearer installation-one", "Bearer installation-two"]
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"})] * 2

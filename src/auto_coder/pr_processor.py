@@ -13188,6 +13188,7 @@ def _merge_pr(
     from .merge_operation_state import EffectName, EffectState, MergeOperationIdentity, get_merge_operation_store
 
     try:
+        from auto_coder.util.gh_cache import GitHubClient as SharedGitHubClient
         from auto_coder.util.gh_cache import get_ghapi_client
 
         client = github_client or GitHubClient.get_instance()
@@ -13211,7 +13212,13 @@ def _merge_pr(
                 return False
 
         token = client.token
-        api = get_ghapi_client(token)
+        if isinstance(client, SharedGitHubClient):
+            api = client.api_for(repo_name, required_permissions={"pull_requests": "read"})
+        else:
+            # Lightweight legacy adapters used by existing embedders expose
+            # only their explicit token.  App-mode GitHubClient instances
+            # must never enter this path or fall back after provider failure.
+            api = get_ghapi_client(token)
         owner, repo = repo_name.split("/")
         store = get_merge_operation_store()
         identity = MergeOperationIdentity("https://api.github.com", repo_name, pr_number)
