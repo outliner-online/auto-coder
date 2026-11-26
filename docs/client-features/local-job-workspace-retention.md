@@ -6,8 +6,12 @@ positive release. Set `AUTO_CODER_JOB_WORKSPACE_RETENTION_SECONDS` to a finite,
 nonnegative number of seconds to change the interval; `0` enables immediate
 eligibility. Invalid values produce a warning and use the default.
 
-The daemon scans after startup local-job reconciliation and during its hourly
-maintenance cycle. It does not infer success from age or job settlement. Before
+The daemon scans after startup local-job reconciliation and on a dedicated,
+provider-neutral hourly maintenance deadline. This cleanup remains available
+without Jules session enumeration. A failed store read or reclamation attempt
+is reported, leaves unrelated producer maintenance available, and is retried at
+the next hourly opportunity rather than in a tight loop. It does not infer
+success from age or job settlement. Before
 removing a workspace it verifies the exact job, execution incarnation,
 repository, result artifact, publication receipts, path, filesystem identity,
 and writer settlement. The release time and `RELEASED`, `DELETING`, or `DELETED`

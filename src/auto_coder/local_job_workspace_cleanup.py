@@ -382,11 +382,18 @@ def _record_decision(results: list[WorkspaceCleanupResult], result: WorkspaceCle
     logger.info("Workspace cleanup decision={} job={} path={} reason={}", result.decision, result.job_id, result.path, result.reason)
 
 
-def reclaim_unentered_workspaces(store: LocalJobStore, *, pr_root: Path | None = None) -> tuple[WorkspaceCleanupResult, ...]:
+def reclaim_unentered_workspaces(
+    store: LocalJobStore,
+    repository: str | None = None,
+    *,
+    pr_root: Path | None = None,
+) -> tuple[WorkspaceCleanupResult, ...]:
     """Dispose only incarnations durably released before provider entry."""
     root = (pr_root or default_pr_repair_workspace_root()).resolve()
     results: list[WorkspaceCleanupResult] = []
     for release in store.discover_unentered_workspace_reclamations():
+        if repository is not None and release.repository != repository:
+            continue
         target = Path(release.workspace_root)
         lock = lock_path(release.repository, store.path, "local-job-workspace", f"{release.job_id}:{release.execution_incarnation}")
         try:
@@ -426,6 +433,7 @@ def reclaim_unentered_workspaces(store: LocalJobStore, *, pr_root: Path | None =
 
 def reclaim_finalized_workspaces(
     store: LocalJobStore,
+    repository: str | None = None,
     *,
     now: float | None = None,
     retention_seconds: float | None = None,
@@ -437,8 +445,10 @@ def reclaim_finalized_workspaces(
     retention = workspace_retention_seconds() if retention_seconds is None else retention_seconds
     issue_workspace_root = issue_root or default_issue_job_workspace_root()
     pr_workspace_root = pr_root or default_pr_repair_workspace_root()
-    results = list(reclaim_unentered_workspaces(store, pr_root=pr_workspace_root))
+    results = list(reclaim_unentered_workspaces(store, repository, pr_root=pr_workspace_root))
     for job in store.discover_settled_with_workspaces():
+        if repository is not None and job.repository != repository:
+            continue
         path = str(Path(job.workspace_path).parent)
         lock = workspace_reclamation_lock(store, job)
         ensure_lock_directory(lock)

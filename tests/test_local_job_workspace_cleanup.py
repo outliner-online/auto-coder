@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 import time
@@ -7,15 +8,18 @@ from multiprocessing import Event, Process
 from pathlib import Path
 from threading import Event as ThreadEvent
 from threading import Thread
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from loguru import logger
 
+from auto_coder.automation_config import AutomationConfig
+from auto_coder.automation_engine import AutomationEngine
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
+from auto_coder.issue_dispatch import CandidateHandoff, IssueAttemptIdentity, IssueDispatchGuard
 from auto_coder.issue_job_finalizer import IssueJobFinalizer
 from auto_coder.issue_job_workspace import IssueJobSource, IssueJobWorkspaceProducer
-from auto_coder.local_job_handoff import InvocationOutcome, LocalJobClaim, LocalJobState, LocalJobStore, WorkspaceReclamationPhase
+from auto_coder.local_job_handoff import InvocationOutcome, LocalJobClaim, LocalJobKind, LocalJobOffer, LocalJobState, LocalJobStore, WorkspaceReclamationPhase
 from auto_coder.local_job_runner import process_owner
 from auto_coder.local_job_workspace_cleanup import (
     DEFAULT_RETENTION_SECONDS,
@@ -27,7 +31,7 @@ from auto_coder.pr_repair_finalizer import PRRepairJobFinalizer, PRRepairPublica
 from auto_coder.runtime_locks import ensure_lock_directory, file_lock
 from auto_coder.workspace_ownership import MARKER, verify_ownership
 
-from .test_issue_job_finalizer import _completed_job, claim, repository
+from .test_issue_job_finalizer import _completed_job, claim, git, repository
 from .test_pr_repair_finalizer import completed_job as completed_pr_job
 from .test_pr_repair_finalizer import observer
 from .test_pr_repair_finalizer import repository as pr_repository
@@ -41,6 +45,39 @@ def _published(tmp_path: Path, number: int = 2583):
     return store, checkpoint, finalizer
 
 
+def _published_for_repository(store: LocalJobStore, tmp_path: Path, repository_name: str, number: int):
+    owner, name = repository_name.split("/", 1)
+    source_root = tmp_path / f"source-{owner}-{name}"
+    source_root.mkdir()
+    source, _ = repository(source_root)
+    attempt = f"attempt-{number}"
+    offer = LocalJobOffer(LocalJobKind.ISSUE_IMPLEMENTATION, repository_name, number, attempt, "codex", f"prompt-{number}")
+    identity = IssueAttemptIdentity(owner, name, number, attempt)
+    guard = IssueDispatchGuard(tmp_path / f"dispatch-{owner}-{name}.sqlite3")
+    assert guard.reserve(identity, CandidateHandoff("codex", "local")).admitted
+    assert store.offer_issue(offer, identity, guard) is not None
+    acquired = store.claim(offer.job_id)
+    assert acquired is not None and acquired.acquired
+    slots = ImplementationSlotRepository(repository_name, 1, tmp_path / f"slots-{owner}-{name}.json", tmp_path / f"retired-{owner}-{name}.json")
+    assert slots.reserve_new(ImplementationOwner("issue", number))
+
+    def edit(workspace: Path, _prompt: str) -> str:
+        git(workspace, "config", "user.email", "test@example.com")
+        git(workspace, "config", "user.name", "Test")
+        (workspace / "result.txt").write_text("implemented\n", encoding="utf-8")
+        return "ACTION_SUMMARY: implemented"
+
+    checkpoint = IssueJobWorkspaceProducer(store, tmp_path / "workspaces", slots).execute(
+        acquired,
+        IssueJobSource(repository_name, source, "main", f"issue-{number}"),
+        edit,
+    )
+    existing = {"number": number + 1000, "head": {"ref": checkpoint.work_branch}, "body": f"Closes #{number}"}
+    result = IssueJobFinalizer(store, slots, lambda *_: existing, lambda *_: None).finalize(checkpoint.job_id)
+    assert result.disposition == "published"
+    return checkpoint
+
+
 def _record_settled_observation(store, record, workspace: Path, executor: str) -> None:
     observation = MuseBackgroundObservation(
         MuseObservationBinding(record.backend_name, "session", record.execution_incarnation, record.upstream_attempt, workspace),
@@ -49,6 +86,139 @@ def _record_settled_observation(store, record, workspace: Path, executor: str) -
         readiness=MuseContinuationReadiness.CONTROLLER_READY,
     )
     assert persist_muse_observation(store, record.job_id, executor, observation)
+
+
+def test_startup_reclamation_failure_does_not_block_reconciliation(monkeypatch) -> None:
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    engine._pr_local_job_runner = None
+    slots = MagicMock()
+    monkeypatch.setattr(engine, "_get_implementation_slots", lambda _repo: slots)
+    monkeypatch.setattr(engine, "_resume_local_issue_publications", lambda *_: None)
+    monkeypatch.setattr(engine, "_get_local_job_store", lambda: object())
+    monkeypatch.setattr(engine, "_reconcile_open_github_entities", AsyncMock())
+    monkeypatch.setattr(engine, "_recover_issue_review_reruns", MagicMock())
+    recover = MagicMock()
+    monkeypatch.setattr("auto_coder.automation_engine.recover_obligations_at_startup", recover)
+
+    def fail_cleanup(*_args):
+        raise OSError("cleanup unavailable")
+
+    monkeypatch.setattr("auto_coder.local_job_workspace_cleanup.reclaim_finalized_workspaces", fail_cleanup)
+    errors = []
+    sink = logger.add(lambda message: errors.append(str(message)), level="ERROR")
+    try:
+        asyncio.run(engine._attempt_startup_reconciliation("owner/repo"))
+    finally:
+        logger.remove(sink)
+
+    recover.assert_called_once_with(slots)
+    engine._reconcile_open_github_entities.assert_awaited_once_with("owner/repo")
+    engine._recover_issue_review_reruns.assert_called_once_with("owner/repo")
+    assert any("Startup local job workspace reclamation failed" in message and "cleanup unavailable" in message for message in errors)
+
+
+def test_producer_reclamation_is_provider_neutral_and_failure_is_hourly(tmp_path: Path, monkeypatch, _use_real_commands) -> None:
+    """The production producer owns cleanup independently of Jules listing."""
+    store, finalized, _ = _published(tmp_path, 2892)
+    other_repository = _published_for_repository(store, tmp_path, "other/repo", 3892)
+    live_source_root = tmp_path / "live-source"
+    live_source_root.mkdir()
+    source, _ = repository(live_source_root)
+    live_claim = claim(store, 2893)
+    live_workspace, _, _ = IssueJobWorkspaceProducer(store, tmp_path / "workspaces")._prepare(
+        live_claim,
+        IssueJobSource("owner/repo", source, "main", "issue-2893"),
+    )
+
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    engine._next_local_job_workspace_reclamation = 0.0
+    monkeypatch.setattr(engine, "_check_and_handle_closed_branch", lambda *_: True)
+    monkeypatch.setattr(engine, "_claim_jules_session_list_refresh", lambda: False)
+    monkeypatch.setattr("auto_coder.automation_engine.check_for_updates_and_restart", lambda: update_checks.append("update"))
+    monkeypatch.setattr("auto_coder.speculative_jules_lifecycle.consume_due_speculative_work", lambda *_: None)
+
+    store_reads = 0
+
+    def temporarily_unavailable_store():
+        nonlocal store_reads
+        store_reads += 1
+        if store_reads == 1:
+            raise OSError("temporary local job store failure")
+        return store
+
+    monkeypatch.setattr(engine, "_get_local_job_store", temporarily_unavailable_store)
+
+    real_reclaim = reclaim_finalized_workspaces
+    cleanup_calls = []
+
+    def scoped_reclaim(local_store, repository_name):
+        cleanup_calls.append((local_store, repository_name))
+        return real_reclaim(local_store, repository_name, retention_seconds=0, issue_root=tmp_path / "workspaces")
+
+    monkeypatch.setattr("auto_coder.local_job_workspace_cleanup.reclaim_finalized_workspaces", scoped_reclaim)
+    update_checks = []
+    sleeps = 0
+
+    async def sleep_or_wake(_seconds: float) -> bool:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            # An early PR wake must not immediately retry the failed cleanup.
+            return True
+        if sleeps == 2:
+            # Advance to the next normal maintenance opportunity.
+            engine._next_local_job_workspace_reclamation = 0.0
+            return False
+        raise KeyboardInterrupt("producer test complete")
+
+    monkeypatch.setattr(engine, "_sleep_or_wake", sleep_or_wake)
+
+    errors = []
+    sink = logger.add(lambda message: errors.append(str(message)), level="ERROR")
+    try:
+        with pytest.raises(KeyboardInterrupt, match="producer test complete"):
+            asyncio.run(engine._producer_loop("owner/repo"))
+    finally:
+        logger.remove(sink)
+
+    assert store_reads == 2
+    assert cleanup_calls == [(store, "owner/repo")]
+    assert len(update_checks) == 3
+    assert any("Local job workspace reclamation failed" in message and "temporary local job store failure" in message for message in errors)
+    assert not finalized.workspace.parent.exists()
+    assert live_workspace.parent.is_dir()
+    assert other_repository.workspace.parent.is_dir()
+
+
+def test_due_reclamation_survives_repeated_provider_maintenance_failure(tmp_path: Path, monkeypatch, _use_real_commands) -> None:
+    store, finalized, _ = _published(tmp_path, 2892)
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    engine._next_local_job_workspace_reclamation = 0.0
+    monkeypatch.setattr(engine, "_check_and_handle_closed_branch", lambda *_: True)
+    monkeypatch.setattr(engine, "_get_local_job_store", lambda: store)
+    real_reclaim = reclaim_finalized_workspaces
+    monkeypatch.setattr(
+        "auto_coder.local_job_workspace_cleanup.reclaim_finalized_workspaces",
+        lambda local_store, repository_name: real_reclaim(local_store, repository_name, retention_seconds=0, issue_root=tmp_path / "workspaces"),
+    )
+    failures = []
+
+    def fail_provider(*_args):
+        failures.append(1)
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("auto_coder.speculative_jules_lifecycle.consume_due_speculative_work", fail_provider)
+
+    async def stop_after_two_failures(_seconds):
+        if len(failures) == 2:
+            raise KeyboardInterrupt("done")
+
+    monkeypatch.setattr("auto_coder.automation_engine.asyncio.sleep", stop_after_two_failures)
+    with pytest.raises(KeyboardInterrupt, match="done"):
+        asyncio.run(engine._producer_loop("owner/repo"))
+
+    assert len(failures) == 2
+    assert not finalized.workspace.parent.exists()
 
 
 def test_issue_producer_binds_external_ownership_evidence(tmp_path: Path, _use_real_commands) -> None:
