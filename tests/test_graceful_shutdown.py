@@ -76,7 +76,8 @@ def test_worker_drain_owns_real_to_thread_operation_until_durable_completion(mon
     assert engine.invalidations.claim("owner/repo").identity == EntityIdentity("owner/repo", "issue", 1778)
 
 
-def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch, tmp_path):
+@pytest.mark.parametrize("newer_invalidation", [False, True])
+def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch, tmp_path, newer_invalidation):
     """Exercise the production invalidation hook before candidate dispatch."""
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
     engine = AutomationEngine(MagicMock(), AutomationConfig())
@@ -108,7 +109,8 @@ def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch,
         worker = asyncio.create_task(engine._worker_loop("owner/repo", 0))
         assert await asyncio.to_thread(entered.wait, 2)
         engine.request_graceful_shutdown("SIGTERM")
-        assert await engine.invalidate_entity("owner/repo", "issue", 22, "newer-child-delivery")
+        if newer_invalidation:
+            assert await engine.invalidate_entity("owner/repo", "issue", 22, "newer-child-delivery")
         graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
         await asyncio.sleep(0.05)
         assert not graceful_drain.done()
@@ -127,7 +129,7 @@ def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch,
     recovered = restarted.invalidations.claim("owner/repo")
     assert recovered is not None
     assert recovered.identity == EntityIdentity("owner/repo", "issue", 22)
-    assert recovered.generation == 2
+    assert recovered.generation == (2 if newer_invalidation else 1)
 
 
 def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch, tmp_path):
