@@ -3191,7 +3191,7 @@ class GitHubClient:
     def _get_issue_comments(self, repo_name: str, issue_number: int, fresh: bool = False) -> List[Dict[str, Any]]:
         """Fetch every comment page and let callers decide how to handle errors."""
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
 
         per_page = 100
         result = []

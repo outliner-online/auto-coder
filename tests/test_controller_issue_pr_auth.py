@@ -66,3 +66,23 @@ def test_controller_bot_local_origin_is_not_dependency_bot():
 def test_unrelated_bot_behavior_is_unchanged():
     assert _is_dependabot_pr({"user": {"login": "renovate[bot]"}, "body": "Bump requests"}) is True
     assert _is_dependabot_pr({"user": {"login": "other[bot]"}, "body": "Generated update"}) is True
+
+
+def test_issue_comments_use_controller_credentials_at_each_page():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues/1/comments")
+    transport.request.side_effect = [
+        httpx.Response(200, json=[{"id": number} for number in range(100)], request=request),
+        httpx.Response(200, json=[{"id": 100}], request=request),
+    ]
+
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        comments = client.get_issue_comments("owner/repo", 1)
+
+    assert len(comments) == 101
+    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == [
+        "Bearer installation-one",
+        "Bearer installation-two",
+    ]
