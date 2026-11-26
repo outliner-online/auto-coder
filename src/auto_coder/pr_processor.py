@@ -4288,6 +4288,7 @@ def _resolve_pr_issue_numbers(
     pr_data: Dict[str, Any],
     github_client: Any,
     *,
+    include_body_links: bool = True,
     include_session_history: bool = True,
 ) -> List[int]:
     """Resolve associated source issue numbers for a PR using body, session ID, branch, or title.
@@ -4301,9 +4302,10 @@ def _resolve_pr_issue_numbers(
         List of unique issue numbers associated with the PR
     """
     body = pr_data.get("body", "") or ""
-    issue_numbers = extract_linked_issues_from_pr_body(body)
-    if issue_numbers:
-        return issue_numbers
+    if include_body_links:
+        issue_numbers = extract_linked_issues_from_pr_body(body)
+        if issue_numbers:
+            return issue_numbers
 
     # Historical provider bindings remain useful for diagnostics, but callers
     # that may authorize fresh work must be able to exclude them explicitly.
@@ -4541,10 +4543,19 @@ def _close_empty_pr(
         logger.info(f"PR #{pr_number} has zero effective diff against base branch. Closing it.")
 
         # Resolve the issue(s) that this PR was created for
-        # Older daemons wrote session-derived links into Jules PR bodies with
-        # no provenance marker. Those links cannot authorize a new attempt.
-        historical_jules = _is_jules_pr(pr_data)
-        issue_numbers = [] if historical_jules else _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
+        is_jules_pr = _is_jules_pr(pr_data)
+        issue_numbers = _resolve_pr_issue_numbers(
+            repo_name,
+            pr_data,
+            github_client,
+            # Before Jules retirement, the producer wrote a closing reference
+            # derived only from session history into the PR body. That text
+            # has no durable provenance marker, so an empty historical Jules
+            # PR cannot safely use a body link as fresh retry authority.
+            # Independent branch/title associations remain available.
+            include_body_links=not is_jules_pr,
+            include_session_history=not is_jules_pr,
+        )
 
         close_comment = f"Auto-Coder: Closing PR #{pr_number} because it has no effective diff against the base branch."
         if issue_numbers:
