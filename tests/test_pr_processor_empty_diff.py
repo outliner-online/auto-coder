@@ -377,3 +377,42 @@ class TestAutomationEngineEmptyPRRequeue:
             assert any("Closed empty PR #4971" in a for a in result.actions)
             assert "Processed new attempt" in result.actions
             mock_unlocked.assert_called_once_with("owner/repo", 4800, engine.config, True)
+
+    @patch("src.auto_coder.pr_processor.increment_attempt")
+    @patch("src.auto_coder.cloud_manager.CloudManager")
+    def test_process_single_candidate_does_not_requeue_from_historical_jules_binding(
+        self,
+        cloud_manager_class,
+        mock_increment,
+    ):
+        """A session-only association cannot authorize work at daemon PR intake."""
+        github = Mock()
+        engine = AutomationEngine(github, config=AutomationConfig())
+        cloud_manager_class.return_value.get_issue_by_session.return_value = 42
+        historical_pr = {
+            "number": 4974,
+            "title": "Historical provider output",
+            "body": "https://jules.google.com/session/historical-empty",
+            "state": "open",
+            "user": {"login": "google-labs-jules"},
+            "head": {"ref": "provider-output", "sha": "abc123"},
+            "base": {"ref": "main"},
+            "changed_files": 0,
+            "additions": 0,
+            "deletions": 0,
+        }
+        candidate = Candidate(type="pr", data=historical_pr, priority=1)
+
+        with patch.object(engine, "_process_unlocked_issue") as process_unlocked:
+            result = engine._process_single_candidate_unified(
+                "owner/repo",
+                candidate,
+                engine.config,
+                jules_mode=True,
+            )
+
+        assert result.success is True
+        github.close_pr.assert_called_once()
+        cloud_manager_class.assert_not_called()
+        mock_increment.assert_not_called()
+        process_unlocked.assert_not_called()

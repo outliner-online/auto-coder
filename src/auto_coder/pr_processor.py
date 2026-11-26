@@ -4287,6 +4287,8 @@ def _resolve_pr_issue_numbers(
     repo_name: str,
     pr_data: Dict[str, Any],
     github_client: Any,
+    *,
+    include_session_history: bool = True,
 ) -> List[int]:
     """Resolve associated source issue numbers for a PR using body, session ID, branch, or title.
 
@@ -4303,10 +4305,12 @@ def _resolve_pr_issue_numbers(
     if issue_numbers:
         return issue_numbers
 
-    # Try resolving via session ID, branch name, or title
-    resolved_issue = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
-    if resolved_issue:
-        return [resolved_issue]
+    # Historical provider bindings remain useful for diagnostics, but callers
+    # that may authorize fresh work must be able to exclude them explicitly.
+    if include_session_history:
+        resolved_issue = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
+        if resolved_issue:
+            return [resolved_issue]
 
     # Additional generic fallback: check branch name for patterns like "issue-123" or "fix-123"
     branch_name = ""
@@ -4537,7 +4541,12 @@ def _close_empty_pr(
         logger.info(f"PR #{pr_number} has zero effective diff against base branch. Closing it.")
 
         # Resolve the issue(s) that this PR was created for
-        issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
+        issue_numbers = _resolve_pr_issue_numbers(
+            repo_name,
+            pr_data,
+            github_client,
+            include_session_history=not _is_jules_pr(pr_data),
+        )
 
         close_comment = f"Auto-Coder: Closing PR #{pr_number} because it has no effective diff against the base branch. " "The linked issue(s) will be retried with an incremented attempt count."
         client = github_client or GitHubClient.get_instance()
@@ -9072,26 +9081,15 @@ def _handle_pr_merge(
                 actions.extend(stale_jules_result.actions)
                 return actions
 
-            actions.append(f"PR #{pr_number} is a Jules-created PR, evaluating CI repair admission")
-            session_id = str(pr_data.get("_jules_session_id") or _extract_session_id_from_pr_body(pr_data.get("body", "")) or "")
-
-            def send_jules_ci() -> PRRepairResult:
-                return _send_jules_error_feedback(repo_name, pr_data, failed_checks, config, github_client)
-
-            jules_feedback = _dispatch_jules_repair(repo_name, pr_data, RepairKind.CI_FAILURE, session_id, send_jules_ci)
-            actions.extend(jules_feedback.actions)
+            reason = "Jules CI repair is retired; historical sessions cannot authorize provider work"
+            actions.append(f"Jules CI repair was not sent for PR #{pr_number}; local fixes remain disabled")
+            jules_feedback = PRRepairResult(RepairDisposition.REFUSED, reason=reason)
             actions.repair_result = jules_feedback
-            actions.retry_not_before = jules_feedback.retry_not_before
-            actions.repair_attempt_started = jules_feedback.attempt_started is True
-            if jules_feedback.disposition is RepairDisposition.ACCEPTED_OR_UNCERTAIN:
-                actions.append(f"Jules CI repair was attempted for PR #{pr_number}; awaiting a provider update without local fixes")
-                trace_outcome = Outcome.ACCEPTED_HANDOFF
-            else:
-                actions.append(f"Jules CI repair was not sent for PR #{pr_number}; local fixes remain disabled")
-                trace_outcome = Outcome.DEFERRED if jules_feedback.disposition is RepairDisposition.DEFERRED else Outcome.BLOCKED if jules_feedback.disposition is RepairDisposition.REFUSED else Outcome.FAILED
-                if processing_status is not None:
-                    processing_status.outcome = PRProcessingOutcome.FAILED if jules_feedback.disposition is RepairDisposition.FAILED else PRProcessingOutcome.DEFERRED
-                    processing_status.error = jules_feedback.reason if jules_feedback.disposition is RepairDisposition.FAILED else None
+            actions.repair_attempt_started = False
+            trace_outcome = Outcome.SKIPPED
+            if processing_status is not None:
+                processing_status.outcome = PRProcessingOutcome.DEFERRED
+                processing_status.error = None
             _record_pr_stage(
                 pr_number,
                 "pr.repair-delegation",
@@ -13377,46 +13375,15 @@ def _handle_definitive_merge_rejection(
     log_action(f"PR #{pr_number} has merge conflicts, attempting resolution")
 
     if _is_jules_pr(pr_info):
-        logger.info(f"PR #{pr_number} is a Jules PR with merge conflicts. Requesting Jules to resolve it.")
-        try:
-            from auto_coder.jules_client import JulesClient
-
-            jules_client = JulesClient()
-            session_id = _extract_session_id_from_pr_body(pr_info.get("body", ""))
-            if session_id:
-                # REQ-007/REQ-009 (Issue #2147): guard + durably admit this
-                # outbound mutation to an existing Jules session before
-                # sending it.
-                request = BaseUpdateExecutionRequest(
-                    repo_name,
-                    pr_number,
-                    str(pr_info.get("head", {}).get("sha") or head_sha),
-                    str(pr_info.get("base", {}).get("ref") or config.MAIN_BRANCH),
-                    RepairOrigin.JULES.value,
-                )
-
-                def send_jules() -> PRRepairResult:
-                    if not _guard_outbound_jules_send(repo_name, config, session_id):
-                        reason = f"Blocked merge-conflict resolution request for PR #{pr_number}: session '{session_id}' belongs to a durably retired implementation slot (REQ-009)"
-                        return PRRepairResult(RepairDisposition.REFUSED, reason=reason)
-                    prompt = render_prompt("pr.jules_merge_conflict_resolution")
-                    with _new_pr_correction_request(repo_name, pr_number):
-                        jules_client.send_message(session_id, prompt)
-                    return PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, attempt_started=True)
-
-                result = BaseUpdateConflictExecutionService().execute_conflict_repair(
-                    request,
-                    lambda: _dispatch_jules_repair(repo_name, pr_info, RepairKind.MERGE_CONFLICT, session_id, send_jules),
-                )
-                if result.disposition is RepairDisposition.ACCEPTED_OR_UNCERTAIN:
-                    logger.info(f"Requested Jules to resolve merge conflict in session {session_id}")
-                    log_action(f"Requested Jules to resolve merge conflicts for PR #{pr_number}")
-                    _record_pr_stage(pr_number, "pr.repair-delegation", f"pr#{pr_number} repair delegation", Outcome.ACCEPTED_HANDOFF, {"effect": "merge-conflict", "backend": "jules"})
-                return False
-            else:
-                logger.warning(f"Jules PR #{pr_number} has merge conflicts but no session ID found. Cannot delegate.")
-        except Exception as e:
-            logger.error(f"Error requesting Jules to resolve conflict: {e}")
+        logger.info(f"PR #{pr_number} is a historical Jules PR with merge conflicts; provider repair is retired")
+        _record_pr_stage(
+            pr_number,
+            "pr.repair-delegation",
+            f"pr#{pr_number} repair delegation",
+            Outcome.SKIPPED,
+            {"effect": "merge-conflict", "backend": "jules", "reason": "historical Jules repair is retired"},
+        )
+        return False
 
     # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
     # the bot recreates the PR against the updated base branch by itself.
