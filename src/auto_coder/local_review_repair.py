@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -72,6 +72,23 @@ class LocalReviewRepairRecord:
     local_job_id: str = ""
     feedback_identities: tuple[str, ...] = ()
     expected_push_url: str = ""
+    updated_at: float = 0.0
+    owner_pid: Optional[int] = None
+    owner_boot_id: str = ""
+    owner_start_ticks: Optional[int] = None
+    pre_push_evidence_json: str = ""
+    publication_started: bool = False
+
+
+@dataclass(frozen=True)
+class LocalReviewRepairSupersession:
+    """One immutable evidence-only disposition of a retained correction."""
+
+    attempt_id: str
+    incarnation: int
+    replacement_head: str
+    evidence_json: str
+    settled_at: float
 
 
 @dataclass(frozen=True)
@@ -232,6 +249,16 @@ class LocalReviewRepairStore:
                 connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN local_job_id TEXT NOT NULL DEFAULT ''")
             if "expected_push_url" not in columns:
                 connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN expected_push_url TEXT NOT NULL DEFAULT ''")
+            if "pre_push_evidence_json" not in columns:
+                connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN pre_push_evidence_json TEXT NOT NULL DEFAULT ''")
+            if "publication_started" not in columns:
+                connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN publication_started INTEGER NOT NULL DEFAULT 0")
+            connection.execute("""CREATE TABLE IF NOT EXISTS local_review_repair_supersessions (
+                repository TEXT NOT NULL, pr_number INTEGER NOT NULL,
+                attempt_id TEXT NOT NULL, incarnation INTEGER NOT NULL,
+                replacement_head TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                settled_at REAL NOT NULL,
+                PRIMARY KEY(repository, pr_number, attempt_id))""")
             connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -303,16 +330,18 @@ class LocalReviewRepairStore:
 
     def _recover_dead_owners(self, connection: sqlite3.Connection, request: LocalReviewRepairRequest) -> None:
         rows = connection.execute(
-            "SELECT attempt_id, owner_pid, owner_boot_id, owner_start_ticks, workspace_path, head_sha " "FROM local_review_repair_attempts WHERE repository=? AND pr_number=? AND phase='executing'",
+            "SELECT attempt_id, owner_pid, owner_boot_id, owner_start_ticks, workspace_path, head_sha, pre_push_evidence_json " "FROM local_review_repair_attempts WHERE repository=? AND pr_number=? AND phase='executing'",
             (request.repository, request.pr_number),
         ).fetchall()
-        for attempt_id, pid, boot_id, start_ticks, workspace, head_sha in rows:
+        for attempt_id, pid, boot_id, start_ticks, workspace, head_sha, pre_push_evidence_json in rows:
             # Legacy or unavailable ownership evidence cannot prove an exit.
             if pid is None or not boot_id or start_ticks is None:
                 continue
             if not process_is_dead(ProcessIdentity(pid, boot_id, start_ticks), read_process_identity(pid)):
                 continue
-            phase, result_sha = "not_started", ""
+            # Captured settled output remains recovery work even when the owner
+            # exited before recording its final local failure disposition.
+            phase, result_sha = ("indeterminate" if pre_push_evidence_json else "not_started"), ""
             if workspace and Path(workspace).exists():
                 result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace, capture_output=True, text=True)
                 if result.returncode != 0:
@@ -322,8 +351,8 @@ class LocalReviewRepairStore:
                     phase, result_sha = "publication_pending", result.stdout.strip()
             reason = f"Recovered interrupted local correction: owner process {pid} exited"
             connection.execute(
-                "UPDATE local_review_repair_attempts SET phase=?, result_sha=?, reason=?, updated_at=? " "WHERE repository=? AND pr_number=? AND attempt_id=? AND phase='executing'",
-                (phase, result_sha, reason, time.time(), request.repository, request.pr_number, attempt_id),
+                "UPDATE local_review_repair_attempts SET phase=?, result_sha=?, reason=?, updated_at=?, " "publication_started=CASE WHEN ?='publication_pending' THEN 1 ELSE publication_started END " "WHERE repository=? AND pr_number=? AND attempt_id=? AND phase='executing'",
+                (phase, result_sha, reason, time.time(), phase, request.repository, request.pr_number, attempt_id),
             )
             logger.warning(f"{request.repository} PR #{request.pr_number}: {reason}; next phase={phase}")
             try:
@@ -348,10 +377,15 @@ class LocalReviewRepairStore:
         reason: str = "",
         workspace_path: str = "",
     ) -> bool:
+        if phase == "superseded":
+            return False  # Only evidence settlement may create this disposition.
         with self._connect() as connection:
             cursor = connection.execute(
-                "UPDATE local_review_repair_attempts SET phase=?, result_sha=?, reason=?, workspace_path=?, " "invocation_entered=CASE WHEN ?='not_started' THEN 0 ELSE invocation_entered END, updated_at=? " "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=?",
-                (phase, result_sha, reason, workspace_path, phase, time.time(), request.repository, request.pr_number, claim.attempt_id, claim.incarnation),
+                "UPDATE local_review_repair_attempts SET phase=?, result_sha=?, reason=?, workspace_path=?, "
+                "invocation_entered=CASE WHEN ?='not_started' THEN 0 ELSE invocation_entered END, updated_at=?, "
+                "publication_started=CASE WHEN ?='publication_pending' THEN 1 ELSE publication_started END "
+                "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=? AND phase<>'superseded'",
+                (phase, result_sha, reason, workspace_path, phase, time.time(), phase, request.repository, request.pr_number, claim.attempt_id, claim.incarnation),
             )
             return cursor.rowcount == 1
 
@@ -364,12 +398,30 @@ class LocalReviewRepairStore:
             )
             return cursor.rowcount == 1
 
-    def get(self, request: LocalReviewRepairRequest, attempt_id: Optional[str] = None) -> Optional[LocalReviewRepairRecord]:
+    def checkpoint_pre_push(self, request: LocalReviewRepairRequest, claim: LocalReviewRepairClaim, evidence_json: str) -> bool:
+        """Retain one immutable checkpoint of settled pre-push output."""
+        if not evidence_json or claim.attempt_id != request.attempt_id:
+            return False
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT attempt_id, head_sha, head_ref, phase, result_sha, reason, incarnation, workspace_path, invocation_entered, local_job_id, feedback_json, expected_push_url " "FROM local_review_repair_attempts WHERE repository=? AND pr_number=? AND attempt_id=?",
-                (request.repository, request.pr_number, attempt_id or request.attempt_id),
-            ).fetchone()
+            cursor = connection.execute(
+                "UPDATE local_review_repair_attempts SET pre_push_evidence_json=?, "
+                "updated_at=CASE WHEN pre_push_evidence_json='' THEN ? ELSE updated_at END "
+                "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=? "
+                "AND phase='executing' AND invocation_entered=1 AND result_sha='' AND publication_started=0 "
+                "AND head_sha=? AND head_ref=? AND expected_push_url=? "
+                "AND (pre_push_evidence_json='' OR pre_push_evidence_json=?)",
+                (evidence_json, time.time(), request.repository, request.pr_number, claim.attempt_id, claim.incarnation, request.head_sha, request.head_ref, request.expected_push_url, evidence_json),
+            )
+            return cursor.rowcount == 1
+
+    def _get_record(self, connection: sqlite3.Connection, request: LocalReviewRepairRequest, attempt_id: str) -> Optional[LocalReviewRepairRecord]:
+        row = connection.execute(
+            "SELECT attempt_id, head_sha, head_ref, phase, result_sha, reason, incarnation, workspace_path, "
+            "invocation_entered, local_job_id, feedback_json, expected_push_url, updated_at, "
+            "owner_pid, owner_boot_id, owner_start_ticks, pre_push_evidence_json, publication_started "
+            "FROM local_review_repair_attempts WHERE repository=? AND pr_number=? AND attempt_id=?",
+            (request.repository, request.pr_number, attempt_id),
+        ).fetchone()
         if row is None:
             return None
         return LocalReviewRepairRecord(
@@ -385,7 +437,80 @@ class LocalReviewRepairStore:
             local_job_id=str(row[9]),
             feedback_identities=tuple(json.loads(row[10])),
             expected_push_url=str(row[11]),
+            updated_at=float(row[12]),
+            owner_pid=int(row[13]) if row[13] is not None else None,
+            owner_boot_id=str(row[14] or ""),
+            owner_start_ticks=int(row[15]) if row[15] is not None else None,
+            pre_push_evidence_json=str(row[16]),
+            publication_started=bool(row[17]),
         )
+
+    def get(self, request: LocalReviewRepairRequest, attempt_id: Optional[str] = None) -> Optional[LocalReviewRepairRecord]:
+        with self._connect() as connection:
+            return self._get_record(connection, request, attempt_id or request.attempt_id)
+
+    def _get_supersession(self, connection: sqlite3.Connection, request: LocalReviewRepairRequest, attempt_id: str) -> Optional[LocalReviewRepairSupersession]:
+        row = connection.execute(
+            "SELECT attempt_id, incarnation, replacement_head, evidence_json, settled_at " "FROM local_review_repair_supersessions WHERE repository=? AND pr_number=? AND attempt_id=?",
+            (request.repository, request.pr_number, attempt_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return LocalReviewRepairSupersession(str(row[0]), int(row[1]), str(row[2]), str(row[3]), float(row[4]))
+
+    def get_supersession(self, request: LocalReviewRepairRequest, attempt_id: Optional[str] = None) -> Optional[LocalReviewRepairSupersession]:
+        """Read provenance without reclassifying or changing retained work."""
+        with self._connect() as connection:
+            return self._get_supersession(connection, request, attempt_id or request.attempt_id)
+
+    def settle_superseded(
+        self,
+        request: LocalReviewRepairRequest,
+        expected_record: LocalReviewRepairRecord,
+        replacement_head: str,
+        evidence_json: str,
+        confirm: Callable[[], bool],
+    ) -> bool:
+        """Atomically release exactly the verified old blocker, retaining evidence.
+
+        The caller supplies the read-only Git/remote evidence confirmation. It
+        runs under the same database write transaction as the final comparison
+        so another evaluator or stale execution cannot replace this attempt.
+        """
+        if (
+            not replacement_head
+            or request.head_repository != request.repository
+            or replacement_head == expected_record.head_sha
+            or not evidence_json
+            or request.attempt_id != expected_record.attempt_id
+            or (request.head_sha, request.head_ref, request.feedback_identities, request.expected_push_url) != (expected_record.head_sha, expected_record.head_ref, expected_record.feedback_identities, expected_record.expected_push_url)
+            or expected_record.phase != "indeterminate"
+            or expected_record.result_sha
+            or expected_record.publication_started
+        ):
+            return False
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get_record(connection, request, expected_record.attempt_id)
+            prior = self._get_supersession(connection, request, expected_record.attempt_id)
+            if prior is not None:
+                matches = current == replace(expected_record, phase="superseded", updated_at=prior.settled_at) and expected_record.incarnation == prior.incarnation and prior.replacement_head == replacement_head and prior.evidence_json == evidence_json
+                connection.commit()
+                return matches
+            if current != expected_record or not confirm():
+                connection.rollback()
+                return False
+            settled_at = time.time()
+            connection.execute(
+                "INSERT INTO local_review_repair_supersessions " "(repository, pr_number, attempt_id, incarnation, replacement_head, evidence_json, settled_at) " "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (request.repository, request.pr_number, expected_record.attempt_id, expected_record.incarnation, replacement_head, evidence_json, settled_at),
+            )
+            connection.execute(
+                "UPDATE local_review_repair_attempts SET phase='superseded', updated_at=? " "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=? AND phase='indeterminate'",
+                (settled_at, request.repository, request.pr_number, expected_record.attempt_id, expected_record.incarnation),
+            )
+            connection.commit()
+            return True
 
     def get_unfinished(self, request: LocalReviewRepairRequest, *, feedback_prefix: str) -> Optional[LocalReviewRepairRecord]:
         """Observe owned unfinished output, recovering only proven dead owners."""
@@ -400,7 +525,9 @@ class LocalReviewRepairStore:
         for attempt_id, feedback_json in rows:
             identities = json.loads(feedback_json)
             if identities and all(isinstance(value, str) and value.startswith(feedback_prefix) for value in identities):
-                return self.get(request, str(attempt_id))
+                record = self.get(request, str(attempt_id))
+                if record is not None and record.phase in {"executing", "indeterminate", "publication_pending"}:
+                    return record
         return None
 
     def get_publication_pending(self, request: LocalReviewRepairRequest) -> Optional[LocalReviewRepairRecord]:
@@ -735,6 +862,20 @@ def execute_local_review_repair(
         commit_message = f"Fix unresolved review findings for PR #{request.pr_number}"
         commit = git_commit_with_retry(commit_message, cwd=worktree) if allow_commit_repair else git_commit_with_retry(commit_message, cwd=worktree, allow_repair=False)
         if not commit.success:
+            if not allow_commit_repair and all(identity.startswith("review-output:") for identity in request.feedback_identities):
+                # The captured-output copier has returned and Git staging has
+                # completed. Retain structured evidence only when the failed
+                # commit left this same owned worktree at its original head.
+                from .review_supersession import capture_pre_push_evidence
+
+                try:
+                    retained = store.get(request)
+                    if retained is not None:
+                        evidence = capture_pre_push_evidence(request, retained, repo_root)
+                        if not store.checkpoint_pre_push(request, claim, evidence):
+                            logger.warning("PR #{} pre-push evidence checkpoint lost ownership", request.pr_number)
+                except Exception as exc:
+                    logger.warning("PR #{} pre-push evidence unavailable: {}", request.pr_number, exc)
             store.transition(request, claim, "indeterminate", reason=commit.stderr, workspace_path=worktree)
             preserve_worktree = True
             return LocalReviewRepairOutcome("indeterminate", f"corrective commit failed after execution: {commit.stderr}", executed=True)

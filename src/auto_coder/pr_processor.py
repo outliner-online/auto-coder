@@ -184,6 +184,7 @@ from .review_capture.pr_adversarial_audit import (
     record_reused,
 )
 from .review_feedback_marker import is_adjudication_feedback, reply_claims_review_addressed, reply_requests_review_correction
+from .review_supersession import ReviewSupersessionTarget
 from .review_thread_closure_receipt import CLOSURE_RECEIPT_PREFIX, ClosureReceipt, closure_receipt_lock, observe_closure_receipt, put_receipt
 from .review_thread_validation import (
     ClaimedReviewThread,
@@ -725,6 +726,23 @@ def _review_publication_authorized(github_client: Any, repo_name: str, pr_number
     live = _strict_pull_request_target(github_client, repo_name, pr_number)
     head = live["head"]
     return bool(expected_ref) and (head.get("sha"), head.get("ref"), (head.get("repo") or {}).get("full_name")) == (expected_head, expected_ref, repo_name)
+
+
+def _review_supersession_target(github_client: Any, repo_name: str, pr_number: int) -> ReviewSupersessionTarget:
+    """Read uncached target identity for evidence-only correction supersession."""
+    live = _strict_pull_request_target(github_client, repo_name, pr_number)
+    head = live["head"]
+    base_repository = (live["base"].get("repo") or {}).get("full_name")
+    if live.get("number") != pr_number or (base_repository is not None and base_repository != repo_name):
+        raise RuntimeError("The current PR belongs to a different repository or number")
+    return ReviewSupersessionTarget(
+        repo_name,
+        pr_number,
+        str((head.get("repo") or {}).get("full_name") or ""),
+        str(head.get("ref") or ""),
+        head["sha"],
+        live["state"],
+    )
 
 
 def _pr_open_incarnation_token(github_client: Any, repo_name: str, pr_number: int, metadata: Dict[str, Any]) -> str:
@@ -5868,7 +5886,7 @@ def _record_reviewer_correction(
         f"pr#{pr_number} adversarial validation",
         Outcome.DEFERRED,
         {
-            "effect": "reviewer-publication-resumed" if resumed else "reviewer-source-changes",
+            "effect": "reviewer-correction-superseded" if correction.phase == "superseded" else "reviewer-publication-resumed" if resumed else "reviewer-source-changes",
             "examined_head": head_sha,
             "local_phase": correction.phase,
             "published": correction.published,
@@ -6681,6 +6699,7 @@ def _coordinate_pr_review(
             pr_number=pr_number,
             root=lambda: _pr_validation_repository_cwd(repo_name),
             authority_check=lambda sha, ref: _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
+            current_target=lambda: _review_supersession_target(github_client, repo_name, pr_number),
         )
     except Exception as exc:
         _record_review_wait(repo_name, pr_number, scope.head_sha, actions, processing_status, f"reviewer publication recovery unavailable: {exc}")

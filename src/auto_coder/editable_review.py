@@ -24,6 +24,7 @@ from .local_review_repair import (
     get_origin_push_url,
     local_review_repair_db_path,
 )
+from .review_supersession import ReviewSupersessionTarget, reconcile_review_supersession
 from .worktree_utils import (
     WorkspaceFileState,
     WorkspaceHandoffError,
@@ -173,6 +174,7 @@ def resume_pending_review_publication(
     root: str | Callable[[], str],
     authority_check: Optional[PublicationAuthorityCheck] = None,
     store: Optional[LocalReviewRepairStore] = None,
+    current_target: Optional[Callable[[], ReviewSupersessionTarget]] = None,
 ) -> Optional[LocalReviewRepairOutcome]:
     """Recover retained reviewer output before admitting another reviewer.
 
@@ -184,9 +186,11 @@ def resume_pending_review_publication(
     record = store.get_unfinished(lookup, feedback_prefix=REVIEW_OUTPUT_PREFIX)
     if record is None:
         return None
+    request = LocalReviewRepairRequest(repository, pr_number, repository, record.head_ref, record.head_sha, record.feedback_identities, "", expected_push_url=record.expected_push_url)
+    if record.phase == "indeterminate":
+        return reconcile_review_supersession(request, store, record, Path(root() if callable(root) else root).resolve(), current_target)
     if record.phase != "publication_pending":
         return LocalReviewRepairOutcome(record.phase, f"reviewer publication is {record.phase}; retained output requires reconciliation", executed=True)
-    request = LocalReviewRepairRequest(repository, pr_number, repository, record.head_ref, record.head_sha, record.feedback_identities, "", expected_push_url=record.expected_push_url)
     return _resume_publication(
         request,
         store,
