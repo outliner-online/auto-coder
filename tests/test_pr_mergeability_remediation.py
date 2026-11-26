@@ -10,7 +10,10 @@ pytestmark = pytest.mark.pr_repair_contract
 def _client():
     """A Mock GitHub client pre-configured so the stale-review-thread
     rollback retry at the top of _handle_pr_merge is a no-op."""
-    client = Mock()
+    from src.auto_coder import pr_processor
+
+    client = Mock(token="token")
+    client.api_for.side_effect = lambda *_args, **_kwargs: pr_processor.get_ghapi_client(client.token)
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
     client.get_pr_comments_strict.return_value = []
     client.get_pr_review_threads_strict.return_value = []

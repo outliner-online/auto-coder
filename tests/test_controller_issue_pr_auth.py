@@ -5,7 +5,13 @@ import httpx
 
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.github_controller_auth import ControllerCredential, ControllerIdentity
-from auto_coder.pr_processor import _is_dependabot_pr, _is_local_llm_pr, evaluate_dependency_bot_admission
+from auto_coder.pr_processor import (
+    _is_dependabot_pr,
+    _is_local_llm_pr,
+    _start_mergeability_remediation,
+    evaluate_dependency_bot_admission,
+)
+from auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
 from auto_coder.util.gh_cache import GitHubClient
 
 
@@ -13,8 +19,10 @@ class RenewableProvider:
     def __init__(self) -> None:
         self.tokens = ["installation-one", "installation-two"]
         self.calls = 0
+        self.requests = []
 
     def credential_for(self, repo_name, required_permissions):
+        self.requests.append((repo_name, dict(required_permissions)))
         token = self.tokens[min(self.calls, 1)]
         self.calls += 1
         return ControllerCredential(
@@ -52,6 +60,78 @@ def test_held_api_resolves_renewed_installation_credential_for_each_send():
     assert transport.request.call_args_list[0].kwargs["headers"]["Authorization"] == "Bearer installation-one"
     assert transport.request.call_args_list[1].kwargs["headers"]["Authorization"] == "Bearer installation-two"
     assert provider.calls == 2
+
+
+def test_conflict_remediation_metadata_read_uses_injected_installation_credential():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/128")
+    transport.request.return_value = httpx.Response(
+        200,
+        json={
+            "number": 128,
+            "user": {"login": "auto-coder[bot]"},
+            "body": "",
+            "head": {
+                "ref": "issue-128",
+                "sha": "d" * 40,
+                "repo": {"full_name": "owner/repo"},
+            },
+            "base": {
+                "ref": "main",
+                "sha": "e" * 40,
+                "repo": {"full_name": "owner/repo"},
+            },
+        },
+        request=request,
+    )
+    admitted = PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, reason="queued")
+
+    with (
+        patch(
+            "auto_coder.pr_processor.check_pr_repair_exhaustion",
+            return_value=None,
+        ),
+        patch(
+            "auto_coder.pr_processor._offer_selected_local_pr_repair",
+            return_value=admitted,
+        ),
+        patch(
+            "auto_coder.util.gh_cache.get_caching_client",
+            return_value=transport,
+        ),
+    ):
+        actions = _start_mergeability_remediation(128, "DIRTY", "owner/repo", client)
+
+    sent = transport.request.call_args
+    assert sent.kwargs["method"].upper() == "GET"
+    assert sent.kwargs["url"] == str(request.url)
+    assert sent.kwargs["headers"]["Authorization"] == "Bearer installation-one"
+    assert provider.requests == [("owner/repo", {"pull_requests": "read"})]
+    assert actions.repair_result is admitted
+
+
+def test_conflict_remediation_app_credential_failure_never_sends_personal_fallback():
+    provider = Mock()
+    provider.credential_for.side_effect = RuntimeError("installation unavailable")
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+
+    with (
+        patch(
+            "auto_coder.pr_processor.check_pr_repair_exhaustion",
+            return_value=None,
+        ),
+        patch(
+            "auto_coder.util.gh_cache.get_caching_client",
+            return_value=transport,
+        ),
+    ):
+        actions = _start_mergeability_remediation(128, "DIRTY", "owner/repo", client)
+
+    transport.request.assert_not_called()
+    assert any("installation unavailable" in action for action in actions)
 
 
 def test_controller_bot_local_origin_is_not_dependency_bot():

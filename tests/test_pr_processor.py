@@ -1007,6 +1007,7 @@ def test_controller_branch_origin_reaches_durable_mergeability_remediation():
     client = Mock(token="unused-personal-token")
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
     api = Mock()
+    client.api_for.return_value = api
     api.pulls.get.return_value = {
         "number": 128,
         "user": {"login": "auto-coder[bot]", "id": 101},
@@ -1026,7 +1027,6 @@ def test_controller_branch_origin_reaches_durable_mergeability_remediation():
 
     with (
         patch("src.auto_coder.pr_processor.check_pr_repair_exhaustion", return_value=None),
-        patch("src.auto_coder.pr_processor.get_ghapi_client", return_value=api),
         patch("src.auto_coder.pr_processor.GitHubClient.get_instance") as singleton,
         patch(
             "src.auto_coder.pr_processor._offer_selected_local_pr_repair",

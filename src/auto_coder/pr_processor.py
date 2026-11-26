@@ -4858,7 +4858,14 @@ def _start_mergeability_remediation(
         # Step 1: Get PR details to determine the base branch and head branch
         try:
             client = github_client or GitHubClient.get_instance()
-            api = client.api_for(repo_name, required_permissions={"pull_requests": "read"}) if vars(client).get("auth_provider") is not None else get_ghapi_client(client.token)
+            api = (
+                client.api_for(
+                    repo_name,
+                    required_permissions={"pull_requests": "read"},
+                )
+                if github_client is not None
+                else get_ghapi_client(client.token)
+            )
             owner, repo = repo_name.split("/")
 
             pr_details = api.pulls.get(owner, repo, pull_number=pr_number)
