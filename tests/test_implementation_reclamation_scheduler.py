@@ -185,6 +185,31 @@ def test_scheduled_reclamation_isolates_legacy_jules_unknown_from_local_owner(tm
     assert "historical-jules-session" in (pending.last_reason or "")
 
 
+def test_scheduled_reclamation_refuses_changed_activity_revision(tmp_path):
+    """The scheduled observation must reach the transaction with its revision intact."""
+    from auto_coder.implementation_retirement import retire_implementation_slot
+
+    slots = _setup_slots(tmp_path, limit=1)
+    store = ReclamationObligationStore.for_slots(slots)
+    incarnation = _establish_owner_with_closed_pr(slots, ISSUE_100, 201, "gen-100")
+    assert schedule_reevaluation(ISSUE_100, slots, store, due_at=0)
+    github = _make_github_client(pr_responses={201: {"number": 201, "state": "closed"}}, connected_prs={100: [201]})
+
+    def change_before_transaction(repository, observation, routing):
+        assert slots.record_implementation_pr(ISSUE_100, 202)
+        return retire_implementation_slot(repository, observation, routing)
+
+    with patch("auto_coder.implementation_reclamation_scheduler.retire_implementation_slot", side_effect=change_before_transaction):
+        assert run_due_reclamation_checks(slots, store, github_client=github, now=100) == 0
+
+    assert slots.owner_incarnation(ISSUE_100) == incarnation
+    assert slots.available_normal_slots() == 0
+    assert incarnation not in slots._read_retired()
+    (pending,) = store.all()
+    assert pending.owner == ISSUE_100
+    assert "STALE_OBSERVATION" in (pending.last_reason or "")
+
+
 def test_try_serialize_propagates_protected_operation_failure(tmp_path):
     from auto_coder.implementation_slots import ImplementationSlotLockTimeout
 
