@@ -10,6 +10,7 @@ from src.auto_coder.cloud_run import CloudRun, CloudRunRepository
 from src.auto_coder.pr_processor import (
     _close_empty_pr,
     _is_empty_pr,
+    _link_jules_pr_to_issue,
     _resolve_pr_issue_numbers,
     process_pull_request,
 )
@@ -403,6 +404,53 @@ class TestAutomationEngineEmptyPRRequeue:
         }
         candidate = Candidate(type="pr", data=historical_pr, priority=1)
 
+        with patch.object(engine, "_process_unlocked_issue") as process_unlocked:
+            result = engine._process_single_candidate_unified(
+                "owner/repo",
+                candidate,
+                engine.config,
+                jules_mode=True,
+            )
+
+        assert result.success is True
+        github.close_pr.assert_called_once()
+        cloud_manager_class.assert_not_called()
+        mock_increment.assert_not_called()
+        process_unlocked.assert_not_called()
+
+    @patch("src.auto_coder.pr_processor.increment_attempt")
+    @patch("src.auto_coder.pr_processor.CloudManager")
+    def test_historical_binding_cannot_be_laundered_into_empty_pr_retry(
+        self,
+        cloud_manager_class,
+        mock_increment,
+    ):
+        """A prior nonempty cycle cannot persist a session-derived retry grant."""
+        github = Mock()
+        engine = AutomationEngine(github, config=AutomationConfig())
+        cloud_manager_class.return_value.get_issue_by_session.return_value = 42
+        historical_pr = {
+            "number": 4975,
+            "title": "Historical provider output",
+            "body": "https://jules.google.com/session/historical-output",
+            "state": "open",
+            "user": {"login": "google-labs-jules"},
+            "head": {"ref": "provider-output", "sha": "abc123"},
+            "base": {"ref": "main"},
+            "changed_files": 1,
+            "additions": 1,
+            "deletions": 0,
+        }
+
+        # This is the same production link step reached after a nonempty PR is
+        # admitted.  It must not turn retained session history into body text
+        # that a later daemon cycle treats as explicit authorization.
+        assert _link_jules_pr_to_issue("owner/repo", historical_pr, github) is False
+        github.update_pr_body.assert_not_called()
+        assert "close #42" not in historical_pr["body"].lower()
+
+        historical_pr.update(changed_files=0, additions=0, deletions=0)
+        candidate = Candidate(type="pr", data=historical_pr, priority=1)
         with patch.object(engine, "_process_unlocked_issue") as process_unlocked:
             result = engine._process_single_candidate_unified(
                 "owner/repo",

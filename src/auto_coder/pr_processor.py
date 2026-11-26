@@ -10260,7 +10260,20 @@ def _link_jules_pr_to_issue(
             logger.info(f"Skipping issue lookup for Jules special PR #{pr_number} ('{pr_title}')")
             return True
 
-        issue_number = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
+        if is_jules:
+            # A persisted Jules session binding is historical ownership, not
+            # authorization to create an ordinary Issue link.  Otherwise that
+            # generated link can outlive this cycle and be mistaken for an
+            # explicit user-authored association by empty-PR recovery.
+            resolved_issues = _resolve_pr_issue_numbers(
+                repo_name,
+                pr_data,
+                github_client,
+                include_session_history=False,
+            )
+            issue_number = resolved_issues[0] if resolved_issues else None
+        else:
+            issue_number = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
 
         if not issue_number:
             logger.warning(f"No issue found for session PR #{pr_number} (checked session, branch, and title)")
