@@ -1433,14 +1433,8 @@ def _stop_jules_session_for_issue(
     mark_session_stopped(session_id)
     logger.info(f"Stopped Jules session {session_id} for issue #{issue_number} after {timeout_hours}h without a PR")
 
-    try:
-        github_client.add_comment_to_issue(
-            repo_name,
-            issue_number,
-            f"Auto-Coder: Jules did not open a PR within {timeout_hours} hours, so I stopped the Jules session `{session_id}` and will implement this issue with the backend_with_high_score backend instead.",
-        )
-    except Exception as e:
-        logger.warning(f"Failed to comment on issue #{issue_number} about the stopped Jules session: {e}")
+    # Retirement is intentionally silent on the Issue: no attempt or fallback
+    # is promised, and no comment can be mistaken for fresh authorization.
 
     return True
 
@@ -1454,230 +1448,78 @@ def handle_stale_jules_issue_sessions(
     routing: Optional[IssueStageRoutingStore] = None,
     dispatch_replacement: Optional[Callable[[int, Dict[str, Any], Dict[str, Any], Optional[str]], CandidateProcessingResult]] = None,
 ) -> StaleJulesIssueResult:
-    """Take issues away from Jules sessions that ran out of time without opening a PR.
+    """Retire timed-out Jules sessions without authorizing successor work.
 
-    A Jules session that has been working on an issue for longer than
-    ``config.JULES_ISSUE_PR_TIMEOUT_HOURS`` without producing a pull request is
-    considered stuck. Such a session is sent a ``stop`` message, the ``@auto-coder``
-    label the Jules run left on the issue is released, and the issue is implemented
-    by the ``backend_with_high_score`` backend instead.
-
-    Args:
-        repo_name: Repository name (e.g., 'owner/repo')
-        config: AutomationConfig instance
-        github_client: GitHub client for API operations
-
-    Returns:
-        StaleJulesIssueResult describing which issues were handled.
+    Historical no-PR timeouts may still stop the remote Jules session and
+    release its completed ownership. They never validate, increment, comment,
+    or dispatch a replacement implementation.
     """
-    # Jules no-PR timeouts are historical observations only. They must not
-    # stop/release an old execution in a way that admits a successor, publish
-    # an attempt comment, or submit replacement provider work.
-    return StaleJulesIssueResult()
-
+    del authorize_dispatch, routing, dispatch_replacement
     result = StaleJulesIssueResult()
     timeout_hours = config.JULES_ISSUE_PR_TIMEOUT_HOURS
-
     try:
         jules_client = JulesClient()
         sessions = jules_client.list_sessions(repo_name=repo_name)
-    except Exception as e:
-        logger.warning(f"Failed to list Jules sessions for stale issue check: {e}")
+    except Exception as exc:
+        logger.warning(f"Failed to list Jules sessions for stale issue check: {exc}")
         return result
 
     cloud_manager = CloudManager(repo_name)
     now = datetime.now(timezone.utc)
     timeout = timedelta(hours=timeout_hours)
-
     for session in sessions:
         if not isinstance(session, dict):
-            logger.warning(f"Skipping invalid Jules session object (expected dict, got {type(session)})")
             continue
-
         session_id = _extract_session_id(session)
-        if not session_id:
+        if not session_id or is_session_stopped(session_id) or get_session_pull_request(session):
             continue
-
+        created = session.get("createTime")
+        if not created:
+            continue
         try:
-            if is_session_stopped(session_id):
+            created_at = parser.parse(str(created))
+        except Exception as exc:
+            logger.warning(f"Failed to parse createTime '{created}' for Jules session {session_id}: {exc}")
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if now - created_at <= timeout:
+            continue
+        issue_number = cloud_manager.get_issue_by_session(session_id)
+        if not issue_number:
+            continue
+        try:
+            if resolve_authoritative_item_type(github_client, repo_name, issue_number) != "issue":
                 continue
-
-            # A session that already produced a PR is doing its job
-            if get_session_pull_request(session):
+            snapshot = github_client.get_issue_dispatch_snapshot_strict(repo_name, issue_number)
+            if not isinstance(snapshot, dict) or snapshot.get("number") != issue_number or str(snapshot.get("state") or "open").lower() != "open":
                 continue
-
-            create_time_str = session.get("createTime")
-            if not create_time_str:
-                continue
-
-            try:
-                create_time = parser.parse(str(create_time_str))
-            except Exception as e:
-                logger.warning(f"Failed to parse createTime '{create_time_str}' for Jules session {session_id}: {e}")
-                continue
-
-            if create_time.tzinfo is None:
-                create_time = create_time.replace(tzinfo=timezone.utc)
-
-            if (now - create_time) <= timeout:
-                continue
-
-            issue_number = cloud_manager.get_issue_by_session(session_id)
-            if not issue_number:
-                continue
-
-            # cloud.csv also tracks PR-bound sessions, and stale/corrupt lifecycle
-            # state could otherwise map a session to a PR number. This resumption
-            # path performs the same Issue lifecycle side effects (attempt
-            # increment, implementation backend start) as the shared candidate
-            # dispatch boundary, so it must use the same authoritative,
-            # cache-bypassing type check and fail closed on the same terms:
-            # only a confirmed Issue may proceed.
-            try:
-                authoritative_type = resolve_authoritative_item_type(github_client, repo_name, issue_number)
-            except Exception as e:
-                logger.warning(f"Skipping stale Jules session {session_id}: could not establish authoritative GitHub item type for #{issue_number}: {e}")
-                continue
-            if authoritative_type != "issue":
-                logger.warning(f"Skipping stale Jules session {session_id}: GitHub identifies #{issue_number} as {authoritative_type}, not an issue")
-                continue
-
-            try:
-                current_issue = github_client.get_issue_dispatch_snapshot_strict(repo_name, issue_number)
-            except Exception as e:
-                logger.warning(f"Skipping stale Jules session {session_id}: could not read authoritative readiness for issue #{issue_number}: {e}")
-                continue
-            inherited_submission = False
-            if isinstance(current_issue, dict) and authorize_dispatch is not None and not is_implementation_ready(current_issue):
-                inherited_submission = isinstance(current_issue.get("parent_issue_number"), int) or bool(current_issue.get("parent_issue_url"))
-                if not inherited_submission:
-                    try:
-                        parent_reader = getattr(github_client, "get_parent_issue_details_strict", None)
-                        parent = parent_reader(repo_name, issue_number) if callable(parent_reader) else None
-                        inherited_submission = isinstance(parent, dict) and isinstance(parent.get("number"), int)
-                    except Exception as e:
-                        logger.warning(f"Skipping stale Jules session {session_id}: could not establish inherited readiness for issue #{issue_number}: {e}")
-                        continue
-            if not isinstance(current_issue, dict) or current_issue.get("number") != issue_number or "pull_request" in current_issue or str(current_issue.get("state") or "open").lower() != "open" or (not is_implementation_ready(current_issue) and not inherited_submission):
-                logger.info(f"Skipping stale Jules session {session_id}: issue #{issue_number} is not eligible for replacement authorization")
-                continue
-
-            issue = github_client.get_issue(repo_name, issue_number)
-            if issue is None:
-                continue
-            issue_data = github_client.get_issue_details(issue)
-            issue_data["title"] = str(current_issue.get("title") or "")
-            issue_data["body"] = str(current_issue.get("body") or "")
-
-            if issue_data.get("state") != "open":
-                continue
-
-            # Jules may have opened the PR without the session outputs reflecting it yet
             if github_client.has_linked_pr(repo_name, issue_number):
                 continue
-
-            owner = ImplementationOwner("issue", issue_number)
-            if implementation_slots is None:
-                logger.warning(f"Skipping stale Jules session {session_id}: implementation capacity admission is unavailable")
+        except Exception as exc:
+            logger.warning(f"Skipping stale Jules session {session_id}: authoritative Issue evidence is unavailable: {exc}")
+            continue
+        if implementation_slots is None:
+            logger.warning(f"Skipping stale Jules session {session_id}: implementation ownership is unavailable")
+            continue
+        owner = ImplementationOwner("issue", issue_number)
+        with implementation_slots.serialize(owner):
+            if not _stop_jules_session_for_issue(
+                jules_client,
+                repo_name,
+                issue_number,
+                session_id,
+                timeout_hours,
+                github_client,
+                implementation_slots=implementation_slots,
+            ):
                 continue
-            serialization = implementation_slots.serialize(owner)
-            with serialization:
-                if authorize_dispatch is None:
-                    logger.warning(f"Skipping stale Jules session {session_id}: specification dispatch authorization is unavailable")
-                    continue
-                # Captured before any of the stop/finish/release calls below,
-                # which may fully release and later recreate this owner record.
-                # Legacy fallback uses this ownership evidence directly.  The
-                # extracted replacement callback instead derives its generation
-                # from the post-stop authorized snapshot, which may include an
-                # edit made while Jules was running.
-                captured_generation = implementation_slots.implementation_generation(owner)
-                if not _stop_jules_session_for_issue(jules_client, repo_name, issue_number, session_id, timeout_hours, github_client, implementation_slots=implementation_slots):
-                    continue
-
-                # The remote generation is now stopped. Remove its durable task
-                # membership before validating the replacement generation, so
-                # semantic validation never retains implementation capacity.
-                for old_execution_id in implementation_slots.active_execution_ids(owner):
-                    implementation_slots.finish_execution(owner, old_execution_id)
-                if not implementation_slots.finish_provider_session(owner, session_id):
-                    # Legacy launches may predate provider-session membership.
-                    # The remote task is confirmed stopped and has no PR, so its
-                    # old logical ownership can now be safely retired.
-                    implementation_slots.release(owner)
-
-                # Stopping Jules is external I/O. Fetch and validate afterward so
-                # edits during that request are part of the replacement identity.
-                authorized_issue = authorize_dispatch(repo_name, issue_number, current_issue)
-                if authorized_issue is None:
-                    continue
-                if not new_work_allowed():
-                    logger.info(f"Deferring stale Jules replacement for issue #{issue_number}: graceful shutdown is draining")
-                    continue
-                issue_data["title"] = str(authorized_issue.get("title") or "")
-                issue_data["body"] = str(authorized_issue.get("body") or "")
-
-                if dispatch_replacement is not None:
-                    result.actions.append(f"Stopped Jules session '{session_id}' for issue #{issue_number} (no PR within {timeout_hours}h)")
-                    get_trace_logger().log(
-                        "Jules Timeout",
-                        f"Stopped Jules session for issue #{issue_number}",
-                        item_type="issue",
-                        item_number=issue_number,
-                        details={"session_id": session_id, "timeout_hours": timeout_hours},
-                    )
-
-                    replacement = dispatch_replacement(issue_number, issue_data, authorized_issue, captured_generation)
-                    result.actions.extend(replacement.actions)
-                    if replacement.success:
-                        result.issue_numbers.append(issue_number)
-                    continue
-
-                replacement_execution_id = implementation_slots.start_execution(
-                    owner,
-                    github_client=github_client if isinstance(github_client, GitHubClient) else None,
-                    generation=captured_generation,
-                )
-                if replacement_execution_id is None:
-                    logger.info(f"Deferring stale Jules replacement for issue #{issue_number}: implementation capacity is occupied")
-                    continue
-                if captured_generation is not None and routing is not None:
-                    # Recover the routing tombstone now in case the earlier
-                    # acquisition crashed before it was persisted (REQ-004).
-                    confirm_implementation_ownership(routing, repo_name, owner, captured_generation)
-                try:
-                    result.actions.append(f"Stopped Jules session '{session_id}' for issue #{issue_number} (no PR within {timeout_hours}h)")
-                    get_trace_logger().log(
-                        "Jules Timeout",
-                        f"Stopped Jules session for issue #{issue_number}",
-                        item_type="issue",
-                        item_number=issue_number,
-                        details={"session_id": session_id, "timeout_hours": timeout_hours},
-                    )
-
-                    # The abandoned Jules run counts as a failed attempt, so the fallback starts
-                    # from a fresh attempt branch instead of the one Jules left behind.
-                    try:
-                        new_attempt = increment_attempt(repo_name, issue_number)
-                        result.actions.append(f"Incremented attempt for issue #{issue_number} to {new_attempt}")
-                    except Exception as exc:
-                        logger.error(f"Failed to increment attempt for issue #{issue_number}: {exc}")
-                        result.actions.append(f"Failed to increment attempt for issue #{issue_number}: {exc}")
-                    from .cli_helpers import create_high_score_backend_manager
-
-                    backend_manager = create_high_score_backend_manager()
-                    if backend_manager is None:
-                        logger.warning("backend_with_high_score is not configured; using the default backend for the Jules fallback")
-                    # The @auto-coder label the Jules run left on the issue is kept so no other
-                    # instance picks the issue up while the fallback is working on it.
-                    result.actions.extend(_take_issue_actions(repo_name, issue_data, config, github_client, backend_manager=backend_manager, implementation_slots=implementation_slots))
-                    result.issue_numbers.append(issue_number)
-                finally:
-                    implementation_slots.finish_execution(owner, replacement_execution_id)
-
-        except Exception as e:
-            logger.error(f"Failed to handle stale Jules session {session_id}: {e}")
-
+            for execution_id in implementation_slots.active_execution_ids(owner):
+                implementation_slots.finish_execution(owner, execution_id)
+            if not implementation_slots.finish_provider_session(owner, session_id):
+                implementation_slots.release(owner)
+            result.actions.append(f"Stopped stale Jules session '{session_id}' for issue #{issue_number}; automatic replacement is retired")
+            result.issue_numbers.append(issue_number)
     return result
 
 

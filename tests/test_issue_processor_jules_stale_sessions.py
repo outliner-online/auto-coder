@@ -139,8 +139,8 @@ class TestHandleStaleJulesIssueSessions:
 
         assert result.issue_numbers == [42]
 
-    def test_stops_session_and_delegates_to_high_score_backend(self, config):
-        """A session older than the timeout without a PR is stopped and handed over."""
+    def test_stops_session_without_replacement_dispatch(self, config):
+        """A session older than the timeout is stopped without successor work."""
         github_client = _github_client()
         backend_manager = MagicMock()
 
@@ -155,24 +155,11 @@ class TestHandleStaleJulesIssueSessions:
         mark_stopped.assert_called_once_with("sess-1")
         assert result.issue_numbers == [42]
 
-        take_actions.assert_called_once()
-        assert take_actions.call_args.kwargs["backend_manager"] is backend_manager
-        assert take_actions.call_args.args[0] == "owner/repo"
-        assert "Implemented issue #42" in result.actions
-
-        # The abandoned Jules run counts as a failed attempt
-        increment.assert_called_once_with("owner/repo", 42)
-        assert "Incremented attempt for issue #42 to 3" in result.actions
-
-        # Durable ownership, rather than a GitHub label override, admits fallback work.
-        assert "check_labels" not in take_actions.call_args.kwargs
+        take_actions.assert_not_called()
+        increment.assert_not_called()
+        assert any("automatic replacement is retired" in action for action in result.actions)
         github_client.remove_labels.assert_not_called()
-
-        # The issue gets a comment explaining the hand-over
-        github_client.add_comment_to_issue.assert_called_once()
-        comment = github_client.add_comment_to_issue.call_args.args[2]
-        assert "12 hours" in comment
-        assert "sess-1" in comment
+        github_client.add_comment_to_issue.assert_not_called()
 
     def test_unready_stale_session_retains_existing_implementation_without_handoff(self, config):
         """Timeout handling must not mutate ownership or dispatch replacement work."""
@@ -190,14 +177,14 @@ class TestHandleStaleJulesIssueSessions:
         )
 
         github_client.get_issue_dispatch_snapshot_strict.assert_called_once_with("owner/repo", 42)
-        jules_client.send_message.assert_not_called()
-        mark_stopped.assert_not_called()
+        jules_client.send_message.assert_called_once_with("sess-1", "stop")
+        mark_stopped.assert_called_once_with("sess-1")
         increment.assert_not_called()
         take_actions.assert_not_called()
         github_client.add_comment_to_issue.assert_not_called()
         github_client.remove_labels.assert_not_called()
-        assert result.issue_numbers == []
-        assert result.actions == []
+        assert result.issue_numbers == [42]
+        assert any("automatic replacement is retired" in action for action in result.actions)
 
     def test_session_within_timeout_is_left_alone(self, config):
         """A session that is still within the timeout keeps working on the issue."""
@@ -495,36 +482,23 @@ def test_daemon_stale_session_stops_old_generation_but_starts_no_replacement_on_
         patch("src.auto_coder.issue_processor.increment_attempt") as increment,
         patch("src.auto_coder.issue_processor._take_issue_actions") as dispatch,
     ):
-        assert engine.handle_stale_jules_issue_sessions("owner/repo") == []
+        actions = engine.handle_stale_jules_issue_sessions("owner/repo")
 
     jules.send_message.assert_called_once_with("sess-1", "stop")
+    assert any("automatic replacement is retired" in action for action in actions)
     increment.assert_not_called()
     dispatch.assert_not_called()
     assert engine.implementation_slots.active_owners() == ()
 
 
-def test_ready_stale_replacement_reenters_normal_capacity_after_validation(config, tmp_path):
-    """A READY daemon handoff cannot dispatch when another Issue takes released capacity."""
+def test_ready_stale_session_does_not_enter_validation_or_replacement(config, tmp_path):
+    """Retirement does not turn readiness into successor authorization."""
     from src.auto_coder.automation_engine import AutomationEngine
-    from src.auto_coder.specification_analyzer import SpecificationAnalysisResult
-    from src.auto_coder.specification_validation_lifecycle import SpecificationValidationLifecycle
 
     github = _github_client()
-    body = "## Requirements\n- REQ-001: Implement replacement."
-    current = {"number": 42, "title": "Replacement", "body": body, "state": "open", "labels": [{"name": "implementation-ready"}]}
-    github.get_issue_dispatch_snapshot_strict.side_effect = lambda *_args: dict(current)
     engine = AutomationEngine(github, config=config)
     slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
     engine.implementation_slots = slots
-    analysis_started = Event()
-    analysis_release = Event()
-
-    def analyze(_manifest, _body):
-        analysis_started.set()
-        assert analysis_release.wait(5)
-        return SpecificationAnalysisResult("READY")
-
-    engine._specification_validators["owner/repo"] = SpecificationValidationLifecycle("owner/repo", "validator", tmp_path / "validations.json", analyze)
     jules = MagicMock()
     jules.get_session.return_value = {"state": "COMPLETED"}
     jules.list_sessions.return_value = [_session("sess-1", age_hours=13)]
@@ -536,16 +510,16 @@ def test_ready_stale_replacement_reenters_normal_capacity_after_validation(confi
         patch("src.auto_coder.issue_processor.is_session_stopped", return_value=False),
         patch("src.auto_coder.issue_processor.increment_attempt") as increment,
         patch("src.auto_coder.issue_processor._take_issue_actions") as dispatch,
-        ThreadPoolExecutor(max_workers=1) as pool,
+        patch.object(engine, "_authorize_stale_jules_dispatch") as authorize,
     ):
-        run = pool.submit(engine.handle_stale_jules_issue_sessions, "owner/repo")
-        assert analysis_started.wait(5)
-        assert slots.start_execution(ImplementationOwner("issue", 99)) is not None
-        analysis_release.set()
-        run.result(timeout=5)
+        actions = engine.handle_stale_jules_issue_sessions("owner/repo")
+
+    jules.send_message.assert_called_once_with("sess-1", "stop")
+    authorize.assert_not_called()
     increment.assert_not_called()
     dispatch.assert_not_called()
-    assert slots.active_owners() == (ImplementationOwner("issue", 99),)
+    assert any("automatic replacement is retired" in action for action in actions)
+    assert slots.active_owners() == ()
 
 
 def test_stale_replacement_rechecks_after_link_lookup_before_ownership(config, tmp_path):
