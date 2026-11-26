@@ -221,9 +221,7 @@ def test_real_codex_review_modes_preserve_source_and_authority(runtime_root: Pat
         if edited_source:
             assert "WRITE_ALLOWED" in provider.tool_evidence
             assert "WRITE_DENIED" not in provider.tool_evidence
-            assert "Strong reviewer produced source changes:" in result["reason"], output
-            assert "provider-entry authority changed during preparation" in result["reason"], output
-            assert "fresh independent review and CI are required" in result["reason"], output
+            assert result["reason"] == "Strong reviewer produced source changes: reviewer correction refused: source edits require a complete pre-edit Strong FINDINGS result", output
         elif write_target:
             assert "WRITE_DENIED" in provider.tool_evidence
             assert "WRITE_ALLOWED" not in provider.tool_evidence
