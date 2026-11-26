@@ -2869,7 +2869,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"})
 
             # Fetch parent issue using dedicated endpoint via GhApi
             # Endpoint: GET /repos/{owner}/{repo}/issues/{issue_number}/parent
@@ -2981,7 +2981,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             # api.issues.create(owner, repo, title, body=None, ... labels=None)
             issue = api.issues.create(owner, repo, title=title, body=body, labels=labels or [])
@@ -3039,7 +3039,7 @@ class GitHubClient:
         """Close an issue with optional comment."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             if comment:
                 api.issues.create_comment(owner, repo, issue_number, body=comment)
@@ -3059,7 +3059,7 @@ class GitHubClient:
         """Reopen a closed issue with optional comment."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             if comment:
                 api.issues.create_comment(owner, repo, issue_number, body=comment)
@@ -3110,7 +3110,7 @@ class GitHubClient:
         """Close a pull request with optional comment."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"pull_requests": "write", "issues": "write"})
 
             if comment:
                 # PRs are issues for comments
@@ -3127,7 +3127,7 @@ class GitHubClient:
         """Add a comment to a pull request."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             # PRs are issues for comments
             api.issues.create_comment(owner, repo, pr_number, body=comment)
@@ -3712,7 +3712,7 @@ class GitHubClient:
 
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             # Using add_labels endpoint which appends to existing labels
             # works for both Issues and PRs
@@ -3744,7 +3744,7 @@ class GitHubClient:
 
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             # Use basic get issue to check current labels
             issue_data = api.issues.get(owner, repo, issue_number)
@@ -3778,7 +3778,7 @@ class GitHubClient:
 
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             for label in labels:
                 try:
@@ -3814,7 +3814,7 @@ class GitHubClient:
 
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"})
 
             issue_data = api.issues.get(owner, repo, issue_number)
             current_labels = [lbl["name"] for lbl in issue_data.get("labels", [])]

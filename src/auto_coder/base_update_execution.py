@@ -356,7 +356,12 @@ def _run_base_update_operation(
 
             # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
             # the bot recreates the PR against the updated base branch by itself.
-            if _is_dependabot_pr(pr_data):
+            try:
+                identity_client = github_client or GitHubClient.get_instance()
+                controller_identity = identity_client.get_authenticated_controller_identity(repo_name)
+            except Exception:
+                controller_identity = None
+            if _is_dependabot_pr(pr_data, controller_identity):
                 actions.append(f"PR #{pr_number} is a dependency-bot PR with merge conflicts. Skipping conflict resolution.")
                 cmd.run_command(["git", "merge", "--abort"])
                 actions.append("ACTION_FLAG:SKIP_ANALYSIS")
@@ -386,7 +391,7 @@ def _run_base_update_operation(
                 actions.append("ACTION_FLAG:SKIP_ANALYSIS")
                 return actions
 
-            if not _is_local_llm_pr(pr_data):
+            if not _is_local_llm_pr(pr_data, controller_identity):
                 actions.repair_result = cloud_repair
                 actions.append(f"Cloud merge-conflict repair could not be delegated for PR #{pr_number}: " f"{cloud_repair.reason}; deferring conflict resolution.")
                 cmd.run_command(["git", "merge", "--abort"])
@@ -417,7 +422,7 @@ def _run_base_update_operation(
                 # Unresolved local conflicts are repair failures, not evidence
                 # that a read-only quality check rejected the merge.
                 remaining_conflicts = scan_conflict_markers()
-                if remaining_conflicts and not _is_local_llm_pr(pr_data):
+                if remaining_conflicts and not _is_local_llm_pr(pr_data, controller_identity):
                     actions.append(f"LLM determined merge would degrade code quality for PR #{pr_number}, skipping merge attempt")
                     actions.append("ACTION_FLAG:DEGRADING_MERGE_SKIP_MERGE")
                 else:

@@ -900,3 +900,97 @@ class TestPRMergeChecksInProgress:
         # Watch should now be scheduled at 120 + 30 = 150 (not waiting until 400)
         assert queue.promote_due_ci_watches("owner/repo", now=149.9) == 0
         assert queue.promote_due_ci_watches("owner/repo", now=150.0) == 1
+
+
+def test_controller_branch_origin_reaches_local_conflict_repair():
+    from src.auto_coder.automation_config import AutomationConfig
+    from src.auto_coder.github_controller_auth import ControllerIdentity
+    from src.auto_coder.pr_processor import PRRepairResult, RepairDisposition, _update_with_base_branch
+    from src.auto_coder.utils import CommandResult
+
+    client = Mock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    pr_data = {
+        "number": 4243,
+        "base_branch": "main",
+        "body": "",
+        "user": {"login": "auto-coder[bot]", "id": 101},
+        "head": {"ref": "issue-123", "sha": "a" * 40},
+    }
+    commands = [
+        CommandResult(True, "", "", 0),
+        CommandResult(True, "3\n", "", 0),
+        CommandResult(False, "CONFLICT", "", 1),
+    ]
+
+    with (
+        patch("src.auto_coder.pr_processor.cmd.run_command", side_effect=commands),
+        patch(
+            "src.auto_coder.pr_processor._dispatch_cloud_conflict_repair",
+            return_value=PRRepairResult(RepairDisposition.REFUSED, reason="not cloud"),
+        ),
+        patch(
+            "src.auto_coder.conflict_resolver._perform_base_branch_merge_and_conflict_resolution",
+            return_value=True,
+        ) as perform,
+        patch(
+            "src.auto_coder.pr_processor._dispatch_local_conflict_repair",
+            side_effect=lambda _repo, _pr, operation: PRRepairResult(RepairDisposition.APPLIED if operation() else RepairDisposition.FAILED),
+        ),
+    ):
+        actions = _update_with_base_branch("owner/repo", pr_data, AutomationConfig(), client)
+
+    perform.assert_called_once()
+    assert not any("dependency-bot PR" in action for action in actions)
+
+
+def test_controller_branch_origin_reaches_definitive_merge_conflict_route():
+    from unittest.mock import MagicMock, patch
+
+    from src.auto_coder.automation_config import AutomationConfig
+    from src.auto_coder.github_controller_auth import ControllerIdentity
+    from src.auto_coder.pr_processor import (
+        PRRepairResult,
+        RepairDisposition,
+        _handle_definitive_merge_rejection,
+    )
+
+    client = MagicMock()
+    client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    api = MagicMock()
+    api.pulls.get.return_value = {
+        "number": 127,
+        "user": {"login": "auto-coder[bot]", "id": 101},
+        "body": "",
+        "head": {"ref": "issue-123", "sha": "d" * 40},
+        "mergeable": False,
+    }
+    admitted = PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, reason="queued")
+    with (
+        patch(
+            "src.auto_coder.pr_processor._dispatch_cloud_conflict_repair",
+            return_value=PRRepairResult(RepairDisposition.REFUSED, reason="not cloud"),
+        ),
+        patch(
+            "src.auto_coder.pr_processor._offer_selected_local_pr_repair",
+            return_value=admitted,
+        ) as local_offer,
+    ):
+        assert (
+            _handle_definitive_merge_rejection(
+                "owner/repo",
+                127,
+                AutomationConfig(),
+                client,
+                api,
+                "owner",
+                "repo",
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                "d" * 40,
+            )
+            is False
+        )
+
+    local_offer.assert_called_once()

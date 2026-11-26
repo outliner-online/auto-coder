@@ -181,3 +181,42 @@ def test_issue_comment_uses_repository_scoped_controller_write_credential():
     assert sent.kwargs["url"] == "https://api.github.com/repos/owner/repo/issues/42/comments"
     assert sent.kwargs["headers"]["Authorization"] == "Bearer installation-one"
     assert sent.kwargs["json"] == {"body": "provider link"}
+
+
+def test_controller_branch_origin_without_body_marker_keeps_local_classification():
+    identity = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+    pr = {
+        "user": {"login": "auto-coder[bot]", "id": 101},
+        "body": "",
+        "head": {"ref": "issue-123"},
+    }
+
+    assert _is_dependabot_pr(pr, identity) is False
+    assert _is_local_llm_pr(pr, identity) is True
+
+
+def test_issue_management_mutations_select_repository_installation_capabilities():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    api = Mock()
+    api.issues.create.return_value.number = 7
+
+    with patch.object(client, "api_for", return_value=api) as api_for:
+        client.create_issue("owner/repo", "Title", "Body")
+        client.close_issue("owner/repo", 7, "done")
+        client.reopen_issue("owner/repo", 7)
+        client.close_pr("owner/repo", 8, "done")
+        client.add_comment_to_pr("owner/repo", 8, "status")
+        client.add_labels("owner/repo", 7, ["managed"])
+        client.remove_labels("owner/repo", 7, ["managed"])
+
+    requested = [call.kwargs["required_permissions"] for call in api_for.call_args_list]
+    assert requested == [
+        {"issues": "write"},
+        {"issues": "write"},
+        {"issues": "write"},
+        {"pull_requests": "write", "issues": "write"},
+        {"issues": "write"},
+        {"issues": "write"},
+        {"issues": "write"},
+    ]

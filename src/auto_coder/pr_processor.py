@@ -3811,6 +3811,19 @@ def _is_feature_slotless_dependabot_pr(pr_obj: Any) -> bool:
     return True
 
 
+def _has_local_implementation_origin(pr_obj: Any) -> bool:
+    """Apply the established local publication signals without actor recursion."""
+    if not isinstance(pr_obj, dict):
+        return False
+    body = str(pr_obj.get("body") or "")
+    if any(marker in body for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
+        return True
+    head_branch = pr_obj.get("head_branch") or (pr_obj.get("head") or {}).get("ref") or ""
+    if re.match(r"^issue-\d+(?:[_/]attempt-\d+)?(?:-[a-z0-9-]+)?$", str(head_branch)):
+        return True
+    return bool(re.search(r"\bThis PR addresses issue #\d+", body) or "Auto-Coder: Address issue #" in body)
+
+
 def _is_dependabot_pr(pr_obj: Any, controller_identity: Optional[Any] = None) -> bool:
     """Return True if the PR is authored by a dependency bot.
 
@@ -3829,13 +3842,12 @@ def _is_dependabot_pr(pr_obj: Any, controller_identity: Optional[Any] = None) ->
         # Only the proven repository controller may combine its App identity
         # with local-origin evidence to retain the ordinary local route.  Text
         # alone must never let an unrelated bot escape dependency-bot policy.
-        body = str(pr_obj.get("body") or "") if isinstance(pr_obj, dict) else str(getattr(pr_obj, "body", "") or "")
         identity_login = str(getattr(controller_identity, "login", "") or "").casefold()
         identity_id = getattr(controller_identity, "account_id", None)
         author = pr_obj.get("user", {}) if isinstance(pr_obj, dict) else getattr(pr_obj, "user", {})
         author_id = author.get("id") if isinstance(author, dict) else getattr(author, "id", None)
         proven_controller = login_lower.casefold() == identity_login and (identity_id is None or author_id == identity_id)
-        if proven_controller and any(marker in body for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
+        if proven_controller and _has_local_implementation_origin(pr_obj):
             return False
         if login_lower.endswith("[bot]"):
             return True
@@ -10094,26 +10106,7 @@ def _is_local_llm_pr(pr_data: Dict[str, Any], controller_identity: Optional[Any]
     if _is_dependabot_pr(pr_data, controller_identity):
         return False
 
-    pr_body = pr_data.get("body", "") or ""
-
-    # 1. Check explicit local LLM markers
-    if "<!-- auto-coder:local-llm -->" in pr_body or "<!-- auto-coder:local -->" in pr_body:
-        return True
-
-    # 2. Check head branch name
-    head_branch = pr_data.get("head_branch") or (pr_data.get("head") or {}).get("ref") or ""
-    if head_branch:
-        # Pattern matches: issue-123, issue-123_attempt-1, issue-123/attempt-1
-        if re.match(r"^issue-\d+(?:[_/]attempt-\d+)?$", head_branch):
-            return True
-
-    # 3. Check standard PR body signatures for Auto-Coder local issue PRs
-    if re.search(r"\bThis PR addresses issue #\d+", pr_body):
-        return True
-    if "Auto-Coder: Address issue #" in pr_body:
-        return True
-
-    return False
+    return _has_local_implementation_origin(pr_data)
 
 
 is_local_llm_pr = _is_local_llm_pr
@@ -13430,7 +13423,11 @@ def _handle_definitive_merge_rejection(
 
     # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
     # the bot recreates the PR against the updated base branch by itself.
-    if _is_dependabot_pr(pr_info):
+    try:
+        controller_identity = client.get_authenticated_controller_identity(repo_name)
+    except Exception:
+        controller_identity = None
+    if _is_dependabot_pr(pr_info, controller_identity):
         logger.info(f"PR #{pr_number} is a dependency-bot PR with merge conflicts. Skipping conflict resolution.")
         log_action(f"Skipped merge conflict resolution for dependency-bot PR #{pr_number}")
         _record_pr_stage(pr_number, "pr.repair-delegation", f"pr#{pr_number} repair delegation", Outcome.SKIPPED, {"effect": "merge-conflict", "reason": "dependency-bot PR"})
