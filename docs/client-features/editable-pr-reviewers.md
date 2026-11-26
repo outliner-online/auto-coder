@@ -64,11 +64,15 @@ overwritten. Commit preparation does not invoke a formatter or another model to
 change the captured correction after review. Failed preparation retains an
 explicit incomplete state instead of declaring success.
 
-A candidate commit is retained before push. Interrupted or ambiguous publication
-is reconciled using the existing durable pending record and remote branch; a
-confirmed matching candidate is not produced again by another reviewer. Pending
-or indeterminate output blocks blind reviewer replay and does not authorize
-merge.
+A candidate commit is retained before push. Its checkpoint is separate from a
+durable Git send-entry marker, which is recorded before the sole send. A
+checkpointed candidate can be sent only when the record proves that no send has
+entered. An entered send, or a legacy pending record with unknown send history,
+is reconciled without retransmission: an unchanged or unreadable remote head
+cannot prove that the earlier send was not accepted. A later observation of the
+exact candidate settles publication without another push or reviewer invocation.
+Pending or indeterminate output blocks blind reviewer replay and does not
+authorize merge.
 
 The editing review's saved transport identities are invalidated while accepted
 lifecycle evidence is retained. The resulting candidate must pass independent
@@ -117,3 +121,37 @@ reuse CI accepted for a previous head. The next ordinary pass applies normal
 CI, independent review and merge gates. Current-head recovery and ambiguous
 publication continue to use their existing rules. A precise evidence category
 is exposed in the retained wait reason when reconciliation cannot proceed.
+
+## Current-head commit identity recovery
+
+Ordinary review and Strong Audit corrections use a verified, repository-scoped
+Controller App as both Git author and committer. The configured controller
+provider must prove `contents:write` for the repository. The App login is then
+resolved through GitHub's bot-user endpoint; the noreply address contains that
+bot **account ID**, not the App registration ID. Git receives this identity in
+its individual command environment, preserving caller and global configuration.
+The Reviewer App remains independent, and personal or OS identity is not a
+fallback. See [GitHub's App committer example](https://github.com/actions/create-github-app-token#configure-git-cli-for-an-apps-bot-user).
+
+This is a publication-time requirement. An unavailable Controller App retains
+settled correction output and reports its blocker. It does not stop unrelated
+worker startup; the startup policy and complete Controller App runtime migration
+remain owned by issues #2939 and #2878 respectively.
+
+When a retained correction still belongs to the current open PR head, normal
+review resumption can recover a definite local Git identity failure. It accepts
+legacy `Author identity unknown` records only with the existing immutable
+worktree/history evidence, or a checkpointed controller-identity failure before
+Git commit. Other failed hooks, uncertain invocations, moved heads, missing
+ownership, modified output, or ambiguous publication cannot enter this path.
+Newer-head incorporation continues to use evidence-only supersession.
+
+A per-PR process lock and durable compare-and-swap journal preserve the original
+attempt, error, source evidence and verified identity. Commit entry is recorded
+before Git runs. The resulting candidate must have exactly the original parent,
+captured file tree, author/committer and originating review reference. Its SHA
+is durably recorded before the existing exact-head leased push. Lost candidate
+checkpoints and lost push acknowledgments are reconciled from corroborated
+state; an entered commit without a provable candidate is never blindly retried.
+Neither recovery nor publication invokes the reviewer again. The new head still
+requires its own CI and a fresh independent review before merge.

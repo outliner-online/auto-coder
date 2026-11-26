@@ -13,7 +13,7 @@ import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import TYPE_CHECKING, Callable, Iterator, Optional
 
 from .local_review_repair import (
     LocalReviewRepairOutcome,
@@ -32,6 +32,9 @@ from .worktree_utils import (
     capture_workspace_source_files,
     sync_worktree_changes_back,
 )
+
+if TYPE_CHECKING:
+    from .controller_git_identity import ControllerGitIdentity
 
 REVIEW_OUTPUT_PREFIX = "review-output:"
 PublicationAuthorityCheck = Callable[[str, str], bool]
@@ -127,6 +130,7 @@ def publish_review_changes(
     review_identity: str,
     authority_check: Optional[PublicationAuthorityCheck] = None,
     store: Optional[LocalReviewRepairStore] = None,
+    commit_identity_provider: Optional[Callable[[], ControllerGitIdentity]] = None,
 ) -> LocalReviewRepairOutcome:
     """Copy settled reviewer edits into the existing fenced correction publisher.
 
@@ -164,10 +168,11 @@ def publish_review_changes(
         allow_commit_repair=False,
         resume_other_attempts=False,
         root=snapshot.root,
+        commit_identity_provider=commit_identity_provider,
     )
 
 
-def resume_pending_review_publication(
+def _resume_pending_review_publication(
     *,
     repository: str,
     pr_number: int,
@@ -175,6 +180,7 @@ def resume_pending_review_publication(
     authority_check: Optional[PublicationAuthorityCheck] = None,
     store: Optional[LocalReviewRepairStore] = None,
     current_target: Optional[Callable[[], ReviewSupersessionTarget]] = None,
+    commit_identity_provider: Optional[Callable[[], ControllerGitIdentity]] = None,
 ) -> Optional[LocalReviewRepairOutcome]:
     """Recover retained reviewer output before admitting another reviewer.
 
@@ -188,7 +194,22 @@ def resume_pending_review_publication(
         return None
     request = LocalReviewRepairRequest(repository, pr_number, repository, record.head_ref, record.head_sha, record.feedback_identities, "", expected_push_url=record.expected_push_url)
     if record.phase == "indeterminate":
-        return reconcile_review_supersession(request, store, record, Path(root() if callable(root) else root).resolve(), current_target)
+        repository_root = Path(root() if callable(root) else root).resolve()
+        if commit_identity_provider is not None:
+            from .review_publication_recovery import recover_current_head_review
+
+            recovered = recover_current_head_review(
+                request,
+                store,
+                record,
+                repository_root,
+                current_target=current_target,
+                authority_check=authority_check,
+                commit_identity_provider=commit_identity_provider,
+            )
+            if recovered is not None:
+                return recovered
+        return reconcile_review_supersession(request, store, record, repository_root, current_target)
     if record.phase != "publication_pending":
         return LocalReviewRepairOutcome(record.phase, f"reviewer publication is {record.phase}; retained output requires reconciliation", executed=True)
     return _resume_publication(
@@ -198,3 +219,37 @@ def resume_pending_review_publication(
         Path(root() if callable(root) else root).resolve(),
         publication_authorizer=None if authority_check is None else lambda: authority_check(record.head_sha, record.head_ref),
     )
+
+
+def resume_pending_review_publication(
+    *,
+    repository: str,
+    pr_number: int,
+    root: str | Callable[[], str],
+    authority_check: Optional[PublicationAuthorityCheck] = None,
+    store: Optional[LocalReviewRepairStore] = None,
+    current_target: Optional[Callable[[], ReviewSupersessionTarget]] = None,
+    commit_identity_provider: Optional[Callable[[], ControllerGitIdentity]] = None,
+) -> Optional[LocalReviewRepairOutcome]:
+    """Resume exactly one owned publication, with no concurrent commit or push."""
+    store = store or LocalReviewRepairStore(local_review_repair_db_path(repository))
+
+    def resume() -> Optional[LocalReviewRepairOutcome]:
+        return _resume_pending_review_publication(
+            repository=repository,
+            pr_number=pr_number,
+            root=root,
+            authority_check=authority_check,
+            store=store,
+            current_target=current_target,
+            commit_identity_provider=commit_identity_provider,
+        )
+
+    if commit_identity_provider is None:
+        return resume()
+    from .review_publication_recovery import review_publication_lock
+
+    with review_publication_lock(store, pr_number) as acquired:
+        if not acquired:
+            return LocalReviewRepairOutcome("indeterminate", "reviewer publication recovery is owned by another evaluator", executed=True)
+        return resume()

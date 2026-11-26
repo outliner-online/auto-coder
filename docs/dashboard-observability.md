@@ -4344,3 +4344,35 @@ and the actual production facts projected into the mounted PR detail's Decision
 Log. Store tests cover normalized result/checkpoint restoration and exact-attempt
 retirement. Operational behavior is documented in
 [`deferred-pr-validation-results.md`](client-features/deferred-pr-validation-results.md).
+
+## Current-head reviewer commit recovery
+
+The production PR processor supplies the verified Controller App identity to
+ordinary/Strong source publication and retained-output resumption. It retains
+`pr.adversarial-validation` / `Outcome.DEFERRED` with
+`effect=reviewer-publication-resumed`, `local_phase`, `published`, `reason`,
+`review_disposition` and `retry_not_before`. The same source corrections remain
+pending when identity or evidence is unavailable; a confirmed push is corrective
+handoff, never PASS or merge. No new event schema or dashboard projection is
+needed, but the publication-time identity requirement changes which outcomes
+can reach confirmed handoff.
+
+Run `bash scripts/test.sh tests/test_controller_git_identity.py
+tests/test_review_publication_recovery.py tests/test_editable_pr_review_flow.py`.
+`test_controller_identity_failure_resumes_without_review_and_waits_for_fresh_ci`
+drives the real PR processor, Git worktrees, durable store, TraceCollector and
+detail evidence renderer through identity failure, retained commit recovery,
+pending CI, and independent review. It asserts no extra reviewer call at
+recovery and no approval/merge until the candidate's new CI/review pass. The
+real-Git recovery cases also cover legacy evidence, concurrency, restart,
+missing/conflicting authority, altered output, hook mutations, lost candidate
+checkpoint and ambiguous push acknowledgment.
+
+An entered but unresolved Git send remains `local_phase=publication_pending`,
+`published=false` and `review_disposition=RECONCILIATION_WAIT` while readback is
+unchanged or unavailable. Its reason distinguishes unknown publication from a
+candidate that is proven not to have entered a send. Repeated evaluation and
+restart observe the durable marker and do not resend. Later exact-candidate
+readback emits corrective handoff, still requiring independent CI and review.
+`test_unresolved_push_restart_waits_without_resend_until_candidate_readback`
+exercises this production PR-processing and trace path with one send throughout.

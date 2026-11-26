@@ -328,3 +328,15 @@ keeps the recovery wait and its specific evidence category. The next ordinary
 pass still owns CI and fresh independent review of the current head. The
 production-entry regression is
 `tests/test_editable_pr_review_flow.py::test_legacy_retained_correction_supersession_still_requires_new_ci_and_independent_review`.
+
+Current-head reviewer commit recovery uses `effect=reviewer-publication-resumed`
+with the existing deferred outcome, `local_phase`, `published`, `reason` and
+`review_disposition` fields. A missing Controller App identity or refused
+source/ownership/target proof stays `RECONCILIATION_WAIT`; a confirmed candidate
+push is `CORRECTIVE_HANDOFF`, awaiting new-head CI and independent review. No
+additional reviewer interaction is recorded for publishing the retained output.
+An entered or historically unknown Git send stays in `RECONCILIATION_WAIT` when
+readback is unchanged or unavailable; its deferred reason explains why no resend
+is authorized. Later exact-candidate readback confirms the existing publication
+without adding a reviewer interaction or another push. The production regression is
+`tests/test_editable_pr_review_flow.py::test_controller_identity_failure_resumes_without_review_and_waits_for_fresh_ci`.

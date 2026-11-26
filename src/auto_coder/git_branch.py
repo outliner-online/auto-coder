@@ -156,6 +156,7 @@ def git_commit_with_retry(
     max_retries: int = 1,
     *,
     allow_repair: bool = True,
+    commit_env: Optional[Dict[str, str]] = None,
 ) -> CommandResult:
     """
     Commit changes with automatic handling of formatter hook failures.
@@ -175,15 +176,20 @@ def git_commit_with_retry(
     """
     cmd = CommandExecutor()
 
+    def commit_once() -> CommandResult:
+        if commit_env is not None:
+            return cmd.run_command(["git", "commit", "-m", commit_message], cwd=cwd, env=commit_env)
+        return cmd.run_command(["git", "commit", "-m", commit_message], cwd=cwd)
+
     # Publication of an already authenticated artifact must never become a
     # second editing turn.  Hooks are deliberately still run by ``git commit``;
     # their failure is returned verbatim and no formatter, re-stage, or model
     # fallback is entered.
     if not allow_repair:
-        return cmd.run_command(["git", "commit", "-m", commit_message], cwd=cwd)
+        return commit_once()
 
     for attempt in range(max_retries + 1):
-        result = cmd.run_command(["git", "commit", "-m", commit_message], cwd=cwd)
+        result = commit_once()
 
         # If commit succeeded, return immediately
         if result.success:

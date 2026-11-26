@@ -71,6 +71,7 @@ from .claude_followup_waits import ClaudeFollowupHoldActive, get_claude_followup
 from .codex_cloud_task import canonical_codex_cloud_task_url, extract_codex_cloud_task_id, is_valid_codex_cloud_task_id
 from .codex_pr_attribution import AttributionDisposition, CodexPrAttributionRepository, resolve_codex_pr_origin, task_ids_from_text
 from .conflict_resolver import ConflictPublicationDisposition, _get_merge_conflict_info, resolve_merge_conflicts_with_llm, resolve_pr_merge_conflicts
+from .controller_git_identity import resolve_controller_git_identity
 from .controller_identity_history import ControllerAttribution, ControllerAuthorSet, ControllerIdentityHistoryError, assert_active_controller_authority, controller_author_set_for_client, controller_authority_scope
 from .deferred_pr_validation import DeferredPRValidation, DeferredPRValidationStateError, DeferredPRValidationStore, deferred_validation_policy_identity
 from .dispatch_claim_store import DispatchIdentity, DispatchOutcome, get_dispatch_claim_store
@@ -549,6 +550,7 @@ def _execute_pending_strong_audit(
                     head_repository=inputs.head_repository,
                     head_ref=inputs.head_ref,
                     review_identity=f"strong:{claim.claim_id}",
+                    commit_identity_provider=lambda: resolve_controller_git_identity(repo_name),
                     authority_check=lambda sha, ref: publication_authority is not None and observe_current_target() and publication_authority(sha, ref),
                 )
                 reason = f"Strong reviewer produced source changes: {correction.reason}; fresh independent review and CI are required"
@@ -6700,6 +6702,7 @@ def _coordinate_pr_review(
             root=lambda: _pr_validation_repository_cwd(repo_name),
             authority_check=lambda sha, ref: _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
             current_target=lambda: _review_supersession_target(github_client, repo_name, pr_number),
+            commit_identity_provider=lambda: resolve_controller_git_identity(repo_name),
         )
     except Exception as exc:
         _record_review_wait(repo_name, pr_number, scope.head_sha, actions, processing_status, f"reviewer publication recovery unavailable: {exc}")
@@ -7620,6 +7623,7 @@ def _coordinate_pr_review(
                                         head_repository=str(((pr_data.get("head") or {}).get("repo") or {}).get("full_name") or ""),
                                         head_ref=str((pr_data.get("head") or {}).get("ref") or ""),
                                         review_identity=f"ordinary:{attempt.attempt_id}",
+                                        commit_identity_provider=lambda: resolve_controller_git_identity(repo_name),
                                         authority_check=lambda sha, ref: attempt_repository.latest_sequence(pr_number, head_sha) == attempt.sequence and _review_publication_authorized(github_client, repo_name, pr_number, sha, ref),
                                     )
                                     _record_reviewer_correction(repo_name, pr_number, head_sha, actions, processing_status, correction)

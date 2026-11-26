@@ -9,9 +9,9 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from .durable_repair_allowance import (
     CompletionAvailability,
@@ -29,6 +29,9 @@ from .llm_backend_config import TASK_ONLY_BACKEND_TYPES, active_repo_context, ge
 from .logger_config import get_logger
 from .process_identity import ProcessIdentity, process_is_dead, read_process_identity
 from .utils import bind_command_execution_cwd, reset_command_execution_cwd
+
+if TYPE_CHECKING:
+    from .controller_git_identity import ControllerGitIdentity
 
 logger = get_logger(__name__)
 
@@ -78,6 +81,7 @@ class LocalReviewRepairRecord:
     owner_start_ticks: Optional[int] = None
     pre_push_evidence_json: str = ""
     publication_started: bool = False
+    publication_send_state: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,20 @@ class LocalReviewRepairSupersession:
     replacement_head: str
     evidence_json: str
     settled_at: float
+
+
+@dataclass(frozen=True)
+class ReviewCommitRecovery:
+    """Immutable source and identity evidence for one controller commit entry."""
+
+    attempt_id: str
+    incarnation: int
+    original_record_json: str
+    evidence_json: str
+    identity_json: str
+    phase: str = "started"
+    result_sha: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -253,11 +271,22 @@ class LocalReviewRepairStore:
                 connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN pre_push_evidence_json TEXT NOT NULL DEFAULT ''")
             if "publication_started" not in columns:
                 connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN publication_started INTEGER NOT NULL DEFAULT 0")
+            if "publication_send_state" not in columns:
+                # Legacy candidate checkpoints do not establish whether a push
+                # was entered. Unknown records may reconcile, but never resend.
+                connection.execute("ALTER TABLE local_review_repair_attempts ADD COLUMN publication_send_state TEXT NOT NULL DEFAULT 'unknown'")
             connection.execute("""CREATE TABLE IF NOT EXISTS local_review_repair_supersessions (
                 repository TEXT NOT NULL, pr_number INTEGER NOT NULL,
                 attempt_id TEXT NOT NULL, incarnation INTEGER NOT NULL,
                 replacement_head TEXT NOT NULL, evidence_json TEXT NOT NULL,
                 settled_at REAL NOT NULL,
+                PRIMARY KEY(repository, pr_number, attempt_id))""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS local_review_commit_recoveries (
+                repository TEXT NOT NULL, pr_number INTEGER NOT NULL,
+                attempt_id TEXT NOT NULL, incarnation INTEGER NOT NULL,
+                original_record_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                identity_json TEXT NOT NULL, phase TEXT NOT NULL,
+                result_sha TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(repository, pr_number, attempt_id))""")
             connection.commit()
 
@@ -287,7 +316,7 @@ class LocalReviewRepairStore:
                         return LocalReviewRepairClaim(False, str(active[1]), str(active[0]))
                     incarnation = time.time_ns()
                     connection.execute(
-                        "UPDATE local_review_repair_attempts SET phase='executing', reason='', invocation_entered=0, local_job_id='', updated_at=?, incarnation=? " "WHERE repository=? AND pr_number=? AND attempt_id=?",
+                        "UPDATE local_review_repair_attempts SET phase='executing', reason='', invocation_entered=0, local_job_id='', publication_send_state='not_entered', updated_at=?, incarnation=? " "WHERE repository=? AND pr_number=? AND attempt_id=?",
                         (time.time(), incarnation, request.repository, request.pr_number, request.attempt_id),
                     )
                     self._set_owner(connection, request)
@@ -304,7 +333,9 @@ class LocalReviewRepairStore:
                 return LocalReviewRepairClaim(False, str(active[1]), str(active[0]), int(active[2]))
             incarnation = int(time.time_ns())
             connection.execute(
-                "INSERT INTO local_review_repair_attempts " "(repository, pr_number, attempt_id, head_sha, head_ref, feedback_json, phase, result_sha, reason, updated_at, incarnation, workspace_path, expected_push_url) " "VALUES (?, ?, ?, ?, ?, ?, 'executing', '', '', ?, ?, '', ?)",
+                "INSERT INTO local_review_repair_attempts "
+                "(repository, pr_number, attempt_id, head_sha, head_ref, feedback_json, phase, result_sha, reason, updated_at, incarnation, workspace_path, expected_push_url, publication_send_state) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'executing', '', '', ?, ?, '', ?, 'not_entered')",
                 (
                     request.repository,
                     request.pr_number,
@@ -407,7 +438,7 @@ class LocalReviewRepairStore:
                 "UPDATE local_review_repair_attempts SET pre_push_evidence_json=?, "
                 "updated_at=CASE WHEN pre_push_evidence_json='' THEN ? ELSE updated_at END "
                 "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=? "
-                "AND phase='executing' AND invocation_entered=1 AND result_sha='' AND publication_started=0 "
+                "AND phase='executing' AND invocation_entered=1 AND result_sha='' AND publication_started=0 AND publication_send_state<>'entered' "
                 "AND head_sha=? AND head_ref=? AND expected_push_url=? "
                 "AND (pre_push_evidence_json='' OR pre_push_evidence_json=?)",
                 (evidence_json, time.time(), request.repository, request.pr_number, claim.attempt_id, claim.incarnation, request.head_sha, request.head_ref, request.expected_push_url, evidence_json),
@@ -418,7 +449,7 @@ class LocalReviewRepairStore:
         row = connection.execute(
             "SELECT attempt_id, head_sha, head_ref, phase, result_sha, reason, incarnation, workspace_path, "
             "invocation_entered, local_job_id, feedback_json, expected_push_url, updated_at, "
-            "owner_pid, owner_boot_id, owner_start_ticks, pre_push_evidence_json, publication_started "
+            "owner_pid, owner_boot_id, owner_start_ticks, pre_push_evidence_json, publication_started, publication_send_state "
             "FROM local_review_repair_attempts WHERE repository=? AND pr_number=? AND attempt_id=?",
             (request.repository, request.pr_number, attempt_id),
         ).fetchone()
@@ -443,6 +474,7 @@ class LocalReviewRepairStore:
             owner_start_ticks=int(row[15]) if row[15] is not None else None,
             pre_push_evidence_json=str(row[16]),
             publication_started=bool(row[17]),
+            publication_send_state=str(row[18]),
         )
 
     def get(self, request: LocalReviewRepairRequest, attempt_id: Optional[str] = None) -> Optional[LocalReviewRepairRecord]:
@@ -508,6 +540,95 @@ class LocalReviewRepairStore:
             connection.execute(
                 "UPDATE local_review_repair_attempts SET phase='superseded', updated_at=? " "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=? AND phase='indeterminate'",
                 (settled_at, request.repository, request.pr_number, expected_record.attempt_id, expected_record.incarnation),
+            )
+            connection.commit()
+            return True
+
+    def _get_commit_recovery(self, connection: sqlite3.Connection, request: LocalReviewRepairRequest) -> Optional[ReviewCommitRecovery]:
+        row = connection.execute(
+            "SELECT attempt_id, incarnation, original_record_json, evidence_json, identity_json, phase, result_sha, reason " "FROM local_review_commit_recoveries WHERE repository=? AND pr_number=? AND attempt_id=?",
+            (request.repository, request.pr_number, request.attempt_id),
+        ).fetchone()
+        return ReviewCommitRecovery(*row) if row is not None else None
+
+    def get_commit_recovery(self, request: LocalReviewRepairRequest) -> Optional[ReviewCommitRecovery]:
+        """Read the original recovery proof without changing attempt ownership."""
+        with self._connect() as connection:
+            return self._get_commit_recovery(connection, request)
+
+    def begin_commit_recovery(
+        self,
+        request: LocalReviewRepairRequest,
+        expected: LocalReviewRepairRecord,
+        evidence_json: str,
+        identity_json: str,
+        confirm: Callable[[], bool],
+    ) -> Optional[ReviewCommitRecovery]:
+        """Persist one commit-entry intent after an exact-attempt comparison."""
+        if expected.phase != "indeterminate" or expected.result_sha or expected.publication_started or expected.publication_send_state == "entered" or request.attempt_id != expected.attempt_id or not evidence_json or not identity_json:
+            return None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._get_record(connection, request, request.attempt_id) != expected or self._get_commit_recovery(connection, request) is not None or not confirm():
+                connection.rollback()
+                return None
+            recovery = ReviewCommitRecovery(
+                request.attempt_id,
+                expected.incarnation,
+                json.dumps(asdict(expected), sort_keys=True, separators=(",", ":")),
+                evidence_json,
+                identity_json,
+            )
+            connection.execute(
+                "INSERT INTO local_review_commit_recoveries " "(repository, pr_number, attempt_id, incarnation, original_record_json, evidence_json, identity_json, phase) " "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (request.repository, request.pr_number, recovery.attempt_id, recovery.incarnation, recovery.original_record_json, recovery.evidence_json, recovery.identity_json, recovery.phase),
+            )
+            connection.commit()
+            return recovery
+
+    def finish_commit_recovery(
+        self,
+        request: LocalReviewRepairRequest,
+        expected: LocalReviewRepairRecord,
+        recovery: ReviewCommitRecovery,
+        *,
+        result_sha: str = "",
+        reason: str = "",
+        confirm: Callable[[], bool],
+    ) -> bool:
+        """Checkpoint a candidate before push, preserving original failure evidence."""
+        if expected.publication_send_state == "entered":
+            return False
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._get_record(connection, request, request.attempt_id) != expected or self._get_commit_recovery(connection, request) != recovery or not confirm():
+                connection.rollback()
+                return False
+            phase = "candidate" if result_sha else "failed"
+            connection.execute(
+                "UPDATE local_review_commit_recoveries SET phase=?, result_sha=?, reason=? " "WHERE repository=? AND pr_number=? AND attempt_id=?",
+                (phase, result_sha, reason, request.repository, request.pr_number, request.attempt_id),
+            )
+            if result_sha:
+                connection.execute(
+                    "UPDATE local_review_repair_attempts SET phase='publication_pending', result_sha=?, publication_started=1, publication_send_state='not_entered', updated_at=? " "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=?",
+                    (result_sha, time.time(), request.repository, request.pr_number, request.attempt_id, expected.incarnation),
+                )
+            connection.commit()
+            return True
+
+    def mark_publication_send_entered(self, request: LocalReviewRepairRequest, expected: LocalReviewRepairRecord) -> bool:
+        """Durably consume the sole send entry before invoking Git transport."""
+        if expected.phase != "publication_pending" or not expected.result_sha or expected.publication_send_state != "not_entered":
+            return False
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._get_record(connection, request, expected.attempt_id) != expected:
+                connection.rollback()
+                return False
+            connection.execute(
+                "UPDATE local_review_repair_attempts SET publication_send_state='entered', updated_at=? " "WHERE repository=? AND pr_number=? AND attempt_id=? AND incarnation=?",
+                (time.time(), request.repository, request.pr_number, expected.attempt_id, expected.incarnation),
             )
             connection.commit()
             return True
@@ -698,7 +819,8 @@ def _resume_publication(
         return LocalReviewRepairOutcome("publication_pending", f"remote branch could not be reconciled: {remote_head}", executed=True)
     if remote_head == record.result_sha:
         claim = LocalReviewRepairClaim(False, record.phase, record.attempt_id, record.incarnation)
-        store.transition(request, claim, "awaiting_validation", result_sha=record.result_sha)
+        if not store.transition(request, claim, "awaiting_validation", result_sha=record.result_sha):
+            return LocalReviewRepairOutcome("publication_pending", "candidate readback lost attempt ownership before settlement", executed=True)
         return LocalReviewRepairOutcome(
             "awaiting_validation",
             f"reconciled published {record.result_sha} on {request.head_ref}; independent validation is required",
@@ -711,6 +833,8 @@ def _resume_publication(
             f"publication conflict: {request.head_ref} advanced to {remote_head or 'an unavailable ref'}",
             executed=True,
         )
+    if record.publication_send_state != "not_entered":
+        return LocalReviewRepairOutcome("publication_pending", f"publication send disposition is {record.publication_send_state}; original-head readback does not authorize another push", executed=True)
     if publication_authorizer is not None:
         try:
             authorized = publication_authorizer()
@@ -718,21 +842,40 @@ def _resume_publication(
             return LocalReviewRepairOutcome("publication_pending", f"publication authority is unavailable: {exc}", executed=True)
         if not authorized:
             return LocalReviewRepairOutcome("publication_pending", "publication authority changed; retained output was not pushed", executed=True)
-    push = git_push(
-        cwd=str(root),
-        remote="origin",
-        branch=f"{record.result_sha}:{request.head_ref}",
-        expected_remote_sha=record.head_sha,
-    )
-    if not push.success:
-        claim = LocalReviewRepairClaim(False, record.phase, record.attempt_id, record.incarnation)
-        store.transition(request, claim, "publication_pending", result_sha=record.result_sha, reason=push.stderr, workspace_path=record.workspace_path)
-        return LocalReviewRepairOutcome("publication_pending", f"publication incomplete: {push.stderr}", executed=True)
+    return _send_pending_publication(request, store, record, root)
+
+
+def _send_pending_publication(
+    request: LocalReviewRepairRequest,
+    store: LocalReviewRepairStore,
+    record: LocalReviewRepairRecord,
+    root: Path,
+) -> LocalReviewRepairOutcome:
+    """Enter one send, retaining ambiguity independently of candidate creation."""
+    if record.publication_send_state != "not_entered":
+        return LocalReviewRepairOutcome("publication_pending", f"publication send disposition is {record.publication_send_state}; awaiting authoritative candidate readback without another push", executed=True)
+    if not store.mark_publication_send_entered(request, record):
+        return LocalReviewRepairOutcome("publication_pending", "publication send checkpoint lost attempt ownership; no push was started", executed=True)
     claim = LocalReviewRepairClaim(False, record.phase, record.attempt_id, record.incarnation)
-    store.transition(request, claim, "awaiting_validation", result_sha=record.result_sha)
+    try:
+        push = git_push(
+            cwd=str(root),
+            remote="origin",
+            branch=f"{record.result_sha}:{record.head_ref}",
+            expected_remote_sha=record.head_sha,
+        )
+    except Exception as exc:
+        reason = f"publication send outcome is unresolved: {exc}"
+        store.transition(request, claim, "publication_pending", result_sha=record.result_sha, reason=reason, workspace_path=record.workspace_path)
+        return LocalReviewRepairOutcome("publication_pending", reason, executed=True)
+    if not push.success:
+        store.transition(request, claim, "publication_pending", result_sha=record.result_sha, reason=push.stderr, workspace_path=record.workspace_path)
+        return LocalReviewRepairOutcome("publication_pending", f"publication send outcome is unresolved: {push.stderr}", executed=True)
+    if not store.transition(request, claim, "awaiting_validation", result_sha=record.result_sha):
+        return LocalReviewRepairOutcome("publication_pending", "confirmed push could not checkpoint completion; candidate readback is required", executed=True)
     return LocalReviewRepairOutcome(
         "awaiting_validation",
-        f"published retained {record.result_sha} to {request.head_ref}; independent validation is required",
+        f"published retained {record.result_sha} to {record.head_ref}; independent validation is required",
         executed=True,
         published=True,
     )
@@ -752,6 +895,7 @@ def execute_local_review_repair(
     allow_commit_repair: bool = True,
     resume_other_attempts: bool = True,
     publication_authorizer: Optional[Callable[[], bool]] = None,
+    commit_identity_provider: Optional[Callable[[], ControllerGitIdentity]] = None,
 ) -> LocalReviewRepairOutcome:
     """Run one fenced correction in a detached exact-head checkout and publish it."""
     if request.head_repository != request.repository:
@@ -860,7 +1004,32 @@ def execute_local_review_repair(
             preserve_worktree = True
             return LocalReviewRepairOutcome("indeterminate", f"corrective output could not be staged: {stage.stderr}", executed=True)
         commit_message = f"Fix unresolved review findings for PR #{request.pr_number}"
-        commit = git_commit_with_retry(commit_message, cwd=worktree) if allow_commit_repair else git_commit_with_retry(commit_message, cwd=worktree, allow_repair=False)
+        commit_env = None
+        if commit_identity_provider is not None:
+            from .review_publication_recovery import review_commit_message, verified_commit_identity
+
+            commit_message = review_commit_message(request)
+            try:
+                identity = verified_commit_identity(request, commit_identity_provider)
+                commit_env = identity.env()
+            except Exception as exc:
+                from .review_supersession import capture_pre_push_evidence
+
+                reason = f"Controller Git identity unavailable: {exc}"
+                try:
+                    retained = store.get(request)
+                    if retained is not None:
+                        evidence = capture_pre_push_evidence(request, retained, repo_root)
+                        store.checkpoint_pre_push(request, claim, evidence)
+                except Exception as evidence_error:
+                    logger.warning("PR #{} pre-push evidence unavailable: {}", request.pr_number, evidence_error)
+                store.transition(request, claim, "indeterminate", reason=reason, workspace_path=worktree)
+                preserve_worktree = True
+                return LocalReviewRepairOutcome("indeterminate", reason, executed=True)
+        if commit_env is not None:
+            commit = git_commit_with_retry(commit_message, cwd=worktree, allow_repair=False, commit_env=commit_env)
+        else:
+            commit = git_commit_with_retry(commit_message, cwd=worktree) if allow_commit_repair else git_commit_with_retry(commit_message, cwd=worktree, allow_repair=False)
         if not commit.success:
             if not allow_commit_repair and all(identity.startswith("review-output:") for identity in request.feedback_identities):
                 # The captured-output copier has returned and Git staging has
@@ -891,14 +1060,13 @@ def execute_local_review_repair(
                 return LocalReviewRepairOutcome("publication_pending", f"publication authority is unavailable: {exc}", executed=True)
             if not authorized:
                 return LocalReviewRepairOutcome("publication_pending", "publication authority changed; retained output was not pushed", executed=True)
-        push = git_push(cwd=worktree, remote="origin", branch=f"HEAD:{request.head_ref}", expected_remote_sha=request.head_sha)
-        if not push.success:
-            store.transition(request, claim, "publication_pending", result_sha=result_sha, reason=push.stderr)
-            return LocalReviewRepairOutcome("publication_pending", f"publication incomplete: {push.stderr}", executed=True)
-        store.transition(request, claim, "awaiting_validation", result_sha=result_sha)
-        if allowance_authority is not None:
+        pending = store.get(request)
+        if pending is None:
+            return LocalReviewRepairOutcome("publication_pending", "candidate checkpoint is unavailable; no push was started", executed=True)
+        outcome = _send_pending_publication(request, store, pending, Path(worktree))
+        if outcome.published and allowance_authority is not None:
             allowance_authority.mark_completion(code_changed=True, evidence=f"local correction published as {result_sha}")
-        return LocalReviewRepairOutcome("awaiting_validation", f"published {result_sha} to {request.head_ref}; independent validation is required", executed=True, published=True)
+        return outcome
     finally:
         if not preserve_worktree:
             subprocess.run(["git", "worktree", "remove", "--force", worktree], cwd=repo_root, capture_output=True)
@@ -956,20 +1124,12 @@ def recover_confirmed_local_review_repair(
         text=True,
         check=True,
     ).stdout.strip()
-    store.transition(request, claim, "publication_pending", result_sha=result_sha)
-    push = git_push(
-        cwd=str(worktree),
-        remote="origin",
-        branch=f"HEAD:{request.head_ref}",
-        expected_remote_sha=request.head_sha,
-    )
-    if not push.success:
-        return LocalReviewRepairOutcome("publication_pending", f"publication incomplete: {push.stderr}", executed=True)
-    store.transition(request, claim, "awaiting_validation", result_sha=result_sha)
-    allowance_authority.mark_completion(code_changed=True, evidence=f"local correction published as {result_sha}")
-    return LocalReviewRepairOutcome(
-        "awaiting_validation",
-        f"published {result_sha} to {request.head_ref}; independent validation is required",
-        executed=True,
-        published=True,
-    )
+    if not store.transition(request, claim, "publication_pending", result_sha=result_sha):
+        return LocalReviewRepairOutcome("publication_pending", "candidate checkpoint lost ownership; no push was started", executed=True)
+    pending = store.get(request)
+    if pending is None:
+        return LocalReviewRepairOutcome("publication_pending", "candidate checkpoint is unavailable; no push was started", executed=True)
+    outcome = _send_pending_publication(request, store, pending, worktree)
+    if outcome.published:
+        allowance_authority.mark_completion(code_changed=True, evidence=f"local correction published as {result_sha}")
+    return outcome
