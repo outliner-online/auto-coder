@@ -221,6 +221,8 @@ def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(mon
         # still held: the prohibited queued routing stage is not a drain wait.
         await asyncio.wait_for(graceful_drain, 0.5)
         assert engine.lifecycle is EngineLifecycle.STOPPED
+        assert not engine._critical_operations
+        assert engine.invalidations.pending_count("owner/repo") == 1
         routing.assert_called_once_with("owner/repo", 25, candidate.data)
         release_executor.set()
         executor.shutdown(wait=True)

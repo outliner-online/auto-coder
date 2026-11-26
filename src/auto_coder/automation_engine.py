@@ -1150,13 +1150,21 @@ class AutomationEngine:
         if self._loop is not None and self._force_stop_event is not None:
             self._loop.call_soon_threadsafe(self._force_stop_event.set)
 
-    async def _run_local_critical(self, description: str, function: Any, *args: Any) -> Any:
+    async def _run_local_critical(self, description: str, function: Any, *args: Any, skip_unentered_on_drain: bool = False) -> Any:
         """Own synchronous work until its thread really returns, despite cancellation."""
         thread_finished = threading.Event()
         thread_submitted = False
+        admitted = False
+        abandoned = False
 
         def run_owned() -> tuple[bool, Any]:
+            nonlocal admitted
             try:
+                if skip_unentered_on_drain:
+                    with self._lifecycle_lock:
+                        if abandoned or self._lifecycle is not EngineLifecycle.RUNNING:
+                            return True, False
+                        admitted = True
                 try:
                     return True, function(*args)
                 except BaseException as exc:
@@ -1208,6 +1216,17 @@ class AutomationEngine:
             try:
                 completed, value = await asyncio.shield(task)
             except asyncio.CancelledError:
+                if skip_unentered_on_drain:
+                    with self._lifecycle_lock:
+                        if self._lifecycle is EngineLifecycle.DRAINING and not admitted:
+                            abandoned = True
+                    if abandoned:
+                        # The queued callback can no longer enter business work.
+                        # Unregister it before releasing the durable claim.
+                        self._critical_operations.pop(task, None)
+                        self._critical_thread_finished.pop(task, None)
+                        task.cancel()
+                        return False
                 # asyncio cancellation cannot stop a running executor thread. Keep
                 # ownership and its durable lifecycle until the real boundary.
                 if self.lifecycle is not EngineLifecycle.FORCED:
@@ -5010,6 +5029,7 @@ class AutomationEngine:
                                     repo_name,
                                     int(item_number),
                                     candidate.data,
+                                    skip_unentered_on_drain=True,
                                 )
                             except (Exception, asyncio.CancelledError):
                                 if validation_error is not None:
