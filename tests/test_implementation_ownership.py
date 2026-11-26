@@ -55,6 +55,7 @@ from auto_coder.local_job_runner import LocalJobExecutionResult, LocalJobRunner
 from auto_coder.retry_dispatch import RetryDispatchRepository
 from auto_coder.specification_analyzer import SpecificationAnalysisResult
 from auto_coder.specification_validation_lifecycle import SpecificationValidationLifecycle
+from auto_coder.stale_jules_recovery import recovery_request_id
 from auto_coder.util.gh_cache import GitHubClient
 from tests.test_issue_job_workspace import git, repository
 from tests.test_issue_stage_routing import REPO, _routing_engine
@@ -912,6 +913,66 @@ def test_explicit_retry_after_completed_execution_starts_distinct_attempt(tmp_pa
     assert engine.implementation_slots.active_execution_ids(owner) == ()
     assert engine.implementation_slots.implementation_generation(owner) == generation
     assert engine.issue_stage_routing.is_implementation_owned(REPO, 1, generation)
+
+
+def test_retired_jules_history_and_manual_retry_through_restarted_admission(tmp_path, monkeypatch):
+    snapshot = _standalone_snapshot(1, (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat())
+    config = AutomationConfig(repo_name=REPO)
+    config.issue_specification_validation = True
+    config.issue_decomposition_validation = False
+    engine, github = _ready_engine(tmp_path, monkeypatch, {1: snapshot}, config)
+    github.get_issue_comments_strict.return_value = []
+    generation = engine._compute_implementation_generation(REPO, snapshot, None)
+    owner = ImplementationOwner("issue", 1)
+    execution = engine.implementation_slots.start_execution(owner, generation=generation)
+    assert execution is not None
+    engine.issue_stage_routing.record_implementation_owned(REPO, 1, generation)
+    engine.implementation_slots.finish_execution(owner, execution)
+
+    accepted_id = recovery_request_id(REPO, 1, 9001)
+    pending_id = recovery_request_id(REPO, 1, 9002)
+    uncertain_id = recovery_request_id(REPO, 1, 9003)
+    routing = engine.issue_stage_routing
+    routing.accept_retry_request(accepted_id, REPO, 1, generation)
+    routing.capture_retry_predecessor(accepted_id, None, None, None)
+    accepted = routing.mark_retry_owned(accepted_id, "historical-execution")
+    pending = routing.accept_retry_request(pending_id, REPO, 1, generation)
+    handoffs = RetryDispatchRepository(REPO, tmp_path / "handoffs.sqlite3")
+    handoffs.claim(accepted, "jules", "jules", {})
+    receipt = handoffs.record_outcome(accepted_id, "accepted", external_id="historical-task")
+    routing.accept_retry_request(uncertain_id, REPO, 1, generation)
+    routing.capture_retry_predecessor(uncertain_id, None, None, None)
+    uncertain = routing.mark_retry_owned(uncertain_id, "uncertain-execution")
+    handoffs.claim(uncertain, "jules", "jules", {})
+    uncertain_receipt = handoffs.record_outcome(uncertain_id, "indeterminate")
+
+    engine.issue_stage_routing = IssueStageRoutingStore(tmp_path / "routing.sqlite3")
+    engine.implementation_slots = ImplementationSlotRepository(REPO, 1, tmp_path / "slots.json")
+    handoffs = RetryDispatchRepository(REPO, tmp_path / "handoffs.sqlite3")
+    dispatch = MagicMock(return_value=CandidateProcessingResult(type="issue", number=1, success=True))
+    engine._process_single_candidate_reserved = dispatch
+    candidate = Candidate(type="issue", data=dict(snapshot), priority=0)
+    engine._process_single_candidate_unified(REPO, candidate, config, origin="capacity-refill-intake")
+
+    dispatch.assert_not_called()
+    github.add_comment_to_issue.assert_not_called()
+    assert engine.issue_stage_routing.retry_request(pending_id) == pending
+    assert engine.issue_stage_routing.retry_request(accepted_id) == accepted
+    assert handoffs.get(accepted_id) == receipt
+    assert engine.issue_stage_routing.retry_request(uncertain_id) == uncertain
+    assert handoffs.get(uncertain_id) == uncertain_receipt
+    assert len(engine.issue_stage_routing.retry_requests(REPO, 1)) == 3
+
+    result = engine._process_single_candidate_unified(
+        REPO, candidate, config, explicit_only=True, force=True, retry=True,
+        retry_request_id="operator-retry", origin="explicit-single-target",
+    )
+    assert result.success
+    dispatch.assert_called_once()
+    authority = dispatch.call_args.kwargs["retry_authority"]
+    assert authority.request_id == "operator-retry"
+    assert authority.generation == generation
+    assert handoffs.get(accepted_id) == receipt
 
 
 def test_tracking_incomplete_cloud_retry_reentry_retains_receipt_and_exact_settlement(tmp_path, monkeypatch):
