@@ -1168,8 +1168,6 @@ class GitHubClient:
         """
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
 
         def enumerate_entities(entity_type: str) -> List[Any]:
             url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/{entity_type}?state=open&per_page=100"
@@ -1179,6 +1177,9 @@ class GitHubClient:
                 if url in visited_urls or len(visited_urls) >= 1000:
                     raise InvalidOpenEntitiesObservation(f"GitHub open-{entity_type} pagination did not terminate safely")
                 visited_urls.add(url)
+                credential = self._credential_for(repo_name, {"issues" if entity_type == "issues" else "pull_requests": "read"})
+                if credential.token:
+                    headers["Authorization"] = f"Bearer {credential.token}"
                 response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
                 response.raise_for_status()
                 try:
@@ -1220,7 +1221,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
 
             # Using list_for_repo to get issues.
             # Note: API returns PRs as issues too, need to filter if desired but standard list usually returns them?
@@ -1380,8 +1381,9 @@ class GitHubClient:
             owner, repo = repo_name.split("/")
             client = get_caching_client()
             headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
 
             url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
             resp = _caching_request(client, "GET", url, headers=headers, path_template=f"/repos/{owner}/{repo}/pulls/{{id}}")
@@ -2293,10 +2295,12 @@ class GitHubClient:
 
     def _connected_prs_graphql_request(self, variables: Dict[str, Any], strict: bool) -> Dict[str, Any]:
         """Issue one connected-PR GraphQL request, bypassing the cache when strict."""
+        repo_name = f"{variables['owner']}/{variables['name']}"
         if not strict:
-            return self.graphql_query(self._CONNECTED_PRS_QUERY, variables)
+            return self.graphql_query(self._CONNECTED_PRS_QUERY, variables, repo_name=repo_name, required_permissions={"issues": "read", "pull_requests": "read"})
+        credential = self._credential_for(repo_name, {"issues": "read", "pull_requests": "read"})
         headers = {
-            "Authorization": f"bearer {self.token}",
+            "Authorization": f"bearer {credential.token}",
             "Content-Type": "application/json",
         }
         payload = {"query": self._CONNECTED_PRS_QUERY, "variables": variables}
@@ -2801,7 +2805,7 @@ class GitHubClient:
         missing PR.
         """
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
         linked_prs = self.get_connected_prs(repo_name, issue_number, strict=True)
         for pr_num in linked_prs:
             pr_data = api.pulls.get(owner, repo, pr_num)
@@ -3379,7 +3383,7 @@ class GitHubClient:
         """Get all commits for a pull request."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
 
             commits = api.pulls.list_commits(owner, repo, pr_number)
 

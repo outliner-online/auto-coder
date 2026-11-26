@@ -90,6 +90,58 @@ class RenewableProvider:
         return None
 
 
+def test_linked_pr_reconciliation_uses_installation_for_both_reads(monkeypatch):
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    sent = []
+
+    def wire(_transport, request):
+        sent.append(request)
+        if request.url.path == "/graphql":
+            return httpx.Response(200, json={"data": {"repository": {"issue": {"closedByPullRequestsReferences": {"nodes": [{"number": 7, "repository": {"owner": {"login": "owner"}, "name": "repo"}}], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}, request=request)
+        return httpx.Response(200, json={"number": 7, "state": "open"}, request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", wire)
+    assert client.has_linked_pr("owner/repo", 42) is True
+    assert [request.headers["Authorization"] for request in sent] == ["bearer installation-one", "Bearer installation-two"]
+    assert provider.requests == [("owner/repo", {"issues": "read", "pull_requests": "read"}), ("owner/repo", {"pull_requests": "read"})]
+
+
+def test_issue_list_and_pr_commits_use_installation_credentials():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    transport = Mock()
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues")
+    transport.request.side_effect = [httpx.Response(200, json=[], request=request), httpx.Response(200, json=[], request=request)]
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        assert client.get_open_issues("owner/repo") == []
+        assert client.get_pr_commits("owner/repo", 7) == []
+    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == ["Bearer installation-one", "Bearer installation-two"]
+    assert provider.requests == [("owner/repo", {"issues": "read"}), ("owner/repo", {"pull_requests": "read"})]
+
+
+def test_live_open_entities_and_pr_lookup_use_installation_credentials():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/issues")
+    response = httpx.Response(200, json=[], request=request)
+    transport = Mock()
+    transport.request.return_value = httpx.Response(200, json={"number": 7}, request=request)
+    sent = []
+
+    def strict_send(*args, **kwargs):
+        sent.append(kwargs["headers"]["Authorization"])
+        return response
+
+    with patch("auto_coder.util.gh_cache._strict_request", side_effect=strict_send), patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        entities = client.get_open_entities_strict("owner/repo")
+        assert entities.issues == [] and entities.pull_requests == []
+        assert client.get_pull_request("owner/repo", 7)["number"] == 7
+    assert sent == ["Bearer installation-one", "Bearer installation-two"]
+    assert transport.request.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-two"
+    assert provider.requests == [("owner/repo", {"issues": "read"}), ("owner/repo", {"pull_requests": "read"}), ("owner/repo", {"pull_requests": "read"})]
+
+
 def test_candidate_and_review_reads_use_renewed_installation_credentials():
     provider = RenewableProvider()
     client = GitHubClient(auth_provider=provider, repository="owner/repo")
