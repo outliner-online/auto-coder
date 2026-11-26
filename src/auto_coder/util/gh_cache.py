@@ -3576,10 +3576,11 @@ class GitHubClient:
         """Add/remove an incoming dependency using its stable GitHub Issue ID."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         base = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
         with self._issue_read_mutation(repo_name), github_http_client(subsystem="controller-strict") as client:
+            credential = self._credential_for(repo_name, {"issues": "write"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
             if add:
                 response = client.post(base, headers=headers, json={"issue_id": dependency_id}, timeout=30)
             else:
@@ -3670,9 +3671,10 @@ class GitHubClient:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         with self._issue_read_mutation(repo_name), github_http_client(subsystem="controller-strict") as client:
+            credential = self._credential_for(repo_name, {"issues": "write"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
             response = client.post(
                 f"https://api.github.com/repos/{owner}/{repo}/issues/{parent_issue_number}/sub_issues",
                 headers=headers,

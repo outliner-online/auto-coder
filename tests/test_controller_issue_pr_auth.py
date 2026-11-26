@@ -460,3 +460,24 @@ def test_issue_management_mutations_select_repository_installation_capabilities(
         {"issues": "write"},
         {"issues": "write"},
     ]
+
+
+def test_strict_relationship_mutations_send_renewed_installation_credentials(monkeypatch):
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    sent = []
+
+    def wire(_transport, request):
+        sent.append(request)
+        return httpx.Response(201, json={}, request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", wire)
+    client.mutate_blocked_by_strict("owner/repo", 42, 100, add=True)
+    client.add_sub_issue_strict("owner/repo", 42, 43, 101)
+
+    assert [request.headers["Authorization"] for request in sent] == ["Bearer installation-one", "Bearer installation-two"]
+    assert [request.url.path for request in sent] == [
+        "/repos/owner/repo/issues/42/dependencies/blocked_by",
+        "/repos/owner/repo/issues/42/sub_issues",
+    ]
+    assert provider.requests == [("owner/repo", {"issues": "write"})] * 2
