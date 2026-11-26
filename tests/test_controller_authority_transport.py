@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 import pytest
 
 from auto_coder.controller_identity_history import controller_author_set_for_client, controller_authority_scope
+from auto_coder.github_controller_auth import ControllerCredential, ControllerIdentity
 from auto_coder.util.gh_cache import GitHubClient
 from auto_coder.util.github_request_outcome import DeliveryCertainty, GitHubRequestRefused, configure_github_request_boundary
 
@@ -136,6 +138,59 @@ def test_native_guard_does_not_leak_after_critical_section(native_controller):
     fixture.history_path.write_text('[github-controller-identity-history]\nprior_logins = ["prior-controller"]\n', encoding="utf-8")
     _mutate(fixture.client, "reply")
     assert len(fixture.mutated) == 1
+
+
+def test_app_authority_guard_binds_provider_proven_dispatch_snapshot(tmp_path, monkeypatch):
+    class AppProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def credential_for(self, repo_name, required_permissions):
+            self.calls += 1
+            return ControllerCredential(
+                f"installation-{self.calls}",
+                "app",
+                repository=repo_name,
+                permissions=tuple(sorted(required_permissions.items())),
+                expires_at=datetime.now(timezone.utc),
+                app_id=7,
+                installation_id=11,
+                snapshot_id=str(self.calls),
+            )
+
+        def identity_for(self, repo_name):
+            return ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
+
+        def invalidate(self, credential):
+            return None
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / ".auto-coder" / "owner" / "repo" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '[github-app-auto-coder-controller]\napp_id = 7\nprivate_key_path = "/unused.pem"\n' "[github-controller-identity-history]\nprior_logins = []\n",
+        encoding="utf-8",
+    )
+    provider = AppProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    sent = []
+
+    def wire(_transport, request):
+        sent.append(request)
+        return httpx.Response(200, json={"id": 22, "body": "receipt"}, request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", wire)
+    configure_github_request_boundary(lambda _context: True, lambda _outcome: None)
+    try:
+        authors = controller_author_set_for_client(client, "owner/repo")
+        with controller_authority_scope(client, "owner/repo", authors):
+            client.reply_to_review_thread("owner/repo", 7, 11, "receipt")
+    finally:
+        configure_github_request_boundary()
+
+    assert len(sent) == 1
+    assert sent[0].headers["Authorization"] == "Bearer installation-2"
+    assert provider.calls == 2
 
 
 @pytest.mark.parametrize("change", ["refresh", "history"])

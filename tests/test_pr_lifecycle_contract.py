@@ -1918,6 +1918,7 @@ def test_durable_cloud_conflict_receipt_governs_replay_without_local_substitute(
     github.token = "controlled-token"
     api = MagicMock()
     api.pulls.get.return_value = pr_data
+    github.api_for.return_value = api
     config = AutomationConfig()
     config.ENABLE_MERGEABILITY_REMEDIATION = True
 
@@ -1944,7 +1945,6 @@ def test_durable_cloud_conflict_receipt_governs_replay_without_local_substitute(
         patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": False, "merge_state_status": "dirty"}),
         patch("auto_coder.pr_processor.check_pr_repair_exhaustion", return_value=None),
         patch("auto_coder.pr_processor.GitHubClient.get_instance", return_value=github),
-        patch("auto_coder.pr_processor.get_ghapi_client", return_value=api),
         patch("auto_coder.pr_processor._checkout_pr_branch", return_value=True),
         patch("auto_coder.pr_processor.BranchManager"),
         patch("auto_coder.pr_processor.cmd.run_command", side_effect=git_effect),

@@ -113,6 +113,7 @@ class TestCloseLinkedIssues:
         mock_api = Mock()
         mock_get_ghapi_client.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         # Mock PR body retrieval
         mock_api.pulls.get.return_value = {"body": "Closes #123"}
@@ -133,6 +134,7 @@ class TestCloseLinkedIssues:
         mock_api = Mock()
         mock_get_ghapi_client.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         # Mock PR body
         mock_api.pulls.get.return_value = {"body": "Closes #123 and fixes #456"}
@@ -158,6 +160,7 @@ class TestCloseLinkedIssues:
         mock_api = Mock()
         mock_get_ghapi_client.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         mock_api.pulls.get.return_value = {"body": "Regular PR description"}
 
@@ -173,6 +176,7 @@ class TestCloseLinkedIssues:
         mock_api = Mock()
         mock_get_ghapi_client.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         mock_api.pulls.get.side_effect = Exception("PR not found")
 
@@ -188,6 +192,7 @@ class TestCloseLinkedIssues:
         mock_api = Mock()
         mock_get_ghapi_client.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         mock_api.pulls.get.return_value = {"body": "Closes #123"}
 
@@ -210,6 +215,7 @@ class TestCloseLinkedIssues:
         mock_api = Mock()
         mock_get_ghapi_client.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         # PR body without direct closing keyword
         pr_info = {
@@ -246,6 +252,7 @@ class TestMergePRWithIssueClosing:
         mock_get_ghapi_client.return_value = mock_api
         mock_get_ghapi_client_adapter.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         head_sha = "e" * 40
         mock_api.pulls.get.return_value = {"number": 123, "user": {"login": "some-developer"}, "head": {"sha": head_sha}}
@@ -257,7 +264,7 @@ class TestMergePRWithIssueClosing:
             result = _merge_pr("test/repo", 123, {}, config)
 
         assert result is True
-        mock_close_issues.assert_called_once_with("test/repo", 123)
+        mock_close_issues.assert_called_once_with("test/repo", 123, mock_github_client.get_instance.return_value)
         mock_archive_session.assert_called_once_with("test/repo", 123)
 
     @patch("src.auto_coder.pr_processor._archive_jules_session")
@@ -277,6 +284,7 @@ class TestMergePRWithIssueClosing:
         mock_get_ghapi_client.return_value = mock_api
         mock_get_ghapi_client_adapter.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         # Mock failed merge (API failure): a body-read failure is
         # indeterminate delivery, never a fabricated success.
@@ -311,6 +319,7 @@ class TestMergePRWithIssueClosing:
         mock_get_ghapi_client.return_value = mock_api
         mock_get_ghapi_client_adapter.return_value = mock_api
         mock_github_client.get_instance.return_value.token = "token"
+        mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         head_sha = "f" * 40
         mock_api.pulls.get.return_value = {"number": 123, "user": {"login": "some-developer"}, "head": {"sha": head_sha}}
@@ -322,5 +331,5 @@ class TestMergePRWithIssueClosing:
             result = _merge_pr("test/repo", 123, {}, config)
 
         assert result is True
-        mock_close_issues.assert_called_once_with("test/repo", 123)
+        mock_close_issues.assert_called_once_with("test/repo", 123, mock_github_client.get_instance.return_value)
         mock_archive_session.assert_called_once_with("test/repo", 123)
