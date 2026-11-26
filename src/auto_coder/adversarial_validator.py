@@ -2946,6 +2946,50 @@ def _continue_reviewer_session(
     return response
 
 
+def _run_dynamic_reviewer_followup(
+    backend_manager: BackendManager,
+    session_id: str,
+    prompt: str,
+    *,
+    original_prompt: str,
+    prior_response: str,
+    phase: str,
+    manifest: validation_evidence.ManifestInput,
+    followup_includes_manifest: bool = False,
+    response_check: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Choose review transport before entry without weakening explicit resume."""
+    identity = backend_manager.get_current_backend_identity()
+    backend_type = str(identity[1]).lower() if isinstance(identity, tuple) and len(identity) == 3 else ""
+    retained_local = backend_type not in CLOUD_BACKEND_TYPES and bool(backend_manager.has_retained_local_session(session_id))
+    if backend_type in CLOUD_BACKEND_TYPES or retained_local:
+        validation_evidence.observe_prompt(phase, prompt, manifest if followup_includes_manifest else None)
+        return _continue_reviewer_session(
+            backend_manager,
+            session_id,
+            prompt,
+            retained_local=retained_local,
+            response_check=response_check,
+        )
+
+    # A provider session ID is history, not authority to resurrect a released
+    # workspace. Submit a self-contained fresh turn selected by the controller.
+    fresh_prompt = render_prompt(
+        "pr.adversarial_validation_fresh_followup",
+        original_prompt=original_prompt,
+        prior_response=prior_response,
+        followup_prompt=prompt,
+    )
+    validation_evidence.observe_prompt(phase, fresh_prompt, manifest)
+    logger.info("Starting fresh reviewer {} because its local workspace is not retained", phase)
+    response = run_llm_prompt(fresh_prompt, backend_manager=backend_manager, is_noedit=not pr_review_designated())
+    if response_check is not None:
+        response_check(response)
+    else:
+        _assert_reviewer_workspace(backend_manager)
+    return response
+
+
 def _complete_changed_file_evidence(
     result: AdversarialValidationResult,
     context: AdversarialValidationContext,
@@ -4304,7 +4348,6 @@ def run_adversarial_validation(
     verify_execution_target("LLM completion")
 
     used_backend, used_type, used_model = manager_identity()
-    provider_session_id = getattr(backend_manager, "_last_session_id", None)
     # Conversational continuity and the accepted review lifecycle are separate
     # authorities.  A continuation fallback must not reuse execution evidence
     # from the old provider session, but it still adjudicates the lifecycle
@@ -4380,8 +4423,20 @@ def run_adversarial_validation(
                     diagnostic_reason=target_error,
                 )
             else:
-                validation_evidence.observe_prompt("target_correction", correction_prompt, None)
-                correction_response = _continue_reviewer_session(backend_manager, correction_session_id, correction_prompt, response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps))
+                verify_execution_target("target_correction invocation")
+                correction_response = _run_dynamic_reviewer_followup(
+                    backend_manager,
+                    correction_session_id,
+                    correction_prompt,
+                    original_prompt=prompt,
+                    prior_response=result.raw_response,
+                    phase="target_correction",
+                    manifest=_manifest_input(context),
+                    response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps),
+                )
+                verify_execution_target("target_correction completion")
+                used_backend, used_type, used_model = manager_identity()
+                reviewer_provenance = "/".join(part for part in (used_backend, used_type, used_model) if part) or "unavailable"
                 if refresh_ci_status is not None:
                     ci_status = refresh_ci_status()
                 result = _parse_reviewer_response("target_correction", correction_response, result.test_oracle_gaps, closure_input, reviewer_provenance)
@@ -4441,8 +4496,20 @@ def run_adversarial_validation(
                             diagnostic_category="dynamic_check_target_protocol_error",
                             diagnostic_reason=test_res.target_selection_error,
                         )
-                    validation_evidence.observe_prompt("target_selection_correction", correction_prompt, None)
-                    correction_response = _continue_reviewer_session(backend_manager, correction_session_id, correction_prompt, response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps))
+                    verify_execution_target("target_selection_correction invocation")
+                    correction_response = _run_dynamic_reviewer_followup(
+                        backend_manager,
+                        correction_session_id,
+                        correction_prompt,
+                        original_prompt=prompt,
+                        prior_response=result.raw_response,
+                        phase="target_selection_correction",
+                        manifest=_manifest_input(context),
+                        response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps),
+                    )
+                    verify_execution_target("target_selection_correction completion")
+                    used_backend, used_type, used_model = manager_identity()
+                    reviewer_provenance = "/".join(part for part in (used_backend, used_type, used_model) if part) or "unavailable"
                     if refresh_ci_status is not None:
                         ci_status = refresh_ci_status()
                     result = _parse_reviewer_response("target_selection_correction", correction_response, result.test_oracle_gaps, closure_input, reviewer_provenance)
@@ -4528,15 +4595,28 @@ def run_adversarial_validation(
                         )
                         + closure_extension
                     )
-                    validation_evidence.observe_prompt("dynamic_check_followup", followup_prompt, _manifest_input(context))
                     with ProgressStage("Adversarial dynamic check follow-up"):
+                        verify_execution_target("dynamic-check follow-up invocation")
                         followup_session_id = getattr(backend_manager, "_last_session_id", None)
                         if isinstance(followup_session_id, str) and followup_session_id:
-                            followup_response = _continue_reviewer_session(backend_manager, followup_session_id, followup_prompt, response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps))
+                            followup_response = _run_dynamic_reviewer_followup(
+                                backend_manager,
+                                followup_session_id,
+                                followup_prompt,
+                                original_prompt=prompt,
+                                prior_response=result.raw_response,
+                                phase="dynamic_check_followup",
+                                manifest=_manifest_input(context),
+                                followup_includes_manifest=True,
+                                response_check=lambda response: check_reviewer_response(response, result.test_oracle_gaps),
+                            )
                         else:
                             # Never guess an implicit last session. A provider that did not
                             # expose an ID cannot safely retain dynamic-check context.
                             raise RuntimeError("Reviewer provider did not return an explicit session ID for dynamic follow-up")
+                    verify_execution_target("dynamic-check follow-up completion")
+                    used_backend, used_type, used_model = manager_identity()
+                    reviewer_provenance = "/".join(part for part in (used_backend, used_type, used_model) if part) or "unavailable"
                     result = _parse_reviewer_response("dynamic_check_followup", followup_response, result.test_oracle_gaps, closure_input, reviewer_provenance)
                     current_gap_decision_ids = frozenset(gap.gap_id for gap in result.test_oracle_gaps)
                     _log_contextual_parse_diagnostics(result, followup_response, backend_manager, pr_number, "dynamic_check_followup")
@@ -4707,6 +4787,10 @@ def run_adversarial_validation(
     result.review_input_context_identity = validation_input_identity(context)
     result.accepted_finding_projection = project_accepted_findings(bridge, projection_target, claimed_review_threads, accepted_finding_dispositions(result, claimed_review_threads, accepted_projection, head_sha)) if accepted_projection.records else accepted_projection
 
+    # A controller-selected fresh follow-up has its own provider identity.
+    # Persist the latest completed turn rather than the initial review session.
+    used_backend, used_type, used_model = manager_identity()
+    provider_session_id = getattr(backend_manager, "_last_session_id", None)
     if was_resumed:
         persisted_session_id = provider_session_id if isinstance(provider_session_id, str) and provider_session_id else stored_session.session_id if stored_session else ""
     else:
