@@ -1,0 +1,13 @@
+# Retired Jules producer maintenance
+
+The production producer and explicit batch loop no longer enumerate, resume,
+stop, archive, or create Jules sessions. They also do not consume speculative
+Jules work or repository-local recurrent Jules prompt files. Historical session,
+competition, and recurrent-task records remain available for inspection; their
+presence is not fresh dispatch authority and is never converted to another
+provider.
+
+Provider-neutral workspace reclamation, update checks, the producer's fixed
+maintenance sleep, and PR merge/close wake-up remain independent of retired
+Jules state. Ordinary Issue admission continues to select supported Codex Cloud,
+Claude Routine, or local backends through the unified Issue dispatch policy.

@@ -298,17 +298,6 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
             release.set()
             assert first.result(timeout=10).actions == ["dispatched"]
 
-    @patch("auto_coder.automation_engine.check_and_start_recurrent_jules_tasks")
-    def test_recurrent_jules_step_receives_instance_slot_repository(self, start_recurrent, tmp_path):
-        engine = AutomationEngine(Mock(), config=AutomationConfig())
-        slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
-        engine.implementation_slots = slots
-
-        asyncio.run(engine.check_and_start_recurrent_jules_tasks_async("owner/repo"))
-
-        start_recurrent.assert_called_once_with("owner/repo", slots)
-        assert engine.config.REPORTS_DIR == "reports"
-
     # Note: Tests for deprecated process_issues and related functions have been removed
     # as those functions are no longer supported. The modern API uses process_single
     # and LabelManager context manager for issue processing.

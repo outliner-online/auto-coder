@@ -84,10 +84,6 @@ class TestAutomationEngine:
 
         with (
             patch("src.auto_coder.automation_engine.check_for_updates_and_restart"),
-            patch("src.auto_coder.automation_engine.invalidate_jules_sessions_cache"),
-            patch("src.auto_coder.automation_engine.check_and_resume_or_archive_sessions"),
-            patch.object(engine, "handle_stale_jules_issue_sessions"),
-            patch("src.auto_coder.automation_engine.check_and_start_recurrent_jules_tasks"),
             patch("src.auto_coder.automation_engine.git_pull"),
         ):
             result = engine.run("owner/repo")
