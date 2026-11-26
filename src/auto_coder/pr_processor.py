@@ -4789,16 +4789,22 @@ def _get_mergeable_state(
     repo_name: str,
     pr_data: Dict[str, Any],
     _config: AutomationConfig,
+    github_client: Optional[GitHubClient] = None,
 ) -> Dict[str, Optional[Any]]:
     """Get latest mergeable state using existing data with optional refresh."""
+    from auto_coder.util.gh_cache import GitHubClient as SharedGitHubClient
+
     mergeable = pr_data.get("mergeable")
     merge_state_status = pr_data.get("mergeStateStatus")
 
     # Refresh mergeability only when value is unknown
     if mergeable is None:
         try:
-            token = GitHubClient.get_instance().token
-            api = get_ghapi_client(token)
+            client = github_client or GitHubClient.get_instance()
+            if isinstance(client, SharedGitHubClient):
+                api = client.api_for(repo_name, required_permissions={"pull_requests": "read"})
+            else:
+                api = get_ghapi_client(client.token)
             owner, repo = repo_name.split("/")
 
             # API: api.pulls.get(owner, repo, pull_number)
@@ -5477,10 +5483,10 @@ def _process_pr_jules_mode(
         get_trace_logger().log("Jules Mode", f"Started Jules session for PR #{pr_number}", item_type="pr", item_number=pr_number, details={"session_id": session_id})
 
         # 3. Update PR body
-        from auto_coder.util.gh_cache import GitHubClient, get_ghapi_client
-
-        token = GitHubClient.get_instance().token
-        api = get_ghapi_client(token)
+        if isinstance(github_client, GitHubClient):
+            api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
+        else:
+            api = get_ghapi_client(github_client.token)
         owner, repo = repo_name.split("/")
 
         pr_body = pr_data.get("body", "") or ""
@@ -8895,7 +8901,7 @@ def _handle_pr_merge(
             item_type="PR",
         )
 
-        mergeability = _get_mergeable_state(repo_name, pr_data, config)
+        mergeability = _get_mergeable_state(repo_name, pr_data, config, github_client)
         mergeable_flag = mergeability.get("mergeable")
         merge_state_status = mergeability.get("merge_state_status")
         exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number) if mergeable_flag is False else None
@@ -13258,7 +13264,10 @@ def _merge_pr(
             logger.error(f"No head SHA available for PR #{pr_number}; aborting merge")
             return False
 
-        needs_approval = _is_dependabot_pr(pr_info)
+        controller_identity = None
+        if getattr(client, "_auth_provider", None) is not None:
+            controller_identity = client.get_authenticated_controller_identity(repo_name)
+        needs_approval = _is_dependabot_pr(pr_info, controller_identity)
         reviewer_identity = ""
         if needs_approval:
             try:
