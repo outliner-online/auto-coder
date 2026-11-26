@@ -1155,13 +1155,21 @@ class AutomationEngine:
         if self._loop is not None and self._force_stop_event is not None:
             self._loop.call_soon_threadsafe(self._force_stop_event.set)
 
-    async def _run_local_critical(self, description: str, function: Any, *args: Any) -> Any:
+    async def _run_local_critical(self, description: str, function: Any, *args: Any, skip_unentered_on_drain: bool = False) -> Any:
         """Own synchronous work until its thread really returns, despite cancellation."""
         thread_finished = threading.Event()
         thread_submitted = False
+        admitted = False
+        abandoned = False
 
         def run_owned() -> tuple[bool, Any]:
+            nonlocal admitted
             try:
+                if skip_unentered_on_drain:
+                    with self._lifecycle_lock:
+                        if abandoned or self._lifecycle is not EngineLifecycle.RUNNING:
+                            return True, False
+                        admitted = True
                 try:
                     return True, function(*args)
                 except BaseException as exc:
@@ -1213,6 +1221,17 @@ class AutomationEngine:
             try:
                 completed, value = await asyncio.shield(task)
             except asyncio.CancelledError:
+                if skip_unentered_on_drain:
+                    with self._lifecycle_lock:
+                        if self._lifecycle is EngineLifecycle.DRAINING and not admitted:
+                            abandoned = True
+                    if abandoned:
+                        # The queued callback can no longer enter business work.
+                        # Unregister it before releasing the durable claim.
+                        self._critical_operations.pop(task, None)
+                        self._critical_thread_finished.pop(task, None)
+                        task.cancel()
+                        return False
                 # asyncio cancellation cannot stop a running executor thread. Keep
                 # ownership and its durable lifecycle until the real boundary.
                 if self.lifecycle is not EngineLifecycle.FORCED:
@@ -4130,6 +4149,14 @@ class AutomationEngine:
             self.issue_stage_routing.remove_departed_family_children(repo_name, issue_number, ())
             self._route_standalone_issue(repo_name, current)
 
+    def _route_issue_stages_after_validation_if_admitted(self, repo_name: str, issue_number: int, snapshot: Dict[str, Any]) -> bool:
+        """Enter post-validation routing only while lifecycle admission is open."""
+        with self._lifecycle_lock:
+            if self._lifecycle is not EngineLifecycle.RUNNING:
+                return False
+        self._route_issue_stages_authoritatively(repo_name, issue_number, snapshot)
+        return True
+
     def _refresh_issue_stage_routing(self, repo_name: str, issue_number: int) -> None:
         """Reclassify after processing from a new strict GitHub snapshot."""
         with self._issue_routing_lock(repo_name, issue_number):
@@ -5016,21 +5043,30 @@ class AutomationEngine:
                                 # refusal. Preserve the earlier disposition as
                                 # the authority for this claimed generation.
                                 validation_error = exc
+                            if self.is_draining:
+                                # Validation is already durable, but admission
+                                # has closed for the next authoritative stage.
+                                # Leave this generation (and any newer one)
+                                # unacknowledged so startup can reconcile it.
+                                return
                             try:
                                 # Validation may have persisted only a subset
                                 # before ERROR. Re-read durable decisions so the
                                 # lane retains exactly the retryable identities.
-                                await self._run_local_critical(
+                                routing_started = await self._run_local_critical(
                                     f"worker {worker_id} post-validation stage routing for issue #{item_number}",
-                                    self._route_issue_stages_authoritatively,
+                                    self._route_issue_stages_after_validation_if_admitted,
                                     repo_name,
                                     int(item_number),
                                     candidate.data,
+                                    skip_unentered_on_drain=True,
                                 )
                             except (Exception, asyncio.CancelledError):
                                 if validation_error is not None:
                                     raise validation_error
                                 raise
+                            if not routing_started:
+                                return
                             if validation_error is not None:
                                 raise validation_error
                             if self.is_draining:

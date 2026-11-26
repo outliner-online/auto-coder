@@ -4,6 +4,7 @@ import signal
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -75,7 +76,8 @@ def test_worker_drain_owns_real_to_thread_operation_until_durable_completion(mon
     assert engine.invalidations.claim("owner/repo").identity == EntityIdentity("owner/repo", "issue", 1778)
 
 
-def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch, tmp_path):
+@pytest.mark.parametrize("newer_invalidation", [False, True])
+def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch, tmp_path, newer_invalidation):
     """Exercise the production invalidation hook before candidate dispatch."""
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
     engine = AutomationEngine(MagicMock(), AutomationConfig())
@@ -83,6 +85,7 @@ def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch,
     release = threading.Event()
     validations = 0
     dispatches = 0
+    routing = MagicMock()
     candidate = Candidate(type="issue", data={"number": 22, "state": "open"}, priority=0, issue_number=22)
     monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args: candidate)
 
@@ -98,6 +101,7 @@ def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch,
         return CandidateProcessingResult(type="issue", number=22, success=True)
 
     monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", validate_parent)
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
     monkeypatch.setattr(engine, "_process_single_candidate", dispatch)
 
     async def scenario():
@@ -105,17 +109,213 @@ def test_child_parent_validation_remains_owned_through_worker_drain(monkeypatch,
         worker = asyncio.create_task(engine._worker_loop("owner/repo", 0))
         assert await asyncio.to_thread(entered.wait, 2)
         engine.request_graceful_shutdown("SIGTERM")
-        worker.cancel()
+        if newer_invalidation:
+            assert await engine.invalidate_entity("owner/repo", "issue", 22, "newer-child-delivery")
+        graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
         await asyncio.sleep(0.05)
-        assert not worker.done()
+        assert not graceful_drain.done()
         assert list(engine._critical_operations.values()) == ["worker 0 submitted-parent validation for issue #22"]
         assert engine.invalidations.claim("owner/repo") is None
         release.set()
-        await worker
+        await asyncio.wait_for(graceful_drain, 2)
+        assert engine.lifecycle is EngineLifecycle.STOPPED
 
     asyncio.run(scenario())
     assert validations == 1
     assert dispatches == 0
+    assert engine.invalidations.pending_count("owner/repo") == 1
+    routing.assert_called_once_with("owner/repo", 22, candidate.data)
+    restarted = AutomationEngine(MagicMock(), AutomationConfig())
+    recovered = restarted.invalidations.claim("owner/repo")
+    assert recovered is not None
+    assert recovered.identity == EntityIdentity("owner/repo", "issue", 22)
+    assert recovered.generation == (2 if newer_invalidation else 1)
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("validation unavailable"), asyncio.CancelledError()])
+def test_failed_parent_validation_does_not_start_routing_after_drain(monkeypatch, tmp_path, failure):
+    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    entered = threading.Event()
+    release = threading.Event()
+    candidate = Candidate(type="issue", data={"number": 23, "state": "open"}, priority=0, issue_number=23)
+    routing = MagicMock()
+    monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args: candidate)
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+
+    def failed_validation(*_args):
+        entered.set()
+        assert release.wait(5)
+        raise failure
+
+    monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", failed_validation)
+    engine._process_single_candidate = MagicMock()
+
+    async def scenario():
+        assert await engine.invalidate_entity("owner/repo", "issue", 23, "failed-validation")
+        worker = asyncio.create_task(engine._worker_loop("owner/repo", 0, "issue"))
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert engine.request_graceful_shutdown("SIGTERM")
+        assert await engine.invalidate_entity("owner/repo", "issue", 23, "newer-after-failure")
+        graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
+        await asyncio.sleep(0.05)
+        assert not graceful_drain.done()
+        release.set()
+        await asyncio.wait_for(graceful_drain, 2)
+        assert engine.lifecycle is EngineLifecycle.STOPPED
+
+    asyncio.run(scenario())
+    routing.assert_called_once_with("owner/repo", 23, candidate.data)
+    engine._process_single_candidate.assert_not_called()
+    assert engine.invalidations.pending_count("owner/repo") == 1
+    recovered = AutomationEngine(MagicMock(), AutomationConfig()).invalidations.claim("owner/repo")
+    assert recovered is not None
+    assert recovered.identity == EntityIdentity("owner/repo", "issue", 23)
+    assert recovered.generation == 2
+
+
+def test_queued_post_validation_routing_rechecks_admission_at_executor_entry(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    candidate = Candidate(type="issue", data={"number": 25, "state": "open"}, priority=0, issue_number=25)
+    routing = MagicMock()
+    validation_entered = threading.Event()
+    release_validation = threading.Event()
+    executor_blocked = threading.Event()
+    release_executor = threading.Event()
+    monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args: candidate)
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+
+        async def wait_until_set(event):
+            for _ in range(200):
+                if event.is_set():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("timed out waiting for executor boundary")
+
+        def occupy_executor():
+            executor_blocked.set()
+            assert release_executor.wait(5)
+
+        def validation(*_args):
+            validation_entered.set()
+            assert release_validation.wait(5)
+            # Queue a real to_thread call ahead of the worker's next owned
+            # operation, reproducing executor backlog at the handoff.
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(asyncio.to_thread(occupy_executor)))
+
+        monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", validation)
+        assert await engine.invalidate_entity("owner/repo", "issue", 25, "queued-routing")
+        worker = asyncio.create_task(engine._worker_loop("owner/repo", 0, "issue"))
+        await wait_until_set(validation_entered)
+        release_validation.set()
+        await wait_until_set(executor_blocked)
+        for _ in range(200):
+            if any("post-validation stage routing" in value for value in engine._critical_operations.values()):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("post-validation routing was not queued behind the executor blocker")
+
+        assert engine.request_graceful_shutdown("SIGTERM")
+        # The only executor thread is deliberately occupied. Persist the
+        # delivery directly so the test can begin draining while it remains
+        # occupied; invalidate_entity itself submits to that same executor.
+        assert engine.invalidations.invalidate(EntityIdentity("owner/repo", "issue", 25), "newer-queued-routing")
+        graceful_drain = asyncio.create_task(engine._complete_graceful_drain([worker]))
+        # The supervisor must finish while the unrelated executor occupant is
+        # still held: the prohibited queued routing stage is not a drain wait.
+        await asyncio.wait_for(graceful_drain, 0.5)
+        assert engine.lifecycle is EngineLifecycle.STOPPED
+        assert not engine._critical_operations
+        assert engine.invalidations.pending_count("owner/repo") == 1
+        routing.assert_called_once_with("owner/repo", 25, candidate.data)
+        release_executor.set()
+        executor.shutdown(wait=True)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release_validation.set()
+        release_executor.set()
+
+    routing.assert_called_once_with("owner/repo", 25, candidate.data)
+    assert engine.invalidations.pending_count("owner/repo") == 1
+    restarted = AutomationEngine(MagicMock(), AutomationConfig())
+    recovered = restarted.invalidations.claim("owner/repo")
+    assert recovered is not None
+    assert recovered.identity == EntityIdentity("owner/repo", "issue", 25)
+    assert recovered.generation == 2
+
+
+def test_post_validation_handoff_rejects_closed_admission(monkeypatch):
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    routing = MagicMock()
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+    assert engine.request_graceful_shutdown("SIGTERM")
+
+    assert engine._route_issue_stages_after_validation_if_admitted("owner/repo", 24, {"number": 24}) is False
+    routing.assert_not_called()
+
+
+def test_parent_validation_routes_normally_while_admission_is_open(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    candidate = Candidate(type="issue", data={"number": 24, "state": "open"}, priority=0, issue_number=24)
+    routing = MagicMock()
+    post_validation_handoff = MagicMock(wraps=engine._route_issue_stages_after_validation_if_admitted)
+    monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args: candidate)
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+    monkeypatch.setattr(engine, "_route_issue_stages_after_validation_if_admitted", post_validation_handoff)
+    monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", lambda *_args: None)
+    monkeypatch.setattr("auto_coder.automation_engine.is_item_closed_on_github", lambda *_args: False)
+    engine._process_single_candidate = MagicMock(return_value=CandidateProcessingResult(type="issue", number=24, success=True))
+    monkeypatch.setattr(engine, "_refresh_issue_stage_routing", lambda *_args: None)
+
+    async def scenario():
+        assert await engine.invalidate_entity("owner/repo", "issue", 24, "normal-validation")
+        worker = asyncio.create_task(engine._worker_loop("owner/repo", 0, "issue"))
+        await asyncio.wait_for(engine.queue.join(), 2)
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    asyncio.run(scenario())
+    assert routing.call_count == 2
+    post_validation_handoff.assert_called_once_with("owner/repo", 24, candidate.data)
+    engine._process_single_candidate.assert_called_once()
+    assert engine.invalidations.pending_count("owner/repo") == 0
+
+
+def test_running_parent_validation_error_keeps_precedence_over_routing_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
+    engine = AutomationEngine(MagicMock(), AutomationConfig())
+    candidate = Candidate(type="issue", data={"number": 26, "state": "open"}, priority=0, issue_number=26)
+    routing = MagicMock(side_effect=[None, ValueError("routing failure")])
+    monitor = MagicMock()
+    monkeypatch.setattr(engine, "_create_candidate_from_single", lambda *_args: candidate)
+    monkeypatch.setattr(engine, "_route_issue_stages_authoritatively", routing)
+    monkeypatch.setattr(engine, "_validate_submitted_parent_generation_for_child", MagicMock(side_effect=RuntimeError("validation failure")))
+    monkeypatch.setattr("auto_coder.automation_engine.get_health_monitor", lambda: monitor)
+    engine._process_single_candidate = MagicMock()
+
+    async def scenario():
+        assert await engine.invalidate_entity("owner/repo", "issue", 26, "validation-error")
+        worker = asyncio.create_task(engine._worker_loop("owner/repo", 0, "issue"))
+        await asyncio.wait_for(engine.queue.join(), 2)
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    asyncio.run(scenario())
+    assert routing.call_count == 2
+    monitor.record_event.assert_any_call("worker_error", "worker 0: RuntimeError: validation failure", "issue #26")
+    engine._process_single_candidate.assert_not_called()
     assert engine.invalidations.pending_count("owner/repo") == 1
 
 
