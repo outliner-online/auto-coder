@@ -55,7 +55,7 @@ from .github_request_outcome import (
 if TYPE_CHECKING:
     from ..controller_identity_history import ControllerAuthorSet, ControllerHistoryCache
     from ..github_app_reviewer import ReviewerAppIdentity
-    from ..github_controller_auth import ControllerIdentity
+    from ..github_controller_auth import ControllerAuthProvider, ControllerCredential, ControllerIdentity
     from ..issue_review_publication import PublicationReceipt
 
 logger = get_logger(__name__)
@@ -710,12 +710,13 @@ class SafeGhApiProxy:
 
 
 def get_ghapi_client(
-    token: str,
+    token: str = "",
     *,
     admission_hook: AdmissionHook | None = None,
     observation_hook: ObservationHook | None = None,
     subsystem: str = "ghapi",
     extra_headers: Mapping[str, str] | None = None,
+    credential_source: Callable[[], "ControllerCredential"] | None = None,
 ) -> GhApi:
     """
     Returns a GhApi instance configured with hishel caching for GET requests.
@@ -749,6 +750,13 @@ def get_ghapi_client(
 
             # Merge headers
             headers = {**self.headers, **(headers or {})}
+            # Installation credentials are deliberately selected at the final
+            # adapter boundary, rather than when this long-lived GhApi object is
+            # constructed.  Pagination and retries therefore cannot retain an
+            # expired token or a token selected for another repository.
+            if credential_source is not None:
+                credential = credential_source()
+                headers["Authorization"] = f"Bearer {credential.token}"
 
             if route:
                 import urllib.parse
@@ -949,6 +957,26 @@ def is_implementation_ready(issue_snapshot: Dict[str, Any]) -> bool:
     return any(str(label.get("name", "") if isinstance(label, dict) else label).strip().lower() == IMPLEMENTATION_READY_LABEL for label in labels if isinstance(label, (dict, str)))
 
 
+def create_controller_client(
+    repo_name: str,
+    *,
+    provided_token: str | None = None,
+    auth_provider: "ControllerAuthProvider | None" = None,
+    disable_labels: bool = False,
+) -> "GitHubClient":
+    """Create an injected repository client without mutating the legacy singleton.
+
+    Startup selection intentionally remains with callers.  Supplying a provider
+    is useful for composition and tests; otherwise the prerequisite selector
+    chooses App mode when configured and the established personal mode when not.
+    """
+    if auth_provider is None:
+        from ..github_controller_auth import select_controller_auth
+
+        auth_provider = select_controller_auth(repo_name, provided_token=provided_token)
+    return GitHubClient(disable_labels=disable_labels, auth_provider=auth_provider, repository=repo_name)
+
+
 class GitHubClient:
     """GitHub API client for managing issues and pull requests using GhApi.
 
@@ -961,7 +989,7 @@ class GitHubClient:
     # Class variable to hold the lock for thread-safety
     _lock = threading.Lock()
 
-    def __init__(self, token: str, disable_labels: bool = False):
+    def __init__(self, token: str = "", disable_labels: bool = False, *, auth_provider: "ControllerAuthProvider | None" = None, repository: str | None = None):
         """Initialize GitHub client with API token.
 
         Args:
@@ -969,6 +997,12 @@ class GitHubClient:
             disable_labels: If True, all label operations are no-ops
         """
         self.token = token
+        if auth_provider is not None and token:
+            raise ValueError("Controller App authentication cannot be combined with a static token")
+        if auth_provider is not None and not repository:
+            raise ValueError("Controller App authentication requires a repository")
+        self._auth_provider = auth_provider
+        self._auth_repository = repository
         self.disable_labels = disable_labels
         self._initialized = True
         self._sub_issue_cache: Dict[Tuple[str, int], List[int]] = {}
@@ -1008,8 +1042,38 @@ class GitHubClient:
         with cls._lock:
             cls._instance = None
 
+    def _credential_for(self, repo_name: str, required_permissions: Mapping[str, str]) -> "ControllerCredential":
+        """Select one repository-bound credential for the next wire request."""
+        from ..github_controller_auth import ControllerCredential
+
+        auth_provider = getattr(self, "_auth_provider", None)
+        auth_repository = getattr(self, "_auth_repository", None)
+        if auth_provider is not None:
+            if auth_repository is None or repo_name.casefold() != auth_repository.casefold():
+                raise RuntimeError("Controller client repository binding mismatch")
+            return auth_provider.credential_for(repo_name, required_permissions)
+        return ControllerCredential(self.token, "personal", repository=repo_name, permissions=tuple(sorted(required_permissions.items())), snapshot_id="legacy")
+
+    def api_for(self, repo_name: str, *, required_permissions: Mapping[str, str] | None = None, subsystem: str = "ghapi", extra_headers: Mapping[str, str] | None = None) -> GhApi:
+        """Return a GhApi adapter that refreshes repository auth for every send."""
+        permissions = dict(required_permissions or {})
+        return get_ghapi_client(
+            self.token,
+            subsystem=subsystem,
+            extra_headers=extra_headers,
+            credential_source=lambda: self._credential_for(repo_name, permissions),
+        )
+
     @retry_with_backoff()
-    def graphql_query(self, query: str, variables: Optional[Dict[str, Any]] = None, extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def graphql_query(
+        self,
+        query: str,
+        variables: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+        *,
+        repo_name: str | None = None,
+        required_permissions: Mapping[str, str] | None = None,
+    ) -> Dict[str, Any]:
         """
         Executes a GraphQL query against the GitHub API using a caching client.
 
@@ -1027,8 +1091,16 @@ class GitHubClient:
         """
         client = get_caching_client()
         url = "https://api.github.com/graphql"
+        if repo_name is None and getattr(self, "_auth_provider", None) is not None:
+            owner = variables.get("owner") if variables else None
+            name = variables.get("name") if variables else None
+            if isinstance(owner, str) and isinstance(name, str):
+                repo_name = f"{owner}/{name}"
+            else:
+                raise ValueError("App-mode GraphQL requests require repository context")
+        credential = self._credential_for(repo_name or "", required_permissions or {"metadata": "read"})
         headers = {
-            "Authorization": f"bearer {self.token}",
+            "Authorization": f"bearer {credential.token}",
             "Content-Type": "application/json",
         }
         if extra_headers:
@@ -1096,8 +1168,15 @@ class GitHubClient:
         """
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+
+        def credential_token(required_permissions: Mapping[str, str]) -> str:
+            selector = getattr(self, "_credential_for", None)
+            if callable(selector):
+                return selector(repo_name, required_permissions).token
+            token = getattr(self, "token", None)
+            if not isinstance(token, str):
+                raise RuntimeError("GitHub credential selection is unavailable")
+            return token
 
         def enumerate_entities(entity_type: str) -> List[Any]:
             url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/{entity_type}?state=open&per_page=100"
@@ -1107,6 +1186,9 @@ class GitHubClient:
                 if url in visited_urls or len(visited_urls) >= 1000:
                     raise InvalidOpenEntitiesObservation(f"GitHub open-{entity_type} pagination did not terminate safely")
                 visited_urls.add(url)
+                token = credential_token({"issues" if entity_type == "issues" else "pull_requests": "read"})
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
                 response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
                 response.raise_for_status()
                 try:
@@ -1148,7 +1230,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
 
             # Using list_for_repo to get issues.
             # Note: API returns PRs as issues too, need to filter if desired but standard list usually returns them?
@@ -1209,8 +1291,6 @@ class GitHubClient:
             owner, repo = repo_name.split("/")
             client = get_caching_client()
             headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
 
             per_page = min(limit, 100) if limit else 100
             url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&sort=created&direction=asc&per_page={per_page}"
@@ -1221,6 +1301,9 @@ class GitHubClient:
                 if url in visited_urls or len(visited_urls) >= 1000:
                     raise RuntimeError("GitHub open-PR pagination did not terminate safely")
                 visited_urls.add(url)
+                credential = self._credential_for(repo_name, {"pull_requests": "read"})
+                if credential.token:
+                    headers["Authorization"] = f"Bearer {credential.token}"
                 resp = _caching_request(client, "GET", url, headers=headers, path_template=f"/repos/{owner}/{repo}/pulls")
                 resp.raise_for_status()
                 page = resp.json()
@@ -1248,8 +1331,6 @@ class GitHubClient:
         """Enumerate every open PR from live REST pages, bypassing caches."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=100"
         result: List[Dict[str, Any]] = []
         visited: set[str] = set()
@@ -1257,6 +1338,9 @@ class GitHubClient:
             if url in visited or len(visited) >= 1000:
                 raise RuntimeError("GitHub open-PR pagination did not terminate safely")
             visited.add(url)
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
             response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
             response.raise_for_status()
             page = response.json()
@@ -1275,8 +1359,6 @@ class GitHubClient:
         """Read the complete live Issue timeline without the shared cache."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/timeline?per_page=100"
         events: List[Dict[str, Any]] = []
         visited: set[str] = set()
@@ -1284,6 +1366,9 @@ class GitHubClient:
             if url in visited or len(visited) >= TIMELINE_MAX_PAGES:
                 raise RuntimeError("GitHub Issue timeline pagination did not terminate safely")
             visited.add(url)
+            credential = self._credential_for(repo_name, {"issues": "read"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
             response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
             response.raise_for_status()
             page = response.json()
@@ -1306,8 +1391,9 @@ class GitHubClient:
             owner, repo = repo_name.split("/")
             client = get_caching_client()
             headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
 
             url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
             resp = _caching_request(client, "GET", url, headers=headers, path_template=f"/repos/{owner}/{repo}/pulls/{{id}}")
@@ -1354,8 +1440,9 @@ class GitHubClient:
         """
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        if credential.token:
+            headers["Authorization"] = f"Bearer {credential.token}"
 
         response = _strict_request(
             "GET",
@@ -1381,8 +1468,9 @@ class GitHubClient:
         """
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        if credential.token:
+            headers["Authorization"] = f"Bearer {credential.token}"
 
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
         response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
@@ -1399,8 +1487,9 @@ class GitHubClient:
         """Fetch current repair branches and head directly, bypassing every cache."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        if credential.token:
+            headers["Authorization"] = f"Bearer {credential.token}"
 
         response = _strict_request(
             "GET",
@@ -1429,8 +1518,9 @@ class GitHubClient:
         """Fetch the authoritative PR declaration and complete target identity."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        if credential.token:
+            headers["Authorization"] = f"Bearer {credential.token}"
         api_origin = "https://api.github.com"
         response = _strict_request(
             "GET",
@@ -1469,8 +1559,9 @@ class GitHubClient:
             owner, repo = repo_name.split("/")
             client = get_caching_client()
             headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
 
             per_page = min(limit, 100) if limit else 100
             list_url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page={per_page}"
@@ -1485,6 +1576,9 @@ class GitHubClient:
                 try:
                     pr_num = pr_summary["number"] if isinstance(pr_summary, dict) else pr_summary.number
                     detail_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}"
+                    credential = self._credential_for(repo_name, {"pull_requests": "read"})
+                    if credential.token:
+                        headers["Authorization"] = f"Bearer {credential.token}"
                     detail_resp = _caching_request(client, "GET", detail_url, headers=headers, path_template=f"/repos/{owner}/{repo}/pulls/{{id}}")
                     detail_resp.raise_for_status()
                     pr_details = detail_resp.json()
@@ -1578,7 +1672,7 @@ class GitHubClient:
     def _list_open_issue_declarations(self, repo_name: str, limit: int, labels: Optional[List[str]]) -> list[dict]:
         """Read raw paginated Issue bodies through the persistent HTTP cache."""
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
 
         # GitHub's Issues endpoint interleaves pull requests with Issues. Fetch
         # every page before filtering so a page filled by PRs cannot hide later
@@ -1757,7 +1851,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
             return api.issues.get(owner, repo, issue_number)
         except Exception as e:
             logger.warning(f"Failed to get issue #{issue_number} from {repo_name}: {e}")
@@ -1767,7 +1861,7 @@ class GitHubClient:
     def get_issue_strict(self, repo_name: str, issue_number: int) -> Any:
         """Get an issue while preserving REST lookup failures for merge gates."""
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         return api.issues.get(owner, repo, issue_number)
 
     @retry_with_backoff()
@@ -1842,6 +1936,9 @@ class GitHubClient:
             items: list[object] = []
             page = 1
             while True:
+                if getattr(self, "_auth_provider", None) is not None:
+                    credential = self._credential_for(repo_name, {"issues": "read"})
+                    headers["Authorization"] = f"Bearer {credential.token}"
                 response = _caching_request(
                     client,
                     "GET",
@@ -1998,37 +2095,57 @@ class GitHubClient:
             PR details dict if found, None otherwise
         """
         try:
-            prs = self.get_open_pull_requests(repo_name)
-            for pr in prs:
-                # Handle both AttrDict and dict
-                head_ref = pr.get("head", {}).get("ref") if isinstance(pr, dict) else pr.head.ref
-
-                if head_ref == branch_name:
-                    pr_number = pr.get("number") if isinstance(pr, dict) else pr.number
-                    logger.info(f"Found PR #{pr_number} with head branch '{branch_name}'")
-                    return self.get_pr_details(pr)
-            logger.debug(f"No open PR found with head branch '{branch_name}'")
-            return None
+            if self._auth_provider is None:
+                prs = self.get_open_pull_requests(repo_name)
+                for pr in prs:
+                    details = self.get_pr_details(pr)
+                    if details.get("head", {}).get("ref") == branch_name:
+                        return details
+                return None
+            return self._find_pr_by_head_branch(repo_name, branch_name, state="open")
         except Exception as e:
             logger.warning(f"Failed to search for PR with head branch '{branch_name}': {e}")
             return None
 
-    def find_pr_by_head_branch_strict(self, repo_name: str, branch_name: str) -> Optional[Dict[str, Any]]:
-        """Find an open or closed head-branch PR, propagating lookup failures."""
+    def _find_pr_by_head_branch(self, repo_name: str, branch_name: str, *, state: str, fresh: bool = False) -> Optional[Dict[str, Any]]:
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token, extra_headers={"Cache-Control": "no-cache"})
+        api = self.api_for(
+            repo_name,
+            required_permissions={"pull_requests": "read"},
+            extra_headers={"Cache-Control": "no-cache"} if fresh else None,
+        )
         page = 1
         while True:
-            prs = api.pulls.list(owner, repo, state="all", head=f"{owner}:{branch_name}", per_page=100, page=page)
+            prs = api.pulls.list(owner, repo, state=state, head=f"{owner}:{branch_name}", per_page=100, page=page)
             if not prs:
                 return None
             for pr in prs:
                 details = self.get_pr_details(pr)
                 if details.get("head", {}).get("ref") == branch_name:
+                    logger.info(f"Found PR #{details.get('number')} with head branch '{branch_name}'")
                     return details
             if len(prs) < 100:
                 return None
             page += 1
+
+    def find_pr_by_head_branch_strict(self, repo_name: str, branch_name: str) -> Optional[Dict[str, Any]]:
+        """Find an open or closed head-branch PR, propagating lookup failures."""
+        if self._auth_provider is None:
+            owner, repo = repo_name.split("/")
+            api = get_ghapi_client(self.token, extra_headers={"Cache-Control": "no-cache"})
+            page = 1
+            while True:
+                prs = api.pulls.list(owner, repo, state="all", head=f"{owner}:{branch_name}", per_page=100, page=page)
+                if not prs:
+                    return None
+                for pr in prs:
+                    details = self.get_pr_details(pr)
+                    if details.get("head", {}).get("ref") == branch_name:
+                        return details
+                if len(prs) < 100:
+                    return None
+                page += 1
+        return self._find_pr_by_head_branch(repo_name, branch_name, state="all", fresh=True)
 
     def _get_issue_timeline(
         self,
@@ -2188,10 +2305,12 @@ class GitHubClient:
 
     def _connected_prs_graphql_request(self, variables: Dict[str, Any], strict: bool) -> Dict[str, Any]:
         """Issue one connected-PR GraphQL request, bypassing the cache when strict."""
+        repo_name = f"{variables['owner']}/{variables['name']}"
         if not strict:
-            return self.graphql_query(self._CONNECTED_PRS_QUERY, variables)
+            return self.graphql_query(self._CONNECTED_PRS_QUERY, variables, repo_name=repo_name, required_permissions={"issues": "read", "pull_requests": "read"})
+        credential = self._credential_for(repo_name, {"issues": "read", "pull_requests": "read"})
         headers = {
-            "Authorization": f"bearer {self.token}",
+            "Authorization": f"bearer {credential.token}",
             "Content-Type": "application/json",
         }
         payload = {"query": self._CONNECTED_PRS_QUERY, "variables": variables}
@@ -2278,6 +2397,10 @@ class GitHubClient:
         strict lookup: an absent or malformed identity must not widen the set
         of trusted comment authors.
         """
+        if self._auth_provider is not None:
+            if self._auth_repository is None:
+                raise RuntimeError("Controller repository is unavailable")
+            return self._auth_provider.identity_for(self._auth_repository).login
         api = get_ghapi_client(self.token)
         user = api.users.get_authenticated()
         login = user.get("login") if isinstance(user, dict) else getattr(user, "login", None)
@@ -2287,6 +2410,11 @@ class GitHubClient:
 
     def get_authenticated_controller_identity(self, repo_name: str | None = None) -> "ControllerIdentity":
         """Return the positive account ID and canonical login proven by this token."""
+        if self._auth_provider is not None:
+            target = repo_name or self._auth_repository
+            if target is None:
+                raise RuntimeError("Controller repository is unavailable")
+            return self._auth_provider.identity_for(target)
         return self._controller_identity_for_token(self.token, repo_name)
 
     def _controller_identity_for_token(self, token: str, repo_name: str | None = None) -> "ControllerIdentity":
@@ -2353,11 +2481,22 @@ class GitHubClient:
             if not isinstance(cache, ControllerHistoryCache):
                 cache = ControllerHistoryCache()
                 self._controller_history_cache = cache
-            selected_token = self.token
-            current = controller_author_set_for_client(_ControllerCredentialSnapshot(self, selected_token, cache), repo_name)
+            if self._auth_provider is not None:
+                path = request.url.path
+                permissions = {"issues": "write"} if "/issues/" in path else {"pull_requests": "write"}
+                credential = self._credential_for(repo_name, permissions)
+                selected_token = credential.token
+                proven_identity = self._auth_provider.identity_for(repo_name)
+            else:
+                selected_token = self.token
+                proven_identity = None
+            current = controller_author_set_for_client(
+                _ControllerCredentialSnapshot(self, selected_token, cache, proven_identity),
+                repo_name,
+            )
             if current.fingerprint != author_set.fingerprint:
                 raise ControllerIdentityHistoryError("Controller identity or history changed before dispatch")
-            if self.token != selected_token:
+            if self._auth_provider is None and self.token != selected_token:
                 raise ControllerIdentityHistoryError("Controller credential selection changed during authority proof")
             # A private successful-resolution copy makes final revalidation
             # local-only, without taking a peer's lock while holding admission.
@@ -2372,12 +2511,12 @@ class GitHubClient:
                 raise ControllerIdentityHistoryError("Controller operation target changed before dispatch")
             if prepared is None:
                 raise ControllerIdentityHistoryError("Controller operation credential proof is unavailable")
-            if self.token != prepared.token:
+            if self._auth_provider is None and self.token != prepared.token:
                 raise GitHubMutationAuthorityRetry("Controller credential changed while waiting for dispatch")
             current = controller_author_set_for_client(prepared, repo_name)
             if current.fingerprint != author_set.fingerprint:
                 raise ControllerIdentityHistoryError("Controller identity or history changed before dispatch")
-            if self.token != prepared.token:
+            if self._auth_provider is None and self.token != prepared.token:
                 raise GitHubMutationAuthorityRetry("Controller credential changed during dispatch validation")
             request.headers["Authorization"] = f"Bearer {prepared.token}"
 
@@ -2590,7 +2729,7 @@ class GitHubClient:
         recorded explanation (fail-closed for automatic thread resolution).
         """
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "write"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         api.pulls.create_reply_for_review_comment(owner, repo, pr_number, root_comment_database_id, body=body)
 
     def update_review_thread_comment(self, repo_name: str, comment_database_id: int, body: str) -> None:
@@ -2598,12 +2737,12 @@ class GitHubClient:
         if not isinstance(comment_database_id, int) or isinstance(comment_database_id, bool) or comment_database_id <= 0:
             raise ValueError("A positive observed review-comment identity is required")
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "write"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         response = api.pulls.update_review_comment(owner, repo, comment_database_id, body=body)
         if not isinstance(response, dict) or not isinstance(response.get("id"), int) or isinstance(response.get("id"), bool) or response.get("id") != comment_database_id or response.get("body") != body:
             raise RuntimeError(f"GitHub did not confirm the exact update of review comment {comment_database_id}")
 
-    def resolve_review_thread(self, thread_id: str) -> None:
+    def resolve_review_thread(self, thread_id: str, *, repo_name: str | None = None) -> None:
         """Resolve a GitHub PR review thread via the ``resolveReviewThread`` mutation.
 
         Raises on any failure, including a response that does not confirm
@@ -2620,12 +2759,17 @@ class GitHubClient:
               }
             }
         """
-        response = self.graphql_query(mutation, {"threadId": thread_id})
+        response = self.graphql_query(
+            mutation,
+            {"threadId": thread_id},
+            repo_name=repo_name or self._auth_repository,
+            required_permissions={"pull_requests": "write"},
+        )
         thread = (((response or {}).get("data") or {}).get("resolveReviewThread") or {}).get("thread") or {}
         if thread.get("id") != thread_id or thread.get("isResolved") is not True:
             raise RuntimeError(f"GitHub did not confirm review thread {thread_id} as resolved")
 
-    def unresolve_review_thread(self, thread_id: str) -> None:
+    def unresolve_review_thread(self, thread_id: str, *, repo_name: str | None = None) -> None:
         """Revert a GitHub PR review thread to unresolved via ``unresolveReviewThread``.
 
         Used to undo a resolution performed against a PR head that turned out
@@ -2643,7 +2787,12 @@ class GitHubClient:
               }
             }
         """
-        response = self.graphql_query(mutation, {"threadId": thread_id})
+        response = self.graphql_query(
+            mutation,
+            {"threadId": thread_id},
+            repo_name=repo_name or self._auth_repository,
+            required_permissions={"pull_requests": "write"},
+        )
         thread = (((response or {}).get("data") or {}).get("unresolveReviewThread") or {}).get("thread") or {}
         # Fail closed on an ambiguous confirmation: a missing/empty payload or
         # a payload missing "isResolved" must not be mistaken for success just
@@ -2666,7 +2815,7 @@ class GitHubClient:
         missing PR.
         """
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
         linked_prs = self.get_connected_prs(repo_name, issue_number, strict=True)
         for pr_num in linked_prs:
             pr_data = api.pulls.get(owner, repo, pr_num)
@@ -2768,7 +2917,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"})
 
             # Fetch parent issue using dedicated endpoint via GhApi
             # Endpoint: GET /repos/{owner}/{repo}/issues/{issue_number}/parent
@@ -2880,7 +3029,7 @@ class GitHubClient:
         """
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             # api.issues.create(owner, repo, title, body=None, ... labels=None)
             issue = api.issues.create(owner, repo, title=title, body=body, labels=labels or [])
@@ -2901,7 +3050,7 @@ class GitHubClient:
         """Add a comment to an existing issue."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             api.issues.create_comment(owner, repo, issue_number, body=comment)
             logger.debug(f"Added comment to issue #{issue_number}")
@@ -2938,7 +3087,7 @@ class GitHubClient:
         """Close an issue with optional comment."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             if comment:
                 api.issues.create_comment(owner, repo, issue_number, body=comment)
@@ -2958,7 +3107,7 @@ class GitHubClient:
         """Reopen a closed issue with optional comment."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             if comment:
                 api.issues.create_comment(owner, repo, issue_number, body=comment)
@@ -3009,7 +3158,7 @@ class GitHubClient:
         """Close a pull request with optional comment."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"pull_requests": "write", "issues": "write"})
 
             if comment:
                 # PRs are issues for comments
@@ -3026,7 +3175,7 @@ class GitHubClient:
         """Add a comment to a pull request."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             # PRs are issues for comments
             api.issues.create_comment(owner, repo, pr_number, body=comment)
@@ -3047,10 +3196,11 @@ class GitHubClient:
         """Read every native conversation page without cached or partial results."""
         owner, repo = repo_name.split("/")
         url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
-        headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json", "Cache-Control": "no-cache"}
         result: list[dict] = []
         observed_ids: set[int] = set()
         for page in range(1, COMMENTS_MAX_PAGES + 1):
+            credential = self._credential_for(repo_name, {"issues": "read"})
+            headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json", "Cache-Control": "no-cache"}
             response = _strict_request("GET", url, headers=headers, params={"per_page": 100, "page": page}, follow_redirects=False, timeout=30)
             response.raise_for_status()
             try:
@@ -3102,7 +3252,7 @@ class GitHubClient:
     def _get_issue_comments(self, repo_name: str, issue_number: int, fresh: bool = False) -> List[Dict[str, Any]]:
         """Fetch every comment page and let callers decide how to handle errors."""
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"issues": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
 
         per_page = 100
         result = []
@@ -3143,7 +3293,7 @@ class GitHubClient:
         """Update an existing comment."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
             api.issues.update_comment(owner, repo, comment_id, body=body)
             logger.info(f"Updated comment {comment_id} in {repo_name}")
         except Exception as e:
@@ -3157,19 +3307,20 @@ class GitHubClient:
             # Use low-level client to get raw text, bypassing GhApi's json assumption
             client = get_caching_client()
             url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
-            headers = {"Authorization": f"bearer {self.token}", "Accept": "application/vnd.github.v3.diff", "X-GitHub-Api-Version": "2022-11-28"}
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            headers = {"Authorization": f"bearer {credential.token}", "Accept": "application/vnd.github.v3.diff", "X-GitHub-Api-Version": "2022-11-28"}
             response = _caching_request(client, "GET", url, headers=headers, path_template=f"/repos/{owner}/{repo}/pulls/{{id}}")
             response.raise_for_status()
             return response.text
         except Exception as e:
             logger.error(f"Failed to get PR diff for #{pr_number}: {e}")
-            return ""
+            raise
 
     @retry_with_backoff()
     def get_pr_changed_file_count(self, repo_name: str, pr_number: int) -> int:
         """Fetch the authoritative changed-file count independently of raw diff."""
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         pr_data = api.pulls.get(owner, repo, pr_number)
         changed_files = pr_data.get("changed_files")
         if isinstance(changed_files, bool) or not isinstance(changed_files, int) or changed_files < 0:
@@ -3188,7 +3339,7 @@ class GitHubClient:
         failure.
         """
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
         return _paginate_pr_changed_files(pr_number, lambda page: api.pulls.list_files(owner, repo, pr_number, per_page=100, page=page))
 
     @retry_with_backoff()
@@ -3200,7 +3351,8 @@ class GitHubClient:
         before authorizing a verdict).
         """
         owner, repo = repo_name.split("/")
-        headers = {"Authorization": f"bearer {self.token}", "Accept": "application/vnd.github.v3.diff", "X-GitHub-Api-Version": "2022-11-28"}
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        headers = {"Authorization": f"bearer {credential.token}", "Accept": "application/vnd.github.v3.diff", "X-GitHub-Api-Version": "2022-11-28"}
         response = _strict_request("GET", f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}", headers=headers, timeout=30)
         response.raise_for_status()
         return response.text
@@ -3209,9 +3361,8 @@ class GitHubClient:
     def get_pr_changed_file_count_strict(self, repo_name: str, pr_number: int) -> int:
         """Fetch the authoritative changed-file count directly, bypassing every cache."""
         owner, repo = repo_name.split("/")
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        credential = self._credential_for(repo_name, {"pull_requests": "read"})
+        headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         response = _strict_request("GET", f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}", headers=headers, timeout=30)
         response.raise_for_status()
         payload = response.json()
@@ -3228,11 +3379,10 @@ class GitHubClient:
         cached listing while still preserving any successfully fetched pages.
         """
         owner, repo = repo_name.split("/")
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
 
         def _fetch_page(page: int) -> Any:
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
             response = _strict_request("GET", f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files", headers=headers, params={"per_page": 100, "page": page}, timeout=30)
             response.raise_for_status()
             return response.json()
@@ -3243,7 +3393,7 @@ class GitHubClient:
         """Get all commits for a pull request."""
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if self._auth_provider is not None else get_ghapi_client(self.token)
 
             commits = api.pulls.list_commits(owner, repo, pr_number)
 
@@ -3280,7 +3430,7 @@ class GitHubClient:
 
     def _get_pr_reviews(self, repo_name: str, pr_number: int) -> List[Dict[str, Any]]:
         owner, repo = repo_name.split("/")
-        api = get_ghapi_client(self.token)
+        api = self.api_for(repo_name, required_permissions={"pull_requests": "read"}) if getattr(self, "_auth_provider", None) is not None else get_ghapi_client(self.token)
 
         per_page = 100
         result: List[Dict[str, Any]] = []
@@ -3450,10 +3600,11 @@ class GitHubClient:
         """Add/remove an incoming dependency using its stable GitHub Issue ID."""
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         base = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
         with self._issue_read_mutation(repo_name), github_http_client(subsystem="controller-strict") as client:
+            credential = self._credential_for(repo_name, {"issues": "write"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
             if add:
                 response = client.post(base, headers=headers, json={"issue_id": dependency_id}, timeout=30)
             else:
@@ -3501,8 +3652,9 @@ class GitHubClient:
 
             client = get_caching_client()
             url = f"https://api.github.com/repos/{owner}/{repo}/issues/{parent_issue_number}/sub_issues"
+            credential = self._credential_for(repo_name, {"issues": "write"})
             headers = {
-                "Authorization": f"bearer {self.token}",
+                "Authorization": f"bearer {credential.token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             }
@@ -3544,9 +3696,10 @@ class GitHubClient:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         with self._issue_read_mutation(repo_name), github_http_client(subsystem="controller-strict") as client:
+            credential = self._credential_for(repo_name, {"issues": "write"})
+            if credential.token:
+                headers["Authorization"] = f"Bearer {credential.token}"
             response = client.post(
                 f"https://api.github.com/repos/{owner}/{repo}/issues/{parent_issue_number}/sub_issues",
                 headers=headers,
@@ -3581,7 +3734,8 @@ class GitHubClient:
             client = get_caching_client()
 
             url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/sub_issues"
-            headers = {"Authorization": f"bearer {self.token}", "Accept": "application/vnd.github.v3+json", "X-GitHub-Api-Version": "2022-11-28"}  # As hinted by user docs
+            credential = self._credential_for(repo_name, {"issues": "read"})
+            headers = {"Authorization": f"bearer {credential.token}", "Accept": "application/vnd.github.v3+json", "X-GitHub-Api-Version": "2022-11-28"}  # As hinted by user docs
 
             response = _caching_request(client, "GET", url, headers=headers, path_template=f"/repos/{owner}/{repo}/issues/{{id}}/sub_issues")
 
@@ -3611,7 +3765,7 @@ class GitHubClient:
 
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             # Using add_labels endpoint which appends to existing labels
             # works for both Issues and PRs
@@ -3643,7 +3797,7 @@ class GitHubClient:
 
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             # Use basic get issue to check current labels
             issue_data = api.issues.get(owner, repo, issue_number)
@@ -3677,7 +3831,7 @@ class GitHubClient:
 
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "write"})
 
             for label in labels:
                 try:
@@ -3713,7 +3867,7 @@ class GitHubClient:
 
         try:
             owner, repo = repo_name.split("/")
-            api = get_ghapi_client(self.token)
+            api = self.api_for(repo_name, required_permissions={"issues": "read"})
 
             issue_data = api.issues.get(owner, repo, issue_number)
             current_labels = [lbl["name"] for lbl in issue_data.get("labels", [])]

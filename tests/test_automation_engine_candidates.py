@@ -51,6 +51,8 @@ class TestAutomationEngineCandidates:
         args = mock_github_client.graphql_query.call_args[1]
         assert "markPullRequestReadyForReview" in args["query"]
         assert args["variables"]["id"] == "PR_123"
+        assert args["repo_name"] == repo_name
+        assert args["required_permissions"] == {"pull_requests": "write"}
 
         # Verify pr_data was updated
         assert pr_data["draft"] is False

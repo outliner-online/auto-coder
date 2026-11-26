@@ -1610,8 +1610,13 @@ def _create_pr_for_issue(
 
         # Create PR using GhApi
         try:
-            token = github_client.token
-            api = get_ghapi_client(token)
+            if isinstance(github_client, GitHubClient):
+                api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write", "issues": "write"})
+            else:
+                # Lightweight third-party/test adapters retain the historical
+                # explicit-token interface. Production controller clients are
+                # always GitHubClient instances and take the renewable route.
+                api = get_ghapi_client(github_client.token)
             owner, repo = repo_name.split("/")
 
             # Check if PR already exists
@@ -1632,10 +1637,20 @@ def _create_pr_for_issue(
             # If successful, we get a response dict
             pr_number = pr_response.get("number")
             pr_url = pr_response.get("html_url")
+            response_author = pr_response.get("user")
+            observed_author = None
+            if isinstance(response_author, dict):
+                author_login = response_author.get("login")
+                author_id = response_author.get("id")
+                if isinstance(author_login, str) and author_login and isinstance(author_id, int) and not isinstance(author_id, bool) and author_id > 0:
+                    observed_author = {"login": author_login, "id": author_id}
 
             logger.info(f"Successfully created PR for issue #{issue_number}: {pr_url}")
 
-            get_trace_logger().log("Create PR", f"Created PR for issue #{issue_number}", item_type="issue", item_number=issue_number, details={"pr_url": pr_url})
+            trace_details = {"pr_url": pr_url}
+            if observed_author is not None:
+                trace_details["pr_author"] = observed_author
+            get_trace_logger().log("Create PR", f"Created PR for issue #{issue_number}", item_type="issue", item_number=issue_number, details=trace_details)
 
             # Propagate semantic labels from issue to PR if present
             if pr_number:
@@ -1702,7 +1717,10 @@ def _create_pr_for_issue(
                 else:
                     logger.info(f"Verified: PR #{pr_number} is correctly linked to issue #{issue_number}")
 
-            _record_dispatch_stage(issue_number, "issue.pr-publication", f"issue#{issue_number} PR publication", Outcome.COMPLETED, {"pr_number": pr_number, "pr_url": pr_url})
+            publication_facts = {"pr_number": pr_number, "pr_url": pr_url}
+            if observed_author is not None:
+                publication_facts["pr_author"] = observed_author
+            _record_dispatch_stage(issue_number, "issue.pr-publication", f"issue#{issue_number} PR publication", Outcome.COMPLETED, publication_facts)
             return f"Successfully created PR for issue #{issue_number}: {pr_title}"
         except Exception as e:
             logger.error(f"Failed to create PR via GhApi for issue #{issue_number}: {e}")

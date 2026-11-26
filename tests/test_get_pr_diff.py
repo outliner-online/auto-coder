@@ -40,8 +40,6 @@ class TestGetPRDiff(unittest.TestCase):
 
         client = GitHubClient("test_token")
 
-        # Execute
-        diff = client.get_pr_diff("owner/repo", 123)
-
-        # Verify
-        assert diff == ""
+        # Retrieval failure is unavailable evidence, not an observed empty diff.
+        with self.assertRaisesRegex(Exception, "API error"):
+            client.get_pr_diff("owner/repo", 123)

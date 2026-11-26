@@ -31,7 +31,20 @@ repository grant before publishing a credential. Its stable authority key contai
 App identity is obtained with the App JWT; personal identity uses authenticated `GET /user`.
 Credentials and identity evidence are memory-only and are reconstructed after restart.
 
-This feature supplies the renewable provider but does not migrate existing Issue, PR, CI,
-merge, Git, or background-operation callers. Native GitHub review approvals continue to use
-the separately configured reviewer App; Actions secrets and human-operator credentials remain
-separate roles.
+`create_controller_client(repository)` composes that provider with the shared management
+adapter. Injected Issue and PR management callers use `GitHubClient.api_for`, which resolves a
+credential at every wire send (including later pages on a retained GhApi object) rather than
+copying an installation token into the process environment. The legacy singleton remains the
+startup default until the remaining CI and terminal merge senders adopt repository-scoped
+clients; Git, native reviewer-App publication, Actions-secret publication, provider APIs and
+human-operator actions remain separate credential roles.
+
+Controller-App PRs keep the local implementation marker and ordinary review/repair route. A
+`[bot]` suffix does not turn such a PR into a dependency update. Deployments with restrictive
+Issue/PR author allowlists must add the App's bot **account ID** (the identity observed on the
+created PR), not the GitHub App ID. Recording-transport fixtures demonstrate routing and token
+renewal only; they do not prove that a live installation has deployment permissions.
+
+This adapter change is observability-neutral: it retains the shared request outcome boundary
+and existing trace event schema, while changing only authorization selection immediately before
+the request is sent. Dashboard event names, outcomes, and fields are therefore unchanged.

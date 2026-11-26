@@ -6134,8 +6134,7 @@ class AutomationEngine:
                 if _is_jules_pr(pr_data) and pr_data.get("draft"):
                     logger.info(f"Jules PR #{pr_number} is a draft, marking as ready for review")
                     try:
-                        token = self.github.token
-                        api = get_ghapi_client(token)
+                        api = self.github.api_for(repo_name, required_permissions={"pull_requests": "read"})
                         node_id = pr_data.get("node_id")
 
                         if not node_id:
@@ -6163,7 +6162,12 @@ class AutomationEngine:
                               }
                             }
                             """
-                            self.github.graphql_query(query=mutation, variables={"id": node_id})
+                            self.github.graphql_query(
+                                query=mutation,
+                                variables={"id": node_id},
+                                repo_name=repo_name,
+                                required_permissions={"pull_requests": "write"},
+                            )
                             logger.info(f"Successfully marked Jules PR #{pr_number} as ready for review (via GraphQL)")
                             # Update local data
                             pr_data["draft"] = False
@@ -6277,7 +6281,15 @@ class AutomationEngine:
                 # `checks` was already computed above): it can never
                 # substitute for that mandatory boundary's own fresh,
                 # same-HEAD confirmation (REQ-005).
-                dependency_bot_flag_decision = _dependency_bot_flag_decision(_is_dependabot_pr(pr_data), self.config.IGNORE_DEPENDABOT_PRS, self.config.AUTO_MERGE_DEPENDABOT_PRS)
+                try:
+                    controller_identity = self.github.get_authenticated_controller_identity(repo_name)
+                except Exception:
+                    controller_identity = None
+                dependency_bot_flag_decision = _dependency_bot_flag_decision(
+                    _is_dependabot_pr(pr_data, controller_identity),
+                    self.config.IGNORE_DEPENDABOT_PRS,
+                    self.config.AUTO_MERGE_DEPENDABOT_PRS,
+                )
                 if dependency_bot_flag_decision is None:
                     dependency_bot_decision = _dependency_bot_readiness_decision(
                         is_open=True,
@@ -6753,6 +6765,7 @@ class AutomationEngine:
                 deferred_result = self._defer_wrapped_reconciliation(repo_name, item_number, candidate.data, exc, result)
                 if deferred_result is not None:
                     result = deferred_result
+                    result.actions = ["Deferred - Parent-Issue reconciliation requires retry"]
                 logger.warning("Deferred relationship reconciliation for {}/#{}: {}", repo_name, item_number, exc)
                 if deferred_result is None:
                     _record_issue_stage_result(item_number, "issue.parent-reconciliation", f"issue#{item_number} parent reconciliation", Outcome.DEFERRED, {"reason": result.error})
@@ -6964,6 +6977,7 @@ class AutomationEngine:
                 except ParentOperationalError as exc:
                     deferred_result = self._defer_wrapped_reconciliation(repo_name, item_number, candidate.data, exc, result)
                     if deferred_result is not None:
+                        deferred_result.actions = ["Deferred - Parent-Issue reconciliation requires retry"]
                         return deferred_result
                     result.error = f"Parent-Issue reconciliation is temporarily unavailable: {exc}"
                     result.target_outcome = ExplicitTargetOutcome.DEFERRED

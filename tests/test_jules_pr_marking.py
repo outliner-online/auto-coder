@@ -19,6 +19,7 @@ class TestJulesPRMarking:
         # Mock GhApi client for fallback fetch
         mock_ghapi_instance = Mock()
         mock_get_ghapi.return_value = mock_ghapi_instance
+        mock_github_client.api_for.return_value = mock_ghapi_instance
 
         # Mock PR data - initially Jules PR, Draft, missing node_id
         pr_data = {

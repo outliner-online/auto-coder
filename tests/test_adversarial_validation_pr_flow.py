@@ -3616,7 +3616,7 @@ class TestAtomicMergeSHAPrecondition:
             merge_method="squash",
             sha="abc123456789",
         )
-        mock_close_issues.assert_called_once_with("owner/repo", 100)
+        mock_close_issues.assert_called_once_with("owner/repo", 100, client)
 
     @patch("auto_coder.pr_processor.has_unresolved_review_threads", return_value=False)
     @patch("auto_coder.merge_operation_adapter.get_ghapi_client")
