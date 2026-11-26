@@ -964,8 +964,14 @@ def test_retired_jules_history_and_manual_retry_through_restarted_admission(tmp_
     assert len(engine.issue_stage_routing.retry_requests(REPO, 1)) == 3
 
     result = engine._process_single_candidate_unified(
-        REPO, candidate, config, explicit_only=True, force=True, retry=True,
-        retry_request_id="operator-retry", origin="explicit-single-target",
+        REPO,
+        candidate,
+        config,
+        explicit_only=True,
+        force=True,
+        retry=True,
+        retry_request_id="operator-retry",
+        origin="explicit-single-target",
     )
     assert result.success
     dispatch.assert_called_once()
