@@ -1169,6 +1169,15 @@ class GitHubClient:
         owner, repo = repo_name.split("/")
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
 
+        def credential_token(required_permissions: Mapping[str, str]) -> str:
+            selector = getattr(self, "_credential_for", None)
+            if callable(selector):
+                return selector(repo_name, required_permissions).token
+            token = getattr(self, "token", None)
+            if not isinstance(token, str):
+                raise RuntimeError("GitHub credential selection is unavailable")
+            return token
+
         def enumerate_entities(entity_type: str) -> List[Any]:
             url: Optional[str] = f"https://api.github.com/repos/{owner}/{repo}/{entity_type}?state=open&per_page=100"
             entities: List[Any] = []
@@ -1177,9 +1186,9 @@ class GitHubClient:
                 if url in visited_urls or len(visited_urls) >= 1000:
                     raise InvalidOpenEntitiesObservation(f"GitHub open-{entity_type} pagination did not terminate safely")
                 visited_urls.add(url)
-                credential = self._credential_for(repo_name, {"issues" if entity_type == "issues" else "pull_requests": "read"})
-                if credential.token:
-                    headers["Authorization"] = f"Bearer {credential.token}"
+                token = credential_token({"issues" if entity_type == "issues" else "pull_requests": "read"})
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
                 response = _strict_request("GET", url, headers=headers, follow_redirects=False, timeout=30)
                 response.raise_for_status()
                 try:
