@@ -312,3 +312,96 @@ def test_failed_hook_checkpoint_is_not_reclassified_as_identity_failure(reposito
     assert outcome.phase == "indeterminate" and "pre_push_failure_unproven" in outcome.reason
     assert _git(remote, "rev-parse", "refs/heads/review-head") == head
     assert store.get(_request(head)) == record
+
+
+def test_entered_lost_push_with_stale_or_unavailable_readback_never_sends_again(retained, monkeypatch):
+    from auto_coder.utils import CommandResult
+
+    real_push = local_review_repair.git_push
+    real_remote_head = local_review_repair._remote_head
+    sends = []
+
+    def lost_response(**kwargs):
+        before_send = retained.store.get(retained.request)
+        assert before_send.phase == "publication_pending"
+        assert before_send.publication_send_state == "entered"
+        sends.append(kwargs)
+        assert real_push(**kwargs).success
+        return CommandResult(False, "", "transport response lost after send entry", 1)
+
+    monkeypatch.setattr(local_review_repair, "git_push", lost_response)
+    first = resume(retained)
+    assert first.phase == "publication_pending" and not first.published
+    candidate = _git(retained.remote, "rev-parse", "refs/heads/review-head")
+    assert candidate != retained.original_head
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", lambda *_args, **_kwargs: pytest.fail("unresolved publication must not recommit"))
+    for observation in [(True, retained.original_head), (False, "remote temporarily unavailable")]:
+        monkeypatch.setattr(local_review_repair, "_remote_head", lambda *_args, result=observation: result)
+        restarted = LocalReviewRepairStore(retained.store.path)
+        pending = resume(retained, store=restarted)
+        assert pending.phase == "publication_pending" and not pending.published
+        assert restarted.get(retained.request).publication_send_state == "entered"
+        assert len(sends) == 1
+    monkeypatch.setattr(local_review_repair, "_remote_head", real_remote_head)
+    settled = resume(retained, store=LocalReviewRepairStore(retained.store.path))
+    assert settled.phase == "awaiting_validation" and settled.published
+    assert len(sends) == 1
+    assert _git(retained.remote, "rev-parse", "refs/heads/review-head") == candidate
+
+
+def test_legacy_pending_candidate_does_not_guess_that_no_send_was_entered(retained, monkeypatch):
+    from auto_coder.utils import CommandResult
+
+    monkeypatch.setattr(local_review_repair, "git_push", lambda **_kwargs: CommandResult(False, "", "transport response lost", 1))
+    assert resume(retained).phase == "publication_pending"
+    pending = retained.store.get(retained.request)
+    assert pending.result_sha and pending.publication_send_state == "entered"
+    with sqlite3.connect(retained.store.path) as connection:
+        connection.execute("ALTER TABLE local_review_repair_attempts DROP COLUMN publication_send_state")
+    migrated = LocalReviewRepairStore(retained.store.path)
+    assert migrated.get(retained.request).publication_send_state == "unknown"
+    monkeypatch.setattr(local_review_repair, "git_push", lambda **_kwargs: pytest.fail("unknown legacy send disposition must not resend"))
+    outcome = resume(retained, store=migrated)
+    assert outcome.phase == "publication_pending" and "unknown" in outcome.reason
+    assert _git(retained.remote, "rev-parse", "refs/heads/review-head") == retained.original_head
+
+
+def test_legacy_recovery_journal_survives_send_state_schema_addition(retained, monkeypatch):
+    real_finish = retained.store.finish_commit_recovery
+
+    def interrupted(*args, **kwargs):
+        if kwargs.get("result_sha"):
+            raise RuntimeError("exit before candidate checkpoint")
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(retained.store, "finish_commit_recovery", interrupted)
+    first = resume(retained)
+    assert first.phase == "indeterminate" and not first.published
+    candidate = _git(retained.workspace, "rev-parse", "HEAD")
+    assert candidate != retained.original_head
+    journal = retained.store.get_commit_recovery(retained.request)
+    old_record = json.loads(journal.original_record_json)
+    old_record.pop("publication_send_state")
+    old_json = json.dumps(old_record, sort_keys=True, separators=(",", ":"))
+    with sqlite3.connect(retained.store.path) as connection:
+        connection.execute("UPDATE local_review_commit_recoveries SET original_record_json=? WHERE attempt_id=?", (old_json, retained.request.attempt_id))
+        connection.execute("ALTER TABLE local_review_repair_attempts DROP COLUMN publication_send_state")
+    restarted = LocalReviewRepairStore(retained.store.path)
+    assert restarted.get(retained.request).publication_send_state == "unknown"
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", lambda *_args, **_kwargs: pytest.fail("legacy journal recovery must not recommit"))
+    recovered = resume(retained, store=restarted)
+    assert recovered.phase == "awaiting_validation" and recovered.published
+    assert _git(retained.remote, "rev-parse", "refs/heads/review-head") == candidate
+    assert restarted.get_commit_recovery(retained.request).original_record_json == old_json
+
+
+def test_affirmative_send_entry_blocks_contradictory_pre_push_recovery(retained, monkeypatch):
+    with sqlite3.connect(retained.store.path) as connection:
+        connection.execute("UPDATE local_review_repair_attempts SET publication_send_state='entered' WHERE attempt_id=?", (retained.request.attempt_id,))
+    original = retained.store.get(retained.request)
+    assert not original.result_sha and not original.publication_started
+    monkeypatch.setattr(local_review_repair, "git_commit_with_retry", lambda *_args, **_kwargs: pytest.fail("affirmative send entry must not be discarded"))
+    outcome = resume(retained)
+    assert outcome.phase == "indeterminate" and not outcome.published
+    assert retained.store.get(retained.request) == original
+    assert retained.store.get_commit_recovery(retained.request) is None

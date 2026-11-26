@@ -175,14 +175,20 @@ def test_lost_push_response_reconciles_without_copy_model_or_second_push(reposit
     assert resume_pending_review_publication(repository="owner/repo", pr_number=42, root=str(root), store=store) is None
 
 
-def test_failed_push_recovers_original_ref_and_commit_without_repeating_review(repository, tmp_path, monkeypatch):
+def test_pre_send_deferral_recovers_original_ref_and_commit_without_repeating_review(repository, tmp_path, monkeypatch):
     root, remote, head = repository
     snapshot = capture_review_workspace(str(root), head)
     (root / "source.py").write_text("value = 2\n", encoding="utf-8")
     store = LocalReviewRepairStore(tmp_path / "repairs.sqlite3")
     real_push = local_review_repair.git_push
-    monkeypatch.setattr(local_review_repair, "git_push", lambda **_kwargs: CommandResult(False, "", "offline", 1))
-    assert _publish(snapshot, store).phase == "publication_pending"
+    monkeypatch.setattr(local_review_repair, "git_push", lambda **_kwargs: pytest.fail("pre-send authority deferral must not invoke push"))
+
+    def before_send_only(*_args):
+        record = store.get(_request(head))
+        return record is None or not record.result_sha
+
+    assert _publish(snapshot, store, authority_check=before_send_only).phase == "publication_pending"
+    assert store.get(_request(head)).publication_send_state == "not_entered"
     retained = store.get(_request(head)).result_sha
     assert _git(remote, "rev-parse", "refs/heads/review-head") == head
     (root / "source.py").write_text("value = 999\n", encoding="utf-8")
@@ -277,8 +283,14 @@ def test_changed_push_destination_refuses_fresh_and_recovered_review_output(repo
     (root / "source.py").write_text("value = 2\n", encoding="utf-8")
     store = LocalReviewRepairStore(tmp_path / "repairs.sqlite3")
     real_push = local_review_repair.git_push
-    monkeypatch.setattr(local_review_repair, "git_push", lambda **_kwargs: CommandResult(False, "", "offline", 1))
-    assert _publish(snapshot, store).phase == "publication_pending"
+    monkeypatch.setattr(local_review_repair, "git_push", lambda **_kwargs: pytest.fail("pre-send authority deferral must not invoke push"))
+
+    def before_send_only(*_args):
+        record = store.get(_request(head))
+        return record is None or not record.result_sha
+
+    assert _publish(snapshot, store, authority_check=before_send_only).phase == "publication_pending"
+    assert store.get(_request(head)).publication_send_state == "not_entered"
     alternate = tmp_path / "another-remote.git"
     _git(tmp_path, "clone", "--bare", str(remote), str(alternate))
     assert _git(alternate, "rev-parse", "refs/heads/review-head") == head

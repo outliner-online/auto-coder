@@ -440,27 +440,33 @@ def test_renewed_strong_fix_refuses_publication_when_target_changes(flow, monkey
     assert "provider-entry authority changed during preparation" in events[0].facts["reason"]
 
 
-def test_renewed_strong_pending_publication_retries_without_another_reviewer(flow, monkeypatch):
+def test_renewed_strong_pre_send_deferral_resumes_without_another_reviewer(flow, monkeypatch):
     from auto_coder import local_review_repair
-    from auto_coder.utils import CommandResult
 
     inputs, strong, _config = _seed_stale_strong_finding(flow, monkeypatch)
     before = _caller_snapshot(flow.repository)
     _edit_on_renewed_strong(flow, _edit_source)
-    original_push = local_review_repair.git_push
-    offline_push = Mock(return_value=CommandResult(False, "", "remote temporarily unavailable", 1))
-    monkeypatch.setattr(local_review_repair, "git_push", offline_push)
+    push = Mock(wraps=local_review_repair.git_push)
+    monkeypatch.setattr(local_review_repair, "git_push", push)
+    store = local_review_repair.LocalReviewRepairStore(local_review_repair.local_review_repair_db_path(REPO_NAME))
+    request = local_review_repair.LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, "feature-branch", flow.initial_head, (), "")
+    original_metadata = flow.client.get_pull_request_metadata_strict.side_effect
+
+    def unavailable_after_candidate(*args, **kwargs):
+        if store.get_publication_pending(request) is not None:
+            raise RuntimeError("PR target is temporarily unreadable before send entry")
+        return original_metadata(*args, **kwargs)
+
+    flow.client.get_pull_request_metadata_strict.side_effect = unavailable_after_candidate
     trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
 
     first_actions = flow.run()
 
     assert flow.head() == flow.initial_head, first_actions
     assert flow.reviewer.calls == ["fresh", "fresh"]
-    offline_push.assert_called_once()
-    store = local_review_repair.LocalReviewRepairStore(local_review_repair.local_review_repair_db_path(REPO_NAME))
-    request = local_review_repair.LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, "feature-branch", flow.initial_head, (), "")
+    push.assert_not_called()
     retained = store.get_publication_pending(request)
-    assert retained is not None
+    assert retained is not None and retained.publication_send_state == "not_entered"
     assert retained.result_sha != flow.initial_head
     assert _git(["rev-parse", f"{retained.result_sha}^"], flow.repository) == flow.initial_head
     assert "# Reviewed greeting implementation." in _git(["show", f"{retained.result_sha}:sample.py"], flow.repository)
@@ -477,9 +483,10 @@ def test_renewed_strong_pending_publication_retries_without_another_reviewer(flo
     assert events[0].facts["review_disposition"] == "RECONCILIATION_WAIT"
     assert events[0].facts["retry_not_before"] == first_actions.retry_not_before
 
-    monkeypatch.setattr(local_review_repair, "git_push", original_push)
+    flow.client.get_pull_request_metadata_strict.side_effect = original_metadata
     second_actions = flow.run()
 
+    push.assert_called_once()
     assert flow.head() == retained.result_sha, second_actions
     assert flow.reviewer.calls == ["fresh", "fresh"]
     resumed = store.get(request, retained.attempt_id)
@@ -734,4 +741,63 @@ def test_controller_identity_failure_resumes_without_review_and_waits_for_fresh_
     assert [head for _, head, _ in flow.seen] == [flow.initial_head, candidate]
     flow.publication.assert_called_once()
     flow.merge.assert_called_once()
+    assert _caller_snapshot(flow.repository) == before
+
+
+def test_unresolved_push_restart_waits_without_resend_until_candidate_readback(flow, monkeypatch):
+    from auto_coder import local_review_repair
+    from auto_coder.utils import CommandResult
+
+    before = _caller_snapshot(flow.repository)
+    unknown_push = Mock(return_value=CommandResult(False, "", "push response was lost", 1))
+    monkeypatch.setattr(local_review_repair, "git_push", unknown_push)
+    flow.reviewer.mutation = _edit_source
+    trace_start = get_trace_collector().get_snapshot().sequence_high_watermark
+
+    first_actions = flow.run()
+
+    assert flow.head() == flow.initial_head, first_actions
+    unknown_push.assert_called_once()
+    assert flow.reviewer.calls == ["fresh"]
+    path = local_review_repair.local_review_repair_db_path(REPO_NAME)
+    lookup = local_review_repair.LocalReviewRepairRequest(REPO_NAME, PR_NUMBER, REPO_NAME, "", "", (), "")
+    retained = local_review_repair.LocalReviewRepairStore(path).get_publication_pending(lookup)
+    assert retained is not None and retained.publication_send_state == "entered"
+    assert retained.result_sha != flow.initial_head
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
+
+    for _ in range(2):
+        restarted = replace(flow, last_status=None)
+        resumed_actions = restarted.run()
+        reopened = local_review_repair.LocalReviewRepairStore(path).get_publication_pending(lookup)
+        assert reopened is not None and reopened.result_sha == retained.result_sha
+        assert reopened.publication_send_state == "entered"
+        assert flow.head() == flow.initial_head, resumed_actions
+        assert restarted.last_status.outcome is PRProcessingOutcome.DEFERRED
+        unknown_push.assert_called_once()
+        assert flow.reviewer.calls == ["fresh"]
+        event = _correction_events(trace_start)[-1]
+        assert event.facts["local_phase"] == "publication_pending"
+        assert event.facts["published"] is False
+        assert event.facts["review_disposition"] == "RECONCILIATION_WAIT"
+        flow.publication.assert_not_called()
+        flow.merge.assert_not_called()
+
+    # Model late acceptance at the external server without another controller send.
+    _git(["fetch", "--no-tags", str(flow.repository), retained.result_sha], flow.remote)
+    _git(["update-ref", "refs/heads/feature-branch", retained.result_sha, flow.initial_head], flow.remote)
+    reconciled = replace(flow, last_status=None)
+    final_actions = reconciled.run()
+
+    assert flow.head() == retained.result_sha, final_actions
+    unknown_push.assert_called_once()
+    assert flow.reviewer.calls == ["fresh"]
+    assert local_review_repair.LocalReviewRepairStore(path).get_publication_pending(lookup) is None
+    event = _correction_events(trace_start)[-1]
+    assert event.facts["local_phase"] == "awaiting_validation"
+    assert event.facts["published"] is True
+    assert event.facts["review_disposition"] == "CORRECTIVE_HANDOFF"
+    flow.publication.assert_not_called()
+    flow.merge.assert_not_called()
     assert _caller_snapshot(flow.repository) == before

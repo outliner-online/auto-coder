@@ -64,11 +64,15 @@ overwritten. Commit preparation does not invoke a formatter or another model to
 change the captured correction after review. Failed preparation retains an
 explicit incomplete state instead of declaring success.
 
-A candidate commit is retained before push. Interrupted or ambiguous publication
-is reconciled using the existing durable pending record and remote branch; a
-confirmed matching candidate is not produced again by another reviewer. Pending
-or indeterminate output blocks blind reviewer replay and does not authorize
-merge.
+A candidate commit is retained before push. Its checkpoint is separate from a
+durable Git send-entry marker, which is recorded before the sole send. A
+checkpointed candidate can be sent only when the record proves that no send has
+entered. An entered send, or a legacy pending record with unknown send history,
+is reconciled without retransmission: an unchanged or unreadable remote head
+cannot prove that the earlier send was not accepted. A later observation of the
+exact candidate settles publication without another push or reviewer invocation.
+Pending or indeterminate output blocks blind reviewer replay and does not
+authorize merge.
 
 The editing review's saved transport identities are invalidated while accepted
 lifecycle evidence is retained. The resulting candidate must pass independent

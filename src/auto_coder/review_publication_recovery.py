@@ -173,7 +173,13 @@ def recover_current_head_review(
                 store.finish_commit_recovery(request, record, recovery, reason=reason, confirm=lambda: True)
                 return LocalReviewRepairOutcome("indeterminate", reason, executed=True)
         else:
-            if recovery.incarnation != record.incarnation or recovery.original_record_json != json.dumps(asdict(record), sort_keys=True, separators=(",", ":")) or recovery.identity_json != identity_json:
+            try:
+                original_values = json.loads(recovery.original_record_json)
+                original_values["feedback_identities"] = tuple(original_values["feedback_identities"])
+                original_record = LocalReviewRepairRecord(**original_values)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SupersessionBlocked("attempt_owner_changed", "the original attempt snapshot cannot be read") from exc
+            if recovery.incarnation != record.incarnation or original_record != record or recovery.identity_json != identity_json:
                 raise SupersessionBlocked("attempt_owner_changed", "the durable commit entry no longer matches its attempt or identity")
             if recovery.phase == "failed":
                 raise SupersessionBlocked("commit_failed", recovery.reason)

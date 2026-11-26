@@ -4367,3 +4367,12 @@ recovery and no approval/merge until the candidate's new CI/review pass. The
 real-Git recovery cases also cover legacy evidence, concurrency, restart,
 missing/conflicting authority, altered output, hook mutations, lost candidate
 checkpoint and ambiguous push acknowledgment.
+
+An entered but unresolved Git send remains `local_phase=publication_pending`,
+`published=false` and `review_disposition=RECONCILIATION_WAIT` while readback is
+unchanged or unavailable. Its reason distinguishes unknown publication from a
+candidate that is proven not to have entered a send. Repeated evaluation and
+restart observe the durable marker and do not resend. Later exact-candidate
+readback emits corrective handoff, still requiring independent CI and review.
+`test_unresolved_push_restart_waits_without_resend_until_candidate_readback`
+exercises this production PR-processing and trace path with one send throughout.

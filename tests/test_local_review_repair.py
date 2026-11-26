@@ -525,14 +525,18 @@ def test_unstaged_output_is_committed_and_published_to_existing_branch(tmp_path:
         return "ACTION_SUMMARY: corrected"
 
     request = replace(_request(), head_sha=head, head_ref="repair-head")
-    outcome = execute_local_review_repair(request, store=LocalReviewRepairStore(tmp_path / "repairs.sqlite3"), executor=edit)
+    store = LocalReviewRepairStore(tmp_path / "repairs.sqlite3")
+    outcome = execute_local_review_repair(request, store=store, executor=edit)
 
-    assert outcome.phase == "awaiting_validation"
-    published = _git(repository, "show", f"{outcome.reason.split()[1]}:tracked.txt")
-    added_test = _git(repository, "show", f"{outcome.reason.split()[1]}:test_regression.py")
+    assert outcome.phase == "awaiting_validation" and outcome.published
+    retained = store.get(request)
+    assert retained is not None and retained.phase == "awaiting_validation"
+    assert retained.publication_send_state == "entered"
+    published = _git(repository, "show", f"{retained.result_sha}:tracked.txt")
+    added_test = _git(repository, "show", f"{retained.result_sha}:test_regression.py")
     assert published == "corrected"
     assert "assert True" in added_test
-    assert _git(tmp_path, "--git-dir", str(remote), "rev-parse", "refs/heads/repair-head") == outcome.reason.split()[1]
+    assert _git(tmp_path, "--git-dir", str(remote), "rev-parse", "refs/heads/repair-head") == retained.result_sha
 
 
 def test_commit_failure_preserves_corrective_workspace(tmp_path: Path, monkeypatch, _use_custom_subprocess_mock) -> None:
@@ -1051,3 +1055,22 @@ def test_execute_fetches_missing_head_commit_from_origin(tmp_path: Path, monkeyp
     assert len(executed_worktrees) == 1
     assert outcome.phase == "terminal_failure"
     assert outcome.executed is True
+
+
+def test_publication_send_entry_is_atomic_and_never_reset_by_pending_failure(tmp_path):
+    database = tmp_path / "single-send.sqlite3"
+    request = _request()
+    store = LocalReviewRepairStore(database)
+    claim = store.admit(request)
+    assert store.get(request).publication_send_state == "not_entered"
+    store.transition(request, claim, "publication_pending", result_sha="candidate")
+    pending = store.get(request)
+    assert pending.publication_started and pending.publication_send_state == "not_entered"
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        entries = list(workers.map(lambda _: LocalReviewRepairStore(database).mark_publication_send_entered(request, pending), range(2)))
+    assert entries.count(True) == 1
+    assert store.get(request).publication_send_state == "entered"
+    store.transition(request, claim, "publication_pending", result_sha="candidate", reason="response lost")
+    restored = LocalReviewRepairStore(database)
+    assert restored.get(request).publication_send_state == "entered"
+    assert restored.mark_publication_send_entered(request, restored.get(request)) is False

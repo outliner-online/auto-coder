@@ -334,6 +334,9 @@ with the existing deferred outcome, `local_phase`, `published`, `reason` and
 `review_disposition` fields. A missing Controller App identity or refused
 source/ownership/target proof stays `RECONCILIATION_WAIT`; a confirmed candidate
 push is `CORRECTIVE_HANDOFF`, awaiting new-head CI and independent review. No
-additional reviewer interaction is recorded for replaying the retained output.
-The production regression is
+additional reviewer interaction is recorded for publishing the retained output.
+An entered or historically unknown Git send stays in `RECONCILIATION_WAIT` when
+readback is unchanged or unavailable; its deferred reason explains why no resend
+is authorized. Later exact-candidate readback confirms the existing publication
+without adding a reviewer interaction or another push. The production regression is
 `tests/test_editable_pr_review_flow.py::test_controller_identity_failure_resumes_without_review_and_waits_for_fresh_ci`.

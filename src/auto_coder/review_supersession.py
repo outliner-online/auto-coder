@@ -163,7 +163,7 @@ def _retained_evidence(
         or not record.feedback_identities[0].removeprefix("review-output:")
     ):
         raise SupersessionBlocked("attempt_binding_mismatch", "the retained output is not bound to this review target")
-    if record.phase not in {"executing", "indeterminate"} or record.result_sha or record.publication_started:
+    if record.phase not in {"executing", "indeterminate"} or record.result_sha or record.publication_started or record.publication_send_state == "entered":
         raise SupersessionBlocked("publication_may_have_started", "candidate or publication-entry evidence conflicts with pre-push recovery")
     if not record.invocation_entered or record.local_job_id or record.incarnation <= 0 or record.owner_pid is None or record.owner_pid <= 0 or not record.owner_boot_id or record.owner_start_ticks is None or record.owner_start_ticks <= 0 or record.updated_at <= 0:
         raise SupersessionBlocked("owner_evidence_missing", "the synchronous captured-output attempt has incomplete ownership evidence")
