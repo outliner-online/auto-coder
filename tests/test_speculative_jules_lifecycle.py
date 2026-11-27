@@ -608,10 +608,12 @@ def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries
         RetiredJulesReader(),
         github,
     )
+    cleanup = SpeculativeCleanupStore(tmp_path / f"cleanup-{origin}.db")
+    cleanup.has_retired_pr_association = Mock(side_effect=OSError("cleanup offline"))  # type: ignore[method-assign]
     configure_speculative_jules_lifecycle(
         SpeculativeJulesLifecycle(
             RefreshingSpeculativeClassifier(adapter, UnavailableLedger()),
-            SpeculativeCleanupStore(tmp_path / f"cleanup-{origin}.db"),
+            cleanup,
         )
     )
     try:
@@ -649,6 +651,26 @@ def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries
             merge_method="squash",
             sha=f"head-{pr_number}",
         )
+
+        ambiguous = dict(pr)
+        ambiguous["number"] = pr_number + 100
+        ambiguous["body"] = ""
+        ambiguous["head"] = {**pr["head"], "ref": "ambiguous", "sha": "ambiguous-head"}
+        ambiguous_ingress = process_pull_request(github, AutomationConfig(), repository, ambiguous)
+        assert ambiguous_ingress.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in ambiguous_ingress.actions_taken[0]
+
+        metadata_api.pulls.get.return_value = ambiguous
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
+        ):
+            assert _merge_pr(repository, pr_number + 100, {}, AutomationConfig(), github_client=github) is False
+        assert record_stage.call_args.args[4]["classification"] == "UNKNOWN"
+        assert outbound_api.pulls.merge.call_count == 1
     finally:
         configure_speculative_jules_lifecycle(None)
 

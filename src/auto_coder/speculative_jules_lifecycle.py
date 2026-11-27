@@ -145,8 +145,14 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
         pr_data: Optional[Mapping[str, object]] = None,
     ) -> LifecycleDecision:
-        if self.cleanup_store.has_retired_pr_association(repository, pr_number):
-            return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
+        try:
+            if self.cleanup_store.has_retired_pr_association(repository, pr_number):
+                return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
+        except Exception:
+            # An unreadable supplemental store is unavailable evidence.  The
+            # primary classifier still decides between verified unrelated and
+            # explicit UNKNOWN ownership below.
+            pass
         independently_unrelated = bool(pr_data is not None and isinstance(pr_data.get("_verified_non_jules_pr_origin"), str) and pr_data.get("_verified_non_jules_pr_origin"))
         issue_number, result = self.classifier.classify_pr(
             repository,
@@ -176,8 +182,13 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
     ) -> LifecycleDecision:
         """Reestablish fresh selected-pair authority at the merge mutation boundary."""
-        if self.cleanup_store.has_retired_pr_association(repository, pr_number):
-            return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
+        try:
+            if self.cleanup_store.has_retired_pr_association(repository, pr_number):
+                return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
+        except Exception:
+            # Preserve the same evidence ordering as ingress: cleanup failure
+            # cannot veto independent origin proof or erase primary ambiguity.
+            pass
         independently_unrelated = bool(isinstance(pr_data.get("_verified_non_jules_pr_origin"), str) and pr_data.get("_verified_non_jules_pr_origin"))
         issue_number, result = self.classifier.classify_pr(
             repository,
