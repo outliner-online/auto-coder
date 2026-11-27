@@ -345,11 +345,13 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         history_marker = retired_jules_history_marker_path(ledger_path)
         # Migrate pre-marker installations while at least one historical store
         # is still observable.  The marker then keeps the fence active if both
-        # SQLite files are lost later. Missing stores without a marker are also
-        # ambiguous: an older installation may have lost both before migration.
+        # SQLite files are lost later.  Conversely, inspecting an installation
+        # that has never had either store must not manufacture empty history.
         if ledger_path.exists() or observation_path.exists():
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
+        elif not history_marker.exists():
+            return None
         ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
             ledger,

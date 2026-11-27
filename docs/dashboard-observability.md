@@ -2415,8 +2415,7 @@ Speculative candidate evaluation is intentionally represented by existing CI,
 adversarial-validation, and speculative-authority stages rather than by a synthetic
 "winner" success. The final sender emits `pr.speculative-jules-merge-authority`
 with the current classification and denial reason when an artifact loses authority
-after admission. Missing historical stores without a migration marker produce UNKNOWN
-at both the ingress and final merge authority stages for an ambiguous PR. This stage is blocking and never reports Issue completion;
+after admission. This stage is blocking and never reports Issue completion;
 confirmed merge delivery remains the sole completion trace.
 
 # Issue Implementation worker lane
