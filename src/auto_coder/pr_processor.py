@@ -3610,7 +3610,7 @@ def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) ->
     head_ref = str(head.get("ref") or pr_data.get("headRefName") or pr_data.get("head_branch") or "")
     if author == "dependabot[bot]" and head_ref.startswith("dependabot/"):
         pr_data["_verified_non_jules_pr_origin"] = f"dependabot:{head_ref}"
-    elif _is_local_llm_pr(pr_data):
+    elif _is_local_llm_pr(pr_data) and any(marker in str(pr_data.get("body") or "") for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
         pr_data["_verified_non_jules_pr_origin"] = f"local:{head_ref or 'publication-marker'}"
 
 

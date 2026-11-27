@@ -339,7 +339,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     monkeypatch,
 ) -> None:
     from auto_coder.jules_candidate_observation import CandidateObservationStore
-    from auto_coder.jules_competition_ledger import JulesCompetitionLedger, SpeculativeGenerationBundle
+    from auto_coder.jules_competition_ledger import CandidateBindingObservation, JulesCompetitionLedger, SpeculativeGenerationBundle
     from auto_coder.merge_operation_state import MergeOperationStore
     from auto_coder.pr_processor import _merge_pr
     from auto_coder.speculative_jules_lifecycle import get_speculative_jules_lifecycle
@@ -349,7 +349,12 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     ledger_path = tmp_path / ".auto-coder" / "jules_competition.db"
     observation_path = tmp_path / "runtime" / "state" / "jules_candidate_observations.db"
     ledger = JulesCompetitionLedger(ledger_path)
-    ledger.create_generation("owner/repo", 7, "create", 0, SpeculativeGenerationBundle(candidate_ids=("candidate",), issue_oracle_snapshot="oracle", issue_oracle_fingerprint="fingerprint", source_branch="main"))
+    created = ledger.create_generation("owner/repo", 7, "create", 0, SpeculativeGenerationBundle(candidate_ids=("candidate",), issue_oracle_snapshot="oracle", issue_oracle_fingerprint="fingerprint", source_branch="main"))
+    generation_id = created.generation_id
+    assert generation_id is not None
+    claimed = ledger.claim_candidate_submission("owner/repo", 7, generation_id, "candidate", "claim", created.snapshot.epoch)
+    accepted = ledger.record_candidate_accepted("owner/repo", 7, generation_id, "candidate", "accept", claimed.snapshot.epoch, "jules", "session")
+    ledger.record_candidate_binding("owner/repo", 7, generation_id, "candidate", "bind", accepted.snapshot.epoch, CandidateBindingObservation("owner/repo", 59, "head", "base"))
     CandidateObservationStore(observation_path)
     assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
     # Generations created before retirement did not create the new marker.
@@ -361,7 +366,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     ledger_path.unlink()
     observation_path.unlink()
     github = Mock(token="token")
-    pr = {"number": 59, "state": "open", "body": "", "changed_files": 1, "user": {"login": "octocat", "type": "User"}, "head": {"repo": {"full_name": "owner/repo"}, "ref": "ambiguous", "sha": "head"}, "base": {"repo": {"full_name": "owner/repo"}, "ref": "main", "sha": "base"}}
+    pr = {"number": 59, "state": "open", "body": "", "changed_files": 1, "user": {"login": "octocat", "type": "User"}, "head": {"repo": {"full_name": "owner/repo"}, "ref": "issue-7", "sha": "head"}, "base": {"repo": {"full_name": "owner/repo"}, "ref": "main", "sha": "base"}}
     metadata_api = Mock()
     metadata_api.pulls.get.return_value = dict(pr)
     outbound_api = Mock()
