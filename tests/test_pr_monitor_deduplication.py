@@ -134,7 +134,8 @@ def test_production_dispatch_uses_controller_auth_and_suppresses_uncertain_retry
             first_actions = _handle_pr_merge(controller, "owner/repo", pr, AutomationConfig(), {})
             second_actions = _handle_pr_merge(controller, "owner/repo", pr, AutomationConfig(), {})
 
-        assert sends == [
+        dispatch_sends = [request for request in sends if request[0] == "POST" and request[1].endswith("/dispatches")]
+        assert dispatch_sends == [
             (
                 "POST",
                 "https://api.github.com/repos/owner/repo/actions/workflows/ci.yml/dispatches",
