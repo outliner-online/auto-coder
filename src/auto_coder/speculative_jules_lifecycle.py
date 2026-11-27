@@ -148,7 +148,7 @@ class SpeculativeJulesLifecycle:
         try:
             if self.cleanup_store.has_retired_pr_association(repository, pr_number):
                 return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
-        except Exception:
+        except (OSError, sqlite3.Error):
             # An unreadable supplemental store is unavailable evidence.  The
             # primary classifier still decides between verified unrelated and
             # explicit UNKNOWN ownership below.
@@ -185,7 +185,7 @@ class SpeculativeJulesLifecycle:
         try:
             if self.cleanup_store.has_retired_pr_association(repository, pr_number):
                 return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
-        except Exception:
+        except (OSError, sqlite3.Error):
             # Preserve the same evidence ordering as ingress: cleanup failure
             # cannot veto independent origin proof or erase primary ambiguity.
             pass

@@ -455,9 +455,17 @@ def test_surviving_cleanup_association_fences_pr_after_primary_history_loss(
     try:
         service = get_speculative_jules_lifecycle(github)
         assert service is not None
-        ingress = service.evaluate_pr("owner/repo", 59, pr_data={"number": 59})
-        assert ingress.classification is ArtifactClassification.RETIRED
-        assert not ingress.allow_ordinary_processing
+        pr = {
+            "number": 59,
+            "state": "open",
+            "body": "<!-- auto-coder:local -->",
+            "user": {"login": "octocat", "type": "User"},
+            "head": {"repo": {"full_name": "owner/repo"}, "ref": "local-feature", "sha": "head-59"},
+            "base": {"repo": {"full_name": "owner/repo"}, "ref": "main", "sha": "base-sha"},
+        }
+        ingress = process_pull_request(github, AutomationConfig(), "owner/repo", pr)
+        assert ingress.outcome is PRProcessingOutcome.DEFERRED
+        assert "retired artifact fenced" in ingress.actions_taken[0]
 
         merge = service.evaluate_merge_authority("owner/repo", 59, {"number": 59}, {})
         assert merge.classification is ArtifactClassification.RETIRED
@@ -466,6 +474,8 @@ def test_surviving_cleanup_association_fences_pr_after_primary_history_loss(
         with patch("auto_coder.merge_operation_adapter.get_ghapi_client") as outbound:
             assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
         outbound.return_value.pulls.merge.assert_not_called()
+        assert len(cleanup.pending()) == 1
+        github.close_pr.assert_not_called()
     finally:
         configure_speculative_jules_lifecycle(None)
 
@@ -609,7 +619,11 @@ def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries
         github,
     )
     cleanup = SpeculativeCleanupStore(tmp_path / f"cleanup-{origin}.db")
-    cleanup.has_retired_pr_association = Mock(side_effect=OSError("cleanup offline"))  # type: ignore[method-assign]
+    # Model a store that becomes unreadable after normal worker initialization.
+    # Replacing the initialized SQLite file with a directory deterministically
+    # makes the production lookup fail without substituting a mocked method.
+    cleanup.path.unlink()
+    cleanup.path.mkdir()
     configure_speculative_jules_lifecycle(
         SpeculativeJulesLifecycle(
             RefreshingSpeculativeClassifier(adapter, UnavailableLedger()),
