@@ -1019,7 +1019,7 @@ def test_issue_binding_number_does_not_authorize_ambiguous_pr(tmp_path: Path, mo
         assert "unknown artifact fenced" in ingress.actions_taken[0]
         api = Mock()
         api.pulls.get.return_value = dict(pr)
-        with (patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api), patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False), patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[])):
+        with patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api), patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False), patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]):
             assert _merge_pr(repository, 59, {}, AutomationConfig(), github_client=github) is False
         api.pulls.merge.assert_not_called()
     finally:
