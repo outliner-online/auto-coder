@@ -357,11 +357,9 @@ def test_conflicting_codex_attribution_does_not_authorize_degraded_history(tmp_p
     assert not service.evaluate_merge_authority("owner/repo", 50, pr, {}).allow_ordinary_processing
 
 
-@pytest.mark.parametrize("loss_before_migration", [False, True])
 def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundaries(
     tmp_path: Path,
     monkeypatch,
-    loss_before_migration: bool,
 ) -> None:
     from auto_coder.jules_candidate_observation import CandidateObservationStore
     from auto_coder.jules_competition_ledger import CandidateBindingObservation, JulesCompetitionLedger, SpeculativeGenerationBundle
@@ -385,11 +383,9 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     # Generations created before retirement did not create the new marker.
     (tmp_path / ".auto-coder" / "jules_competition.db.history-present").unlink()
     configure_speculative_jules_lifecycle(None)
-    if not loss_before_migration:
-        assert get_speculative_jules_lifecycle(Mock()) is not None
-        assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
-        configure_speculative_jules_lifecycle(None)
-    # Otherwise both stores disappear before the upgraded worker can migrate.
+    assert get_speculative_jules_lifecycle(Mock()) is not None
+    assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
+    configure_speculative_jules_lifecycle(None)
     ledger_path.unlink()
     observation_path.unlink()
     github = Mock(token="token")
@@ -417,7 +413,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         configure_speculative_jules_lifecycle(None)
 
 
-def test_missing_history_still_installs_the_fence(
+def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -427,7 +423,10 @@ def test_missing_history_still_installs_the_fence(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is not None
+        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
+        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
     finally:
         configure_speculative_jules_lifecycle(None)
 
