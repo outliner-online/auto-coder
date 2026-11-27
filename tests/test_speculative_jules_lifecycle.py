@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+
 from auto_coder.automation_config import AutomationConfig, PRProcessingOutcome
 from auto_coder.jules_candidate_observation import ArtifactClassification, ClassificationResult
 from auto_coder.jules_competition_ledger import ObligationKind
@@ -232,7 +234,8 @@ def test_empty_ledger_does_not_infer_unrelated_ownership_from_empty_history() ->
     assert result.mutation_allowed is False
 
 
-def test_recreated_empty_history_fences_ambiguous_pr_at_production_boundaries(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("issue_hint", [False, True])
+def test_recreated_empty_history_fences_ambiguous_pr_at_production_boundaries(tmp_path: Path, monkeypatch, issue_hint: bool) -> None:
     """REQ-002/006: two empty stores cannot authorize ingress or merge."""
     from auto_coder.jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
     from auto_coder.jules_competition_ledger import JulesCompetitionLedger
@@ -245,7 +248,7 @@ def test_recreated_empty_history_fences_ambiguous_pr_at_production_boundaries(tm
     pr = {
         "number": 59,
         "state": "open",
-        "body": "",
+        "body": "Closes #7" if issue_hint else "",
         "changed_files": 1,
         "user": {"login": "octocat", "type": "User"},
         "head": {"repo": {"full_name": repository}, "ref": "ambiguous", "sha": "head-59"},
@@ -278,7 +281,7 @@ def test_recreated_empty_history_fences_ambiguous_pr_at_production_boundaries(tm
                 return_value=MergeOperationStore(db_path=tmp_path / "merge-operations-empty.db"),
             ),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
-            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[7] if issue_hint else []),
         ):
             assert _merge_pr(repository, 59, {}, AutomationConfig(), github_client=github) is False
         outbound_api.pulls.merge.assert_not_called()
@@ -312,6 +315,23 @@ def test_positive_non_jules_origin_cannot_override_retained_association() -> Non
         )
         assert result.classification is ArtifactClassification.BLOCKED
         assert result.mutation_allowed is False
+
+
+def test_conflicting_codex_attribution_does_not_authorize_degraded_history(tmp_path: Path) -> None:
+    from auto_coder.codex_pr_attribution import AttributionDisposition, AttributionResult
+    from auto_coder.pr_processor import _record_non_jules_pr_attribution
+
+    pr = {"number": 50, "body": "", "head": {"ref": "issue-50"}}
+    conflict = AttributionResult(AttributionDisposition.CONFLICT, SimpleNamespace(task_id="old-task"), "conflict")
+    adapter = Mock()
+    adapter.store.has_retired_pr_association.return_value = False
+    ledger = Mock(list_issue_numbers=Mock(side_effect=OSError("offline")))
+    service = SpeculativeJulesLifecycle(RefreshingSpeculativeClassifier(adapter, ledger), SpeculativeCleanupStore(tmp_path / "cleanup.db"))
+    with patch("auto_coder.codex_pr_attribution.resolve_codex_pr_origin", return_value=conflict):
+        _record_non_jules_pr_attribution("owner/repo", pr)
+    assert "_verified_non_jules_pr_origin" not in pr
+    assert not service.evaluate_pr("owner/repo", 50, pr_data=pr).allow_ordinary_processing
+    assert not service.evaluate_merge_authority("owner/repo", 50, pr, {}).allow_ordinary_processing
 
 
 def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(

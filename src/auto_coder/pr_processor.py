@@ -3575,7 +3575,9 @@ def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) ->
         has_accepted_codex_work = any(run.provider == "codex-cloud" and run.submission_outcome == "accepted" for issue_number in linked_issues for run in runs.list_for_issue(issue_number))
         if _is_codex_pr(pr_data) or has_accepted_codex_work or result.origin is not None:
             pr_data["_codex_pr_attribution_required"] = True
-        if result.origin is not None:
+        if result.disposition is AttributionDisposition.CONFLICT:
+            return
+        if result.disposition is AttributionDisposition.VERIFIED and result.origin is not None:
             pr_data["_verified_codex_pr_origin"] = result.origin.task_id
             pr_data["_verified_non_jules_pr_origin"] = f"codex-cloud:{result.origin.task_id}"
         logger.debug(f"Codex PR attribution for #{pr_data.get('number')}: {result.disposition.value} ({result.boundary})")

@@ -239,14 +239,14 @@ class RefreshingSpeculativeClassifier:
                 ArtifactClassification.BLOCKED,
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
             )
-        issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
-        if not issue_numbers:
+        if not ledger_issues:
             if independently_unrelated and not retained_association:
                 return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
                 diagnostics=("retired Jules ownership cannot be reconciled from empty history",),
             )
+        issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
         classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number)) for issue in issue_numbers)
         relevant = tuple(item for item in classified if item[1].classification is not ArtifactClassification.LEGACY)
         if not relevant:
