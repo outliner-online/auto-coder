@@ -224,6 +224,29 @@ def test_unavailable_ledger_blocks_human_and_bot_prs(tmp_path: Path) -> None:
     adapter.observe_candidate.assert_not_called()
 
 
+def test_final_merge_fences_ambiguous_pr_before_exhaustion_comment(tmp_path: Path) -> None:
+    from auto_coder.pr_processor import _merge_pr
+
+    service, _ = lifecycle(tmp_path, ClassificationResult(ArtifactClassification.BLOCKED))
+    configure_speculative_jules_lifecycle(service)
+    github = Mock(token="token")
+    api = Mock()
+    api.pulls.get.return_value = {"number": 50, "body": "", "head": {"sha": "head"}}
+    exhausted = SimpleNamespace(is_exhausted=True, exhausted_blocker_ids=("blocker",))
+    try:
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor.check_pr_repair_exhaustion", return_value=exhausted),
+            patch("auto_coder.pr_processor.publish_exhaustion_comment_deduped") as publish,
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+        ):
+            assert _merge_pr("owner/repo", 50, {}, AutomationConfig(), github_client=github) is False
+        publish.assert_not_called()
+    finally:
+        configure_speculative_jules_lifecycle(None)
+
+
 def test_empty_ledger_does_not_infer_unrelated_ownership_from_empty_history() -> None:
     adapter = Mock()
     adapter.store.has_retired_pr_association.return_value = False
