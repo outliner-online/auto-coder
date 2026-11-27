@@ -336,13 +336,21 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
     global _lifecycle
     if _lifecycle is None and github_client is not None:
         from .jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
-        from .jules_competition_ledger import JulesCompetitionLedger, default_jules_competition_db_path
+        from .jules_competition_ledger import JulesCompetitionLedger, default_jules_competition_db_path, retired_jules_history_marker_path
 
         root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
         ledger_path = default_jules_competition_db_path()
         observation_path = root / "jules_candidate_observations.db"
-        # Older generations predate the marker, so missing files do not prove
-        # that this installation has no historical competition artifacts.
+        history_marker = retired_jules_history_marker_path(ledger_path)
+        # Migrate pre-marker installations while at least one historical store
+        # is still observable.  The marker then keeps the fence active if both
+        # SQLite files are lost later.  Conversely, inspecting an installation
+        # that has never had either store must not manufacture empty history.
+        if ledger_path.exists() or observation_path.exists():
+            history_marker.parent.mkdir(parents=True, exist_ok=True)
+            history_marker.touch(exist_ok=True)
+        elif not history_marker.exists():
+            return None
         ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
             ledger,
