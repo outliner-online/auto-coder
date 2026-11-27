@@ -123,6 +123,15 @@ class SpeculativeCleanupStore:
             rows = connection.execute("SELECT repository, issue_number, generation_id, candidate_id, pr_number, selected_pr, reason FROM cleanup WHERE status='PENDING'").fetchall()
         return tuple(CleanupObligation(str(row[0]), int(row[1]), str(row[2]), str(row[3]), int(row[4]), cast(Optional[int], row[5]), str(row[6])) for row in rows)
 
+    def has_retired_pr_association(self, repository: str, pr_number: int) -> bool:
+        """Read an exact historical association without authorizing cleanup."""
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM cleanup WHERE repository=? AND pr_number=? LIMIT 1",
+                (repository, pr_number),
+            ).fetchone()
+        return row is not None
+
 
 class SpeculativeJulesLifecycle:
     def __init__(self, classifier: SpeculativeClassifier, cleanup_store: SpeculativeCleanupStore):
@@ -136,6 +145,8 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
         pr_data: Optional[Mapping[str, object]] = None,
     ) -> LifecycleDecision:
+        if self.cleanup_store.has_retired_pr_association(repository, pr_number):
+            return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
         independently_unrelated = bool(pr_data is not None and isinstance(pr_data.get("_verified_non_jules_pr_origin"), str) and pr_data.get("_verified_non_jules_pr_origin"))
         issue_number, result = self.classifier.classify_pr(
             repository,
@@ -165,6 +176,8 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
     ) -> LifecycleDecision:
         """Reestablish fresh selected-pair authority at the merge mutation boundary."""
+        if self.cleanup_store.has_retired_pr_association(repository, pr_number):
+            return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
         independently_unrelated = bool(isinstance(pr_data.get("_verified_non_jules_pr_origin"), str) and pr_data.get("_verified_non_jules_pr_origin"))
         issue_number, result = self.classifier.classify_pr(
             repository,
@@ -343,6 +356,7 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         ledger_path = default_jules_competition_db_path()
         observation_path = root / "jules_candidate_observations.db"
         history_marker = retired_jules_history_marker_path(ledger_path)
+        cleanup_path = default_cleanup_path()
         # Migrate pre-marker installations while at least one historical store
         # is still observable.  The marker then keeps the fence active if both
         # SQLite files are lost later.  Conversely, inspecting an installation
@@ -350,7 +364,7 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         if ledger_path.exists() or observation_path.exists():
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
-        elif not history_marker.exists():
+        elif not history_marker.exists() and not cleanup_path.exists():
             return None
         ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
@@ -361,7 +375,7 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         )
         _lifecycle = SpeculativeJulesLifecycle(
             RefreshingSpeculativeClassifier(adapter, ledger),
-            SpeculativeCleanupStore(default_cleanup_path()),
+            SpeculativeCleanupStore(cleanup_path),
         )
     return _lifecycle
 

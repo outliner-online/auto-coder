@@ -431,6 +431,45 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
         configure_speculative_jules_lifecycle(None)
 
 
+def test_surviving_cleanup_association_fences_pr_after_primary_history_loss(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A verified historical cleanup row remains a read-only production veto."""
+    from auto_coder.jules_candidate_observation import ArtifactClassification
+    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.speculative_jules_lifecycle import default_cleanup_path, get_speculative_jules_lifecycle
+
+    monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    cleanup = SpeculativeCleanupStore(default_cleanup_path())
+    cleanup.retain(
+        "owner/repo",
+        7,
+        ClassificationResult(ArtifactClassification.RETIRED, "candidate", "generation"),
+        59,
+        None,
+    )
+    github = Mock(token="token")
+    configure_speculative_jules_lifecycle(None)
+    try:
+        service = get_speculative_jules_lifecycle(github)
+        assert service is not None
+        ingress = service.evaluate_pr("owner/repo", 59, pr_data={"number": 59})
+        assert ingress.classification is ArtifactClassification.RETIRED
+        assert not ingress.allow_ordinary_processing
+
+        merge = service.evaluate_merge_authority("owner/repo", 59, {"number": 59}, {})
+        assert merge.classification is ArtifactClassification.RETIRED
+        assert not merge.allow_ordinary_processing
+
+        with patch("auto_coder.merge_operation_adapter.get_ghapi_client") as outbound:
+            assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
+        outbound.return_value.pulls.merge.assert_not_called()
+    finally:
+        configure_speculative_jules_lifecycle(None)
+
+
 def test_retained_association_with_missing_namespace_is_not_unrelated() -> None:
     adapter = Mock()
     adapter.store.has_retired_pr_association.return_value = True
