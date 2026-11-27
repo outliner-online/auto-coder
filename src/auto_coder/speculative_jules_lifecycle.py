@@ -196,14 +196,25 @@ class RefreshingSpeculativeClassifier:
 
     def classify_pr(self, repository: str, pr_repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> tuple[Optional[int], ClassificationResult]:
         try:
+            retained_association = self.adapter.store.has_retired_pr_association(repository, pr_repository, pr_number)  # type: ignore[attr-defined]
+        except Exception as exc:
+            return None, ClassificationResult(
+                ArtifactClassification.BLOCKED,
+                diagnostics=(f"retired Jules observations unavailable: {type(exc).__name__}",),
+            )
+        try:
             ledger_issues = self.ledger.list_issue_numbers(repository)  # type: ignore[attr-defined]
         except Exception as exc:
+            if not retained_association:
+                return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
             )
         issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
         if not issue_numbers:
+            if not retained_association:
+                return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
                 diagnostics=("retired Jules ownership cannot be reconciled without ledger namespaces or an Issue association",),

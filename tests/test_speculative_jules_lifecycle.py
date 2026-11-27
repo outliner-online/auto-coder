@@ -198,6 +198,7 @@ def test_unavailable_ledger_blocks_human_and_bot_prs(tmp_path: Path) -> None:
     ledger = Mock()
     ledger.list_issue_numbers.side_effect = OSError("offline")
     adapter = Mock()
+    adapter.store.has_retired_pr_association.return_value = True
     adapter.github.get_pull_request_metadata_strict.side_effect = [
         {"number": 50, "user": {"login": "octocat", "type": "User"}},
         {"number": 51, "user": {"login": "automation[bot]", "type": "Bot"}},
@@ -212,6 +213,19 @@ def test_unavailable_ledger_blocks_human_and_bot_prs(tmp_path: Path) -> None:
     assert ambiguous.classification is ArtifactClassification.BLOCKED
     assert ambiguous.mutation_allowed is False
     adapter.observe_candidate.assert_not_called()
+
+
+def test_unavailable_or_empty_ledger_allows_pr_with_no_retained_association() -> None:
+    adapter = Mock()
+    adapter.store.has_retired_pr_association.return_value = False
+
+    for ledger in (
+        Mock(list_issue_numbers=Mock(side_effect=OSError("offline"))),
+        Mock(list_issue_numbers=Mock(return_value=())),
+    ):
+        _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 50)
+        assert result.classification is ArtifactClassification.LEGACY
+        assert result.mutation_allowed is True
 
 
 def test_selected_association_does_not_override_an_unreadable_namespace() -> None:

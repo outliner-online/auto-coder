@@ -366,6 +366,20 @@ class CandidateObservationStore:
             ).fetchone()
         return row is not None
 
+    def has_retired_pr_association(self, repository: str, pr_repository: str, pr_number: int) -> bool:
+        """Return whether retained provider evidence associates this exact PR."""
+        key = (repository.lower(), pr_repository.lower(), pr_number)
+        with self._connect() as connection:
+            candidate = connection.execute(
+                "SELECT 1 FROM memberships WHERE repository=? AND pr_repository=? AND pr_number=? LIMIT 1",
+                key,
+            ).fetchone()
+            legacy = connection.execute(
+                "SELECT 1 FROM legacy_memberships WHERE repository=? AND pr_repository=? AND pr_number=? LIMIT 1",
+                key,
+            ).fetchone()
+        return candidate is not None or legacy is not None
+
 
 class JulesCandidateObservationAdapter:
     """Collect and classify candidate evidence without lifecycle side effects."""
