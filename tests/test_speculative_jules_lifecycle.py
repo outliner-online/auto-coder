@@ -382,7 +382,10 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
     # Generations created before retirement did not create the new marker.
     (tmp_path / ".auto-coder" / "jules_competition.db.history-present").unlink()
-    # Both stores disappeared before the upgraded process could migrate the marker.
+    configure_speculative_jules_lifecycle(None)
+    assert get_speculative_jules_lifecycle(Mock()) is not None
+    assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
+    configure_speculative_jules_lifecycle(None)
     ledger_path.unlink()
     observation_path.unlink()
     github = Mock(token="token")
@@ -410,7 +413,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         configure_speculative_jules_lifecycle(None)
 
 
-def test_fresh_install_keeps_unproven_ownership_unknown(
+def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -420,9 +423,10 @@ def test_fresh_install_keeps_unproven_ownership_unknown(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        service = get_speculative_jules_lifecycle(Mock())
-        assert service is not None
-        assert service.evaluate_pr("owner/repo", 59).classification is ArtifactClassification.UNKNOWN
+        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
+        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
     finally:
         configure_speculative_jules_lifecycle(None)
 
