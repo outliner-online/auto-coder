@@ -417,6 +417,9 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from auto_coder.automation_config import EmptyPRResult
+    from auto_coder.merge_operation_state import MergeOperationStore
+    from auto_coder.pr_processor import _merge_pr
     from auto_coder.speculative_jules_lifecycle import get_speculative_jules_lifecycle
 
     monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
@@ -424,6 +427,65 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     configure_speculative_jules_lifecycle(None)
     try:
         assert get_speculative_jules_lifecycle(Mock()) is None
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
+        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
+
+        github = Mock(token="token")
+        pr = {
+            "number": 64,
+            "state": "open",
+            "body": "<!-- auto-coder:local -->",
+            "changed_files": 0,
+            "user": {"login": "octocat", "type": "User"},
+            "head": {
+                "repo": {"full_name": "owner/repo"},
+                "ref": "local-feature",
+                "sha": "head",
+            },
+            "base": {
+                "repo": {"full_name": "owner/repo"},
+                "ref": "main",
+                "sha": "base",
+            },
+        }
+        with patch(
+            "auto_coder.pr_processor._close_empty_pr",
+            return_value=EmptyPRResult(closed=True, actions=["ordinary"]),
+        ) as ordinary_effect:
+            ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
+        assert ingress.actions_taken == ["ordinary"]
+        ordinary_effect.assert_called_once()
+
+        metadata_api = Mock()
+        metadata_api.pulls.get.return_value = dict(pr)
+        outbound_api = Mock()
+        outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged"}
+        with (
+            patch(
+                "auto_coder.util.gh_cache.get_ghapi_client",
+                return_value=metadata_api,
+            ),
+            patch(
+                "auto_coder.merge_operation_adapter.get_ghapi_client",
+                return_value=outbound_api,
+            ),
+            patch(
+                "auto_coder.merge_operation_state.get_merge_operation_store",
+                return_value=MergeOperationStore(db_path=tmp_path / "merge.db"),
+            ),
+            patch(
+                "auto_coder.pr_processor._is_pr_review_thread_gate_enabled",
+                return_value=False,
+            ),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            patch("auto_coder.pr_processor._close_linked_issues"),
+            patch("auto_coder.pr_processor._archive_jules_session"),
+        ):
+            assert _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
+        outbound_api.pulls.merge.assert_called_once()
+
+        # Both production boundaries must preserve the fresh-install distinction.
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
