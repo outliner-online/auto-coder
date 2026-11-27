@@ -600,13 +600,13 @@ def _filter_runs_for_pr(runs: List[Dict[str, Any]], branch_name: str) -> List[Di
     return runs
 
 
-def _get_jobs_for_run_filtered_by_pr_number(run_id: int, pr_number: Optional[int], repo_name: str) -> List[Dict[str, Any]]:
+def _get_jobs_for_run_filtered_by_pr_number(run_id: int, pr_number: Optional[int], repo_name: str, github_client: Optional[GitHubClient] = None) -> List[Dict[str, Any]]:
     """Return jobs for a run within the specified repository. If pullRequests are available
     in the command output and pr_number is given, only return jobs if the run references
     that PR number. Returns empty list on failure.
     """
     try:
-        client = GitHubClient.get_instance()
+        client = github_client or GitHubClient.get_instance()
         api = _ci_api_for(client, repo_name, required_permissions={"actions": "read"})
         owner, repo = repo_name.split("/")
 
@@ -1171,7 +1171,12 @@ def trigger_workflow_dispatch(repo_name: str, workflow_id: str, ref: str, github
         return WorkflowDispatchResult(outcome=_classify_dispatch_exception(e), error=str(e))
 
 
-def get_github_actions_logs_from_url(url: str, config: Optional[AutomationConfig] = None, failed_checks: Optional[List[Dict[str, Any]]] = None) -> str:
+def get_github_actions_logs_from_url(
+    url: str,
+    config: Optional[AutomationConfig] = None,
+    failed_checks: Optional[List[Dict[str, Any]]] = None,
+    github_client: Optional[GitHubClient] = None,
+) -> str:
     """Extract error blocks by fetching logs for the given GitHub Actions job URL directly.
 
     Accepted URL format:
@@ -1197,7 +1202,7 @@ def get_github_actions_logs_from_url(url: str, config: Optional[AutomationConfig
 
                 # Fetch jobs to find failed ones
                 try:
-                    client = GitHubClient.get_instance()
+                    client = github_client or GitHubClient.get_instance()
                     api = _ci_api_for(client, owner_repo, required_permissions={"actions": "read"})
 
                     jobs = list_all_workflow_jobs(api, owner, repo, run_id)
@@ -1212,7 +1217,7 @@ def get_github_actions_logs_from_url(url: str, config: Optional[AutomationConfig
                             if j_id:
                                 # specific job url
                                 j_url = f"https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{j_id}"
-                                logs_list.append(get_github_actions_logs_from_url(j_url))
+                                logs_list.append(get_github_actions_logs_from_url(j_url, github_client=client))
 
                         if logs_list:
                             return "\n\n".join(logs_list)
@@ -1228,7 +1233,7 @@ def get_github_actions_logs_from_url(url: str, config: Optional[AutomationConfig
             return "Invalid GitHub Actions job URL"
 
         # Prepare GhApi
-        client = GitHubClient.get_instance()
+        client = github_client or GitHubClient.get_instance()
         api = _ci_api_for(client, owner_repo, required_permissions={"actions": "read"})
 
         # 1) Get job details to get name and identifying failing steps
@@ -1414,6 +1419,7 @@ def _search_github_actions_logs_from_history(
     failed_checks: List[Dict[str, Any]],
     pr_data: Optional[Dict[str, Any]] = None,
     max_runs: int = 10,
+    github_client: Optional[GitHubClient] = None,
 ) -> Optional[str]:
     """Search for GitHub Actions logs from recent runs.
 
@@ -1443,7 +1449,7 @@ def _search_github_actions_logs_from_history(
         logger.info(f"Starting historical search for GitHub Actions logs (searching through {max_runs} recent runs)")
 
         runs = []
-        client = GitHubClient.get_instance()
+        client = github_client or GitHubClient.get_instance()
         api = _ci_api_for(client, repo_name, required_permissions={"actions": "read"})
         owner, repo = repo_name.split("/")
 
@@ -1541,7 +1547,7 @@ def _search_github_actions_logs_from_history(
                         run_url = run.get("url")
 
                     if run_url:
-                        logs = get_github_actions_logs_from_url(run_url, config, failed_checks)
+                        logs = get_github_actions_logs_from_url(run_url, config, failed_checks, github_client=client)
 
                         if logs and "No detailed logs available" not in logs:
                             # Prepend some metadata about where these logs came from
@@ -1567,6 +1573,7 @@ def _get_github_actions_logs(
     config: AutomationConfig,
     *args: Any,
     search_history: Optional[bool] = None,
+    github_client: Optional[GitHubClient] = None,
     **kwargs: Any,
 ) -> str:
     """Get GitHub Actions failed job logs via gh api and return extracted error locations.
@@ -1609,7 +1616,7 @@ def _get_github_actions_logs(
             return "No detailed logs available"
 
         # Try historical search first
-        historical_logs = _search_github_actions_logs_from_history(repo_name, config, failed_checks, pr_data, max_runs=10)
+        historical_logs = _search_github_actions_logs_from_history(repo_name, config, failed_checks, pr_data, max_runs=10, github_client=github_client)
 
         if historical_logs:
             logger.info("Historical search succeeded: Found logs from commit history")
@@ -1649,7 +1656,7 @@ def _get_github_actions_logs(
         # 2) If can get from details_url, use it to get logs
         if url_to_fetch:
             for url in url_to_fetch:
-                unified = get_github_actions_logs_from_url(url)
+                unified = get_github_actions_logs_from_url(url, github_client=github_client)
                 logs.append(unified)
         else:
             # 3) If details_url not usable, use conventional method (get failed run from PR branch)
@@ -1662,7 +1669,7 @@ def _get_github_actions_logs(
                 if branch_name:
                     logger.debug(f"Using PR branch: {branch_name}")
 
-            client = GitHubClient.get_instance()
+            client = github_client or GitHubClient.get_instance()
             api = _ci_api_for(client, repo_name, required_permissions={"actions": "read"})
             owner, repo = repo_name.split("/")
 
@@ -1700,7 +1707,7 @@ def _get_github_actions_logs(
 
             if run_id:
                 try:
-                    jobs = _get_jobs_for_run_filtered_by_pr_number(run_id, pr_data.get("number") if pr_data else None, repo_name)
+                    jobs = _get_jobs_for_run_filtered_by_pr_number(run_id, pr_data.get("number") if pr_data else None, repo_name, github_client=client)
 
                     for job in jobs:
                         conclusion = job.get("conclusion", "")
@@ -1709,7 +1716,7 @@ def _get_github_actions_logs(
                             if job_id:
                                 url = f"https://github.com/{repo_name}/actions/runs/{run_id}/job/{job_id}"
                                 asyncio_mode = config.SEARCH_GITHUB_ACTIONS_HISTORY  # Dummy use of config if needed or log
-                                unified = get_github_actions_logs_from_url(url)
+                                unified = get_github_actions_logs_from_url(url, github_client=client)
                                 logs.append(unified)
                 except Exception as e:
                     logger.warning(f"Error getting jobs/logs for run {run_id}: {e}")
@@ -2242,12 +2249,13 @@ def check_and_handle_closed_state(
         return False  # Continue on error
 
 
-def _sort_jobs_by_workflow(jobs: list, owner: str, repo: str, run_id: int) -> list:
+def _sort_jobs_by_workflow(jobs: list, owner: str, repo: str, run_id: int, github_client: Optional[GitHubClient] = None) -> list:
     """Sort jobs based on the order defined in the workflow file."""
     try:
         import yaml
 
-        api = _ci_api_for(GitHubClient.get_instance(), f"{owner}/{repo}", required_permissions={"actions": "read", "contents": "read"})
+        client = github_client or GitHubClient.get_instance()
+        api = _ci_api_for(client, f"{owner}/{repo}", required_permissions={"actions": "read", "contents": "read"})
 
         # Get run details to find workflow file path
         run = api.actions.get_workflow_run(owner, repo, run_id)
@@ -2320,7 +2328,7 @@ def _sort_jobs_by_workflow(jobs: list, owner: str, repo: str, run_id: int) -> li
         return jobs
 
 
-def _get_playwright_artifact_logs(repo_name: str, run_id: int) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
+def _get_playwright_artifact_logs(repo_name: str, run_id: int, github_client: Optional[GitHubClient] = None) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
     """Download and parse Playwright JSON logs from GitHub Artifacts using direct API calls.
     aggregating results from all matching 'e2e-artifacts-*'.
 
@@ -2339,7 +2347,7 @@ def _get_playwright_artifact_logs(repo_name: str, run_id: int) -> Tuple[Optional
     try:
         # Select a credential at each GitHub API request boundary. Redirected
         # archive URLs are fetched without these headers below.
-        client = GitHubClient.get_instance()
+        client = github_client or GitHubClient.get_instance()
 
         def api_headers() -> Dict[str, str]:
             credential = client._credential_for(repo_name, {"actions": "read"})
@@ -2529,6 +2537,7 @@ def _create_github_action_log_summary(
     *args: Any,
     search_history: Optional[bool] = None,
     max_log_length: Optional[int] = None,
+    github_client: Optional[GitHubClient] = None,
     **kwargs: Any,
 ) -> Tuple[str, Optional[List[str]]]:
     """Create a formatted summary string from a list of log chunks."""
@@ -2550,7 +2559,7 @@ def _create_github_action_log_summary(
     try:
         # Resolve owner/repo
         owner, repo = repo_name.split("/")
-        client = GitHubClient.get_instance()
+        client = github_client or GitHubClient.get_instance()
         api = _ci_api_for(client, repo_name, required_permissions={"actions": "read"})
 
         # 1. Inspect failed_checks to verify if we have enough info
@@ -2595,7 +2604,7 @@ def _create_github_action_log_summary(
                 logger.info(f"Processing logs for Run {run_id}")
 
                 # A. Get Playwright Artifacts
-                playwright_summary, raw_artifacts = _get_playwright_artifact_logs(repo_name, run_id)
+                playwright_summary, raw_artifacts = _get_playwright_artifact_logs(repo_name, run_id, github_client=client)
                 if raw_artifacts:
                     artifacts_list.extend(raw_artifacts)
 
@@ -2604,7 +2613,7 @@ def _create_github_action_log_summary(
                     jobs = list_all_workflow_jobs(api, owner, repo, run_id)
 
                     # C. Sort jobs by workflow
-                    jobs = _sort_jobs_by_workflow(jobs, owner, repo, run_id)
+                    jobs = _sort_jobs_by_workflow(jobs, owner, repo, run_id, github_client=client)
 
                     playwright_summary_printed = False
 
@@ -2632,7 +2641,7 @@ def _create_github_action_log_summary(
                             # Fetch logs for this job
                             if html_url:
                                 logger.info(f"Fetching logs for failed job: {job.get('name')}")
-                                job_log = get_github_actions_logs_from_url(html_url)
+                                job_log = get_github_actions_logs_from_url(html_url, github_client=client)
                                 if job_log:
                                     logs.append(job_log)
 
@@ -2655,7 +2664,7 @@ def _create_github_action_log_summary(
 
                 if details_url:
                     logger.info(f"Fetching logs for ungrouped check: {check_name}")
-                    job_log = get_github_actions_logs_from_url(details_url)
+                    job_log = get_github_actions_logs_from_url(details_url, github_client=client)
                     if job_log:
                         logs.append(job_log)
                     else:

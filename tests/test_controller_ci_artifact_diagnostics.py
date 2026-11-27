@@ -1,10 +1,17 @@
+import io
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import httpx
 
+from auto_coder.automation_config import AutomationConfig
 from auto_coder.github_controller_auth import ControllerCredential
-from auto_coder.util.github_action import _get_playwright_artifact_logs
+from auto_coder.logger_config import setup_logger
+from auto_coder.util.github_action import (
+    _create_github_action_log_summary,
+    _get_playwright_artifact_logs,
+)
+from auto_coder.util.github_request_outcome import github_http_client
 
 
 def _controller_client() -> MagicMock:
@@ -61,3 +68,119 @@ def test_foreign_artifact_exception_does_not_log_signed_url():
     diagnostics = " ".join(str(call) for call in logger.method_calls)
     assert marker not in diagnostics
     assert "category=ConnectError" in diagnostics
+
+
+def test_governed_artifact_failure_suppresses_response_message(tmp_path):
+    marker = "artifact-response-private-marker"
+    console = io.StringIO()
+    log_file = tmp_path / "github.log"
+    setup_logger(stream=console, log_file=str(log_file))
+    observations = []
+
+    with github_http_client(
+        subsystem="actions-artifacts",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                403,
+                json={"message": marker, "documentation_url": f"https://docs.example/{marker}"},
+                request=request,
+            )
+        ),
+        observation_hook=observations.append,
+    ) as client:
+        response = client.get(
+            "https://api.github.com/repos/owner/repo/actions/runs/7/artifacts",
+            headers={"Authorization": "Bearer controller-secret"},
+        )
+
+    assert response.status_code == 403
+    rendered = console.getvalue() + log_file.read_text()
+    assert marker not in rendered
+    assert len(observations) == 1
+    assert observations[0].status == 403
+    assert observations[0].context.subsystem == "actions-artifacts"
+    assert observations[0].message is None
+    assert observations[0].documentation_url is None
+
+
+def test_artifact_requests_use_injected_client_and_renew_at_each_api_send():
+    credentials = iter(("controller-one", "controller-two"))
+    controller = MagicMock()
+    controller._credential_for.side_effect = lambda *_args: ControllerCredential(next(credentials), "controller-app", repository="owner/repo")
+    seen_authorization = []
+    listing = httpx.Response(
+        200,
+        json={"artifacts": [{"id": 9, "name": "e2e-artifacts-basic", "expired": False}]},
+    )
+    failed_download = httpx.Response(403, json={"message": "denied"})
+
+    @contextmanager
+    def controlled_http_client(**kwargs):
+        transport = MagicMock()
+
+        def get(_url, **request_kwargs):
+            seen_authorization.append(request_kwargs.get("headers", {}).get("Authorization"))
+            return failed_download if kwargs.get("follow_redirects") is False else listing
+
+        transport.get.side_effect = get
+        yield transport
+
+    with (
+        patch(
+            "auto_coder.util.github_action.GitHubClient.get_instance",
+            side_effect=AssertionError("legacy singleton must not be selected"),
+        ),
+        patch("auto_coder.util.github_action.github_http_client", controlled_http_client),
+    ):
+        assert _get_playwright_artifact_logs("owner/repo", 7, github_client=controller) == (
+            None,
+            None,
+        )
+
+    assert seen_authorization == ["Bearer controller-one", "Bearer controller-two"]
+
+
+def test_log_summary_threads_injected_client_to_artifacts_sorting_and_job_logs():
+    controller = MagicMock()
+    controller.api_for.return_value = MagicMock()
+    checks = [
+        {
+            "name": "tests",
+            "details_url": "https://github.com/owner/repo/actions/runs/7/job/8",
+        }
+    ]
+    jobs = [
+        {
+            "name": "tests",
+            "conclusion": "failure",
+            "html_url": "https://github.com/owner/repo/actions/runs/7/job/8",
+        }
+    ]
+
+    with (
+        patch(
+            "auto_coder.util.github_action.GitHubClient.get_instance",
+            side_effect=AssertionError("legacy singleton must not be selected"),
+        ),
+        patch(
+            "auto_coder.util.github_action.filter_actionable_github_checks",
+            side_effect=lambda _repo, values: values,
+        ),
+        patch(
+            "auto_coder.util.github_action._get_playwright_artifact_logs",
+            return_value=(None, []),
+        ) as artifacts,
+        patch("auto_coder.util.github_action.list_all_workflow_jobs", return_value=jobs),
+        patch("auto_coder.util.github_action._sort_jobs_by_workflow", return_value=jobs) as sorting,
+        patch(
+            "auto_coder.util.github_action.get_github_actions_logs_from_url",
+            return_value="FAILED tests/test_ci.py::test_controller",
+        ) as logs,
+    ):
+        summary, files = _create_github_action_log_summary("owner/repo", AutomationConfig(), checks, github_client=controller)
+
+    assert "test_controller" in summary
+    assert files == ["tests/test_ci.py"]
+    artifacts.assert_called_once_with("owner/repo", 7, github_client=controller)
+    sorting.assert_called_once_with(jobs, "owner", "repo", 7, github_client=controller)
+    logs.assert_called_once_with(jobs[0]["html_url"], github_client=controller)

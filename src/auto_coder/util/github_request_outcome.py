@@ -325,7 +325,21 @@ def _safe_endpoint(url: httpx.URL) -> tuple[str, str, str | None, str | None]:
 
 def _sensitive_endpoint(path: str) -> bool:
     lowered = path.lower()
-    return lowered in ("/app", "/user") or any(value in lowered for value in ("/actions/secrets", "/app/installations", "/access_tokens"))
+    sensitive_actions_payload = "/actions/" in lowered and any(segment in lowered for segment in ("/artifacts", "/jobs/"))
+    return (
+        sensitive_actions_payload
+        or lowered in ("/app", "/user")
+        or any(
+            value in lowered
+            for value in (
+                "/actions/secrets",
+                "/app/installations",
+                "/access_tokens",
+                "/actions/artifacts",
+                "/actions/jobs",
+            )
+        )
+    )
 
 
 def _redact_message(message: str, credentials: tuple[str, ...]) -> str:
