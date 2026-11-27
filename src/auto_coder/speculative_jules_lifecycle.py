@@ -205,8 +205,6 @@ class RefreshingSpeculativeClassifier:
         try:
             ledger_issues = self.ledger.list_issue_numbers(repository)  # type: ignore[attr-defined]
         except Exception as exc:
-            if not retained_association:
-                return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),

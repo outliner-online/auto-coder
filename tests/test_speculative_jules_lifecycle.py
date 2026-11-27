@@ -215,17 +215,24 @@ def test_unavailable_ledger_blocks_human_and_bot_prs(tmp_path: Path) -> None:
     adapter.observe_candidate.assert_not_called()
 
 
-def test_unavailable_or_empty_ledger_allows_pr_with_no_retained_association() -> None:
+def test_empty_ledger_allows_pr_with_no_retained_association() -> None:
     adapter = Mock()
     adapter.store.has_retired_pr_association.return_value = False
+    ledger = Mock(list_issue_numbers=Mock(return_value=()))
 
-    for ledger in (
-        Mock(list_issue_numbers=Mock(side_effect=OSError("offline"))),
-        Mock(list_issue_numbers=Mock(return_value=())),
-    ):
-        _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 50)
-        assert result.classification is ArtifactClassification.LEGACY
-        assert result.mutation_allowed is True
+    _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 50)
+    assert result.classification is ArtifactClassification.LEGACY
+    assert result.mutation_allowed is True
+
+
+def test_unavailable_ledger_never_infers_unrelated_ownership_from_absence() -> None:
+    adapter = Mock()
+    adapter.store.has_retired_pr_association.return_value = False
+    ledger = Mock(list_issue_numbers=Mock(side_effect=OSError("offline")))
+
+    _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 50)
+    assert result.classification is ArtifactClassification.BLOCKED
+    assert result.mutation_allowed is False
 
 
 def test_selected_association_does_not_override_an_unreadable_namespace() -> None:
@@ -494,10 +501,15 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         # ensure the persisted observation, rather than request metadata, is
         # what an empty replacement ledger would otherwise lose.
         strict_prs[42]["body"] = ""
-        for uncertain_ledger in (
-            Mock(list_issue_numbers=Mock(side_effect=OSError("offline"))),
-            Mock(list_issue_numbers=Mock(return_value=())),
-        ):
+
+        class UnavailableLedger:
+            def list_issue_numbers(self, _repository: str) -> tuple[int, ...]:
+                raise OSError("offline")
+
+        assert restarted_adapter.store.has_retired_pr_association(repository, repository, 42) is True
+        replacement_empty_ledger = JulesCompetitionLedger(tmp_path / "replacement-empty-ledger.db")
+        assert replacement_empty_ledger.list_issue_numbers(repository) == ()
+        for uncertain_ledger in (UnavailableLedger(), replacement_empty_ledger):
             configure_speculative_jules_lifecycle(
                 SpeculativeJulesLifecycle(
                     RefreshingSpeculativeClassifier(restarted_adapter, uncertain_ledger),
