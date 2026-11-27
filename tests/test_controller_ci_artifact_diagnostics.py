@@ -7,12 +7,44 @@ import httpx
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.github_controller_auth import ControllerCredential
 from auto_coder.logger_config import setup_logger
+from auto_coder.util.gh_cache import GitHubClient
 from auto_coder.util.github_action import (
     _create_github_action_log_summary,
     _get_playwright_artifact_logs,
     filter_actionable_github_checks,
+    get_github_actions_logs_from_url,
 )
 from auto_coder.util.github_request_outcome import github_http_client
+
+
+def test_job_log_foreign_download_exception_does_not_log_signed_url(tmp_path):
+    marker = "signed-job-log-secret"
+    console = io.StringIO()
+    log_file = tmp_path / "github.log"
+    setup_logger(stream=console, log_file=str(log_file))
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.host == "downloads.example":
+            raise httpx.ConnectError(f"download failed: {request.url}", request=request)
+        if request.url.path.endswith("/logs"):
+            return httpx.Response(302, headers={"location": f"https://downloads.example/logs?signature={marker}"}, request=request)
+        return httpx.Response(200, json={"name": "tests", "steps": []}, request=request)
+
+    transport = httpx.Client(transport=httpx.MockTransport(handler))
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        result = get_github_actions_logs_from_url(
+            "https://github.com/owner/repo/actions/runs/7/job/8",
+            github_client=GitHubClient(token="controller-secret"),
+        )
+
+    assert "No detailed logs available" in result
+    assert requests[-1].url.host == "downloads.example"
+    assert "authorization" not in requests[-1].headers
+    rendered = console.getvalue() + log_file.read_text()
+    assert "category=ConnectError" in rendered
+    assert marker not in rendered
 
 
 def _controller_client() -> MagicMock:

@@ -1403,7 +1403,7 @@ def get_github_actions_logs_from_url(
                     snippet = slice_relevant_error_window(log_content)
                     return f"=== Job: {job_name} ===\n" + snippet
         except Exception as e:
-            logger.warning(f"Error processing job zip for {job_id}: {e}")
+            logger.warning(f"Error processing job zip for {job_id}: category={type(e).__name__}")
             pass
 
         # Falback to text log if zip failed or returned text (though GhApi download_job_logs usually is zip for finished jobs)
