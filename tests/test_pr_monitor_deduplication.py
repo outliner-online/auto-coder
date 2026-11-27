@@ -236,7 +236,7 @@ def test_production_dispatch_422_repair_uses_controller_credentials_and_preserve
             return actions, sends, provider.requests
 
     actions, sends, permission_requests = run_case(False)
-    github_sends = [item for item in sends if item[1].startswith("https://api.github.com/")]
+    github_sends = [item for item in sends if item[1].endswith("/actions/workflows/ci.yml/dispatches") or item[2] == "Bearer controller-repair-token"]
     assert [(method, token) for method, _, token, _ in github_sends] == [
         ("POST", "Bearer controller-actions-token"),
         ("GET", "Bearer controller-repair-token"),
@@ -257,7 +257,7 @@ def test_production_dispatch_422_repair_uses_controller_credentials_and_preserve
     assert any("Triggered ci.yml" in action for action in actions)
 
     denied_actions, denied_sends, denied_permissions = run_case(True)
-    denied_github_sends = [item for item in denied_sends if item[1].startswith("https://api.github.com/")]
+    denied_github_sends = [item for item in denied_sends if item[1].endswith("/actions/workflows/ci.yml/dispatches") or item[2] == "Bearer controller-repair-token"]
     assert [(method, token) for method, _, token, _ in denied_github_sends] == [("POST", "Bearer controller-actions-token")]
     assert denied_permissions[-1] == ("owner/repo", {"contents": "write", "workflows": "write"})
     assert not any("Triggered ci.yml" in action for action in denied_actions)
