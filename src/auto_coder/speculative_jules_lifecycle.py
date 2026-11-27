@@ -336,11 +336,17 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
     global _lifecycle
     if _lifecycle is None and github_client is not None:
         from .jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
-        from .jules_competition_ledger import JulesCompetitionLedger, default_jules_competition_db_path
+        from .jules_competition_ledger import JulesCompetitionLedger, default_jules_competition_db_path, retired_jules_history_marker_path
 
         root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
         ledger_path = default_jules_competition_db_path()
         observation_path = root / "jules_candidate_observations.db"
+        history_marker = retired_jules_history_marker_path(ledger_path)
+        # Do not manufacture ambiguous retired history on a genuinely fresh
+        # installation.  Once a generation has existed, the marker survives
+        # loss of both SQLite stores and keeps the conservative fence active.
+        if not ledger_path.exists() and not observation_path.exists() and not history_marker.exists():
+            return None
         ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
             ledger,

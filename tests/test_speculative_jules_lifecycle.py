@@ -350,6 +350,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     ledger = JulesCompetitionLedger(ledger_path)
     ledger.create_generation("owner/repo", 7, "create", 0, SpeculativeGenerationBundle(candidate_ids=("candidate",), issue_oracle_snapshot="oracle", issue_oracle_fingerprint="fingerprint", source_branch="main"))
     CandidateObservationStore(observation_path)
+    assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
     ledger_path.unlink()
     observation_path.unlink()
     github = Mock(token="token")
@@ -369,6 +370,24 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         ):
             assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
         outbound_api.pulls.merge.assert_not_called()
+    finally:
+        configure_speculative_jules_lifecycle(None)
+
+
+def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from auto_coder.speculative_jules_lifecycle import get_speculative_jules_lifecycle
+
+    monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    configure_speculative_jules_lifecycle(None)
+    try:
+        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
+        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
     finally:
         configure_speculative_jules_lifecycle(None)
 
