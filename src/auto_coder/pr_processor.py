@@ -3601,7 +3601,6 @@ def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) ->
                 return
     except Exception as exc:
         logger.warning(f"Cloud PR attribution unavailable for #{pr_data.get('number')}: {type(exc).__name__}")
-        return
 
     # These established publication identities combine author and branch/body
     # evidence; bot authorship or a PR number by itself never authorizes the

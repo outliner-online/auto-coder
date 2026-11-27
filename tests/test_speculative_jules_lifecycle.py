@@ -485,6 +485,30 @@ def test_durable_claude_and_local_origins_survive_unavailable_ledger(
         assert service.evaluate_merge_authority(repository, pr["number"], pr, {}).allow_ordinary_processing
 
 
+def test_local_origin_survives_malformed_unrelated_cloud_bindings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Unavailable Claude evidence must not suppress independent local proof."""
+    from auto_coder.cloud_manager import CloudManager
+    from auto_coder.pr_processor import _record_non_jules_pr_attribution
+
+    monkeypatch.setattr("auto_coder.cloud_manager.Path.home", lambda: tmp_path)
+    manager = CloudManager("owner/repo")
+    manager.cloud_file_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.cloud_file_path.write_text("not,a,cloud,binding\n", encoding="utf-8")
+    pr = {
+        "number": 64,
+        "body": "<!-- auto-coder:local -->",
+        "user": {"login": "octocat", "type": "User"},
+        "head": {"ref": "local-feature", "sha": "head-64"},
+    }
+
+    _record_non_jules_pr_attribution("owner/repo", pr)
+
+    assert pr["_verified_non_jules_pr_origin"] == "local:local-feature"
+
+
 @pytest.mark.parametrize("origin", ["claude", "local"])
 def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries(
     tmp_path: Path,
@@ -516,6 +540,11 @@ def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries
         )
         body += "\nhttps://claude.ai/code/session-production"
     else:
+        # A corrupt, unrelated Claude projection is unavailable evidence, not
+        # a veto on the independent local publication identity below.
+        manager = CloudManager(repository)
+        manager.cloud_file_path.parent.mkdir(parents=True, exist_ok=True)
+        manager.cloud_file_path.write_text("malformed,cloud\nrow,value\n", encoding="utf-8")
         body += "\n<!-- auto-coder:local -->"
         user = {"login": "octocat", "type": "User"}
     pr = {
