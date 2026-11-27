@@ -34,6 +34,9 @@ class Classifier:
     def selected_pr_number(self, repository: str, issue_number: int, generation_id: str) -> int | None:
         return self.selected_pr
 
+    def selected_ingress_authorized(self, repository: str, issue_number: int, result: ClassificationResult, pr_data: object) -> bool:
+        return True
+
 
 def lifecycle(tmp_path: Path, result: ClassificationResult) -> tuple[SpeculativeJulesLifecycle, Classifier]:
     classifier = Classifier(result)
@@ -191,7 +194,7 @@ def test_jules_maintenance_drives_due_cleanup_without_new_issue_event() -> None:
     cleanup.assert_called_once_with(github)
 
 
-def test_unavailable_ledger_allows_only_strictly_proven_human_pr(tmp_path: Path) -> None:
+def test_unavailable_ledger_blocks_human_and_bot_prs(tmp_path: Path) -> None:
     ledger = Mock()
     ledger.list_issue_numbers.side_effect = OSError("offline")
     adapter = Mock()
@@ -204,8 +207,8 @@ def test_unavailable_ledger_allows_only_strictly_proven_human_pr(tmp_path: Path)
     _, ordinary = classifier.classify_pr("owner/repo", "owner/repo", 50)
     _, ambiguous = classifier.classify_pr("owner/repo", "owner/repo", 51)
 
-    assert ordinary.classification is ArtifactClassification.LEGACY
-    assert ordinary.mutation_allowed is True
+    assert ordinary.classification is ArtifactClassification.BLOCKED
+    assert ordinary.mutation_allowed is False
     assert ambiguous.classification is ArtifactClassification.BLOCKED
     assert ambiguous.mutation_allowed is False
     adapter.observe_candidate.assert_not_called()
@@ -406,6 +409,14 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         check_ci.assert_not_called()
         github.close_pr.assert_not_called()
 
+        # A durable winner whose accepted head no longer matches is fenced at
+        # ingress, before CI, review, or any other ordinary PR effect.
+        with patch("auto_coder.pr_processor._check_github_actions_status", return_value=green_ci) as check_ci:
+            stale_selected = process_pull_request(github, AutomationConfig(), repository, strict_prs[41])
+        assert stale_selected.outcome is PRProcessingOutcome.DEFERRED
+        assert "stale or invalidated" in stale_selected.actions_taken[0]
+        check_ci.assert_not_called()
+
         # Mixed input: strict human identity proves this PR unrelated while the
         # candidate remains fenced by the same restarted lifecycle.
         _, ordinary = restarted.classifier.classify_pr(repository, repository, 50)
@@ -462,6 +473,31 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
         ):
             assert _merge_pr(repository, 42, {}, AutomationConfig(), github_client=github) is False
+        outbound_api.pulls.merge.assert_called_once()
+
+        # Neither a strict human author nor an empty replacement ledger proves
+        # that the retained candidate is unrelated. Remove its Issue hint to
+        # ensure the persisted observation, rather than request metadata, is
+        # what an empty replacement ledger would otherwise lose.
+        strict_prs[42]["body"] = ""
+        for uncertain_ledger in (
+            Mock(list_issue_numbers=Mock(side_effect=OSError("offline"))),
+            Mock(list_issue_numbers=Mock(return_value=())),
+        ):
+            configure_speculative_jules_lifecycle(
+                SpeculativeJulesLifecycle(
+                    RefreshingSpeculativeClassifier(restarted_adapter, uncertain_ledger),
+                    SpeculativeCleanupStore(tmp_path / "cleanup.db"),
+                )
+            )
+            assert process_pull_request(github, AutomationConfig(), repository, strict_prs[42]).outcome is PRProcessingOutcome.DEFERRED
+            with (
+                patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+                patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+                patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=merge_store),
+                patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            ):
+                assert _merge_pr(repository, 42, {}, AutomationConfig(), github_client=github) is False
         outbound_api.pulls.merge.assert_called_once()
     finally:
         configure_speculative_jules_lifecycle(None)

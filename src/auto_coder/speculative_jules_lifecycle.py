@@ -33,6 +33,14 @@ class SpeculativeClassifier(Protocol):
         issue_data: Mapping[str, object],
     ) -> bool: ...
 
+    def selected_ingress_authorized(
+        self,
+        repository: str,
+        issue_number: int,
+        result: ClassificationResult,
+        pr_data: Mapping[str, object],
+    ) -> bool: ...
+
 
 class CleanupGitHubClient(Protocol):
     def get_pull_request_metadata_strict(self, repository: str, pr_number: int) -> Mapping[str, object]: ...
@@ -114,11 +122,19 @@ class SpeculativeJulesLifecycle:
         self.classifier = classifier
         self.cleanup_store = cleanup_store
 
-    def evaluate_pr(self, repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> LifecycleDecision:
+    def evaluate_pr(
+        self,
+        repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        pr_data: Optional[Mapping[str, object]] = None,
+    ) -> LifecycleDecision:
         issue_number, result = self.classifier.classify_pr(repository, repository, pr_number, hinted_issue_numbers)
         if result.classification is ArtifactClassification.LEGACY:
             return LifecycleDecision()
         if result.classification is ArtifactClassification.SELECTED:
+            if issue_number is None or pr_data is None or not self.classifier.selected_ingress_authorized(repository, issue_number, result, pr_data):
+                return LifecycleDecision(ArtifactClassification.BLOCKED, False, False, "selected acceptance is stale or invalidated")
             return LifecycleDecision(result.classification, True)
         if result.classification is ArtifactClassification.RETIRED:
             return LifecycleDecision(result.classification, False, False, "verified retired Jules competitor")
@@ -182,25 +198,16 @@ class RefreshingSpeculativeClassifier:
         try:
             ledger_issues = self.ledger.list_issue_numbers(repository)  # type: ignore[attr-defined]
         except Exception as exc:
-            # A strict human author identity independently proves that a PR is
-            # unrelated. Bot authorship alone remains ambiguous as required by
-            # the retirement fence.
-            try:
-                pr = self.adapter.github.get_pull_request_metadata_strict(pr_repository, pr_number)  # type: ignore[attr-defined]
-                user = pr.get("user") if isinstance(pr, Mapping) and pr.get("number") == pr_number else None
-                login = user.get("login") if isinstance(user, Mapping) else None
-                user_type = user.get("type") if isinstance(user, Mapping) else None
-                if isinstance(login, str) and login and user_type == "User":
-                    return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
-            except Exception:
-                pass
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
             )
         issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
         if not issue_numbers:
-            return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
+            return None, ClassificationResult(
+                ArtifactClassification.BLOCKED,
+                diagnostics=("retired Jules ownership cannot be reconciled without ledger namespaces or an Issue association",),
+            )
         classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number)) for issue in issue_numbers)
         relevant = tuple(item for item in classified if item[1].classification is not ArtifactClassification.LEGACY)
         if not relevant:
@@ -251,6 +258,30 @@ class RefreshingSpeculativeClassifier:
         )
         invalidation_revision = self.adapter.store.current_invalidation_revision(repository, issue_number, result.generation_id, result.candidate_id)  # type: ignore[attr-defined]
         return selected_pair_authorized(self.ledger, target, current_invalidation_revision=invalidation_revision)  # type: ignore[arg-type]
+
+    def selected_ingress_authorized(
+        self,
+        repository: str,
+        issue_number: int,
+        result: ClassificationResult,
+        pr_data: Mapping[str, object],
+    ) -> bool:
+        """Validate the durable selected pair before ordinary PR effects run."""
+        if result.generation_id is None:
+            return False
+        try:
+            generation = self.ledger.get_namespace_snapshot(repository, issue_number).get_generation(result.generation_id)  # type: ignore[attr-defined]
+            if generation is None:
+                return False
+            return self.selected_merge_authorized(
+                repository,
+                issue_number,
+                result,
+                pr_data,
+                {"state": "open", "body": generation.issue_oracle_snapshot},
+            )
+        except Exception:
+            return False
 
 
 _lifecycle: Optional[SpeculativeJulesLifecycle] = None

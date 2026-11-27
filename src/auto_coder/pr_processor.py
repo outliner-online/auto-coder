@@ -3637,7 +3637,7 @@ def _process_pull_request_impl(
         speculative = get_speculative_jules_lifecycle(github_client)
         if speculative is not None:
             issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
-            decision = speculative.evaluate_pr(repo_name, pr_number, tuple(issue_numbers))
+            decision = speculative.evaluate_pr(repo_name, pr_number, tuple(issue_numbers), pr_data)
             if not decision.allow_ordinary_processing:
                 processed_pr.priority = "cleanup" if decision.cleanup_pending else "defer"
                 processed_pr.outcome = PRProcessingOutcome.DEFERRED
