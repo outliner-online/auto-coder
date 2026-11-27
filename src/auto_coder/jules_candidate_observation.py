@@ -50,6 +50,7 @@ class ArtifactClassification(str, Enum):
     RETIRED = "RETIRED"
     SUSPECTED = "SUSPECTED"
     LEGACY = "LEGACY"
+    UNKNOWN = "UNKNOWN"
     BLOCKED = "BLOCKED"
 
 

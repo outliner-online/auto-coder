@@ -202,13 +202,13 @@ class RefreshingSpeculativeClassifier:
             if result.classification is ArtifactClassification.LEGACY:
                 snapshot = self.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
                 if any(binding.pr_repository.lower() == pr_repository.lower() and binding.pr_number == pr_number for generation in snapshot.generations for candidate in generation.candidates for binding in candidate.bindings):
-                    return ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("ledger binding lacks matching observation authority",))
+                    return ClassificationResult(ArtifactClassification.UNKNOWN, diagnostics=("ledger binding lacks matching observation authority",))
                 if snapshot.generations and not independently_unrelated and not self.adapter.store.has_legacy_membership(repository, pr_repository, pr_number):  # type: ignore[attr-defined]
-                    return ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("unresolved retired Jules ownership",))
+                    return ClassificationResult(ArtifactClassification.UNKNOWN, diagnostics=("unresolved retired Jules ownership",))
             return result  # type: ignore[no-any-return]
         except Exception as exc:
             return ClassificationResult(
-                ArtifactClassification.BLOCKED,
+                ArtifactClassification.UNKNOWN,
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
             )
 
@@ -224,7 +224,7 @@ class RefreshingSpeculativeClassifier:
             retained_association = self.adapter.store.has_retired_pr_association(repository, pr_repository, pr_number)  # type: ignore[attr-defined]
         except Exception as exc:
             return None, ClassificationResult(
-                ArtifactClassification.BLOCKED,
+                ArtifactClassification.UNKNOWN,
                 diagnostics=(f"retired Jules observations unavailable: {type(exc).__name__}",),
             )
         try:
@@ -233,14 +233,14 @@ class RefreshingSpeculativeClassifier:
             if independently_unrelated and not retained_association:
                 return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
-                ArtifactClassification.BLOCKED,
+                ArtifactClassification.UNKNOWN,
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
             )
         if not ledger_issues:
             if independently_unrelated and not retained_association:
                 return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
-                ArtifactClassification.BLOCKED,
+                ArtifactClassification.UNKNOWN,
                 diagnostics=("retired Jules ownership cannot be reconciled from empty history",),
             )
         issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
@@ -248,13 +248,13 @@ class RefreshingSpeculativeClassifier:
         relevant = tuple(item for item in classified if item[1].classification is not ArtifactClassification.LEGACY)
         if not relevant:
             if retained_association:
-                return None, ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("retained association lacks readable ledger authority",))
+                return None, ClassificationResult(ArtifactClassification.UNKNOWN, diagnostics=("retained association lacks readable ledger authority",))
             return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
         definitive = tuple(item for item in relevant if item[1].classification in (ArtifactClassification.ACTIVE_UNSELECTED, ArtifactClassification.SELECTED, ArtifactClassification.RETIRED))
         if len(definitive) == 1 and len(relevant) == 1:
             return definitive[0]
         if len(definitive) > 1 or len(relevant) > 1:
-            return None, ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("PR has multiple speculative Issue associations",))
+            return None, ClassificationResult(ArtifactClassification.UNKNOWN, diagnostics=("PR has multiple speculative Issue associations",))
         return relevant[0]
 
     def selected_pr_number(self, repository: str, issue_number: int, generation_id: str) -> Optional[int]:

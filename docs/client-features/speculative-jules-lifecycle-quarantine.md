@@ -20,6 +20,9 @@ that a PR is unrelated to an incomplete competition history.
 Positive durable Codex or Claude publication ownership and established local
 publication markers may identify an unrelated PR even when the retired ledger is
 unavailable. Those signals never override a surviving retired-PR association.
+Unavailable, empty, conflicting, or incomplete historical evidence is reported as
+`UNKNOWN` at ingress and final merge, distinct from a known selected candidate
+whose durable acceptance is stale; both states remain mutation-ineligible.
 Dependabot identity is accepted only together with its namespaced publication
 branch, rather than from bot authorship alone. When either historical store is
 present, startup migrates pre-marker installations by recording a durable history

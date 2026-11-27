@@ -217,9 +217,9 @@ def test_unavailable_ledger_blocks_human_and_bot_prs(tmp_path: Path) -> None:
     _, ordinary = classifier.classify_pr("owner/repo", "owner/repo", 50)
     _, ambiguous = classifier.classify_pr("owner/repo", "owner/repo", 51)
 
-    assert ordinary.classification is ArtifactClassification.BLOCKED
+    assert ordinary.classification is ArtifactClassification.UNKNOWN
     assert ordinary.mutation_allowed is False
-    assert ambiguous.classification is ArtifactClassification.BLOCKED
+    assert ambiguous.classification is ArtifactClassification.UNKNOWN
     assert ambiguous.mutation_allowed is False
     adapter.observe_candidate.assert_not_called()
 
@@ -253,7 +253,7 @@ def test_empty_ledger_does_not_infer_unrelated_ownership_from_empty_history() ->
     ledger = Mock(list_issue_numbers=Mock(return_value=()))
 
     _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 50)
-    assert result.classification is ArtifactClassification.BLOCKED
+    assert result.classification is ArtifactClassification.UNKNOWN
     assert result.mutation_allowed is False
 
 
@@ -318,7 +318,7 @@ def test_unavailable_ledger_never_infers_unrelated_ownership_from_absence() -> N
     ledger = Mock(list_issue_numbers=Mock(side_effect=OSError("offline")))
 
     _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 50)
-    assert result.classification is ArtifactClassification.BLOCKED
+    assert result.classification is ArtifactClassification.UNKNOWN
     assert result.mutation_allowed is False
 
 
@@ -336,7 +336,7 @@ def test_positive_non_jules_origin_cannot_override_retained_association() -> Non
             50,
             independently_unrelated=True,
         )
-        assert result.classification is ArtifactClassification.BLOCKED
+        assert result.classification is ArtifactClassification.UNKNOWN
         assert result.mutation_allowed is False
 
 
@@ -395,16 +395,20 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     outbound_api = Mock()
     configure_speculative_jules_lifecycle(None)
     try:
-        assert process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr)).outcome is PRProcessingOutcome.DEFERRED
+        ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
+        assert ingress.outcome is PRProcessingOutcome.DEFERRED
+        assert ingress.actions_taken == ["Speculative Jules unknown artifact fenced: retired Jules ownership cannot be reconciled from empty history"]
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
             patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
             patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "merge.db")),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
         ):
             assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
         outbound_api.pulls.merge.assert_not_called()
+        assert record_stage.call_args.args[4]["classification"] == "UNKNOWN"
     finally:
         configure_speculative_jules_lifecycle(None)
 
@@ -435,7 +439,7 @@ def test_retained_association_with_missing_namespace_is_not_unrelated() -> None:
     ledger.get_namespace_snapshot.return_value.generations = ()
 
     _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 59, independently_unrelated=True)
-    assert result.classification is ArtifactClassification.BLOCKED
+    assert result.classification is ArtifactClassification.UNKNOWN
     assert not result.mutation_allowed
 
 
@@ -690,7 +694,7 @@ def test_selected_association_does_not_override_an_unreadable_namespace() -> Non
 
     _, result = classifier.classify_pr("owner/repo", "owner/repo", 41)
 
-    assert result.classification is ArtifactClassification.BLOCKED
+    assert result.classification is ArtifactClassification.UNKNOWN
 
 
 def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport(tmp_path: Path) -> None:
@@ -964,7 +968,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         partial_ledger.create_generation(repository, 8, "partial", 0, SpeculativeGenerationBundle(candidate_ids=("other",), issue_oracle_snapshot="other", issue_oracle_fingerprint="other", source_branch="main"))
         partial_adapter = JulesCandidateObservationAdapter(partial_ledger, restarted_adapter.store, RetiredJulesReader(), github)
         _, partial_result = RefreshingSpeculativeClassifier(partial_adapter, partial_ledger).classify_pr(repository, repository, 42, independently_unrelated=True)
-        assert partial_result.classification is ArtifactClassification.BLOCKED
+        assert partial_result.classification is ArtifactClassification.UNKNOWN
         for uncertain_ledger in (UnavailableLedger(), replacement_empty_ledger):
             configure_speculative_jules_lifecycle(
                 SpeculativeJulesLifecycle(
