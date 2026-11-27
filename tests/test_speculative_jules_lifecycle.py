@@ -413,34 +413,20 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         configure_speculative_jules_lifecycle(None)
 
 
-def test_history_lost_before_marker_migration_fences_production_boundaries(
+def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from auto_coder.jules_competition_ledger import JulesCompetitionLedger, SpeculativeGenerationBundle
-    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.speculative_jules_lifecycle import get_speculative_jules_lifecycle
 
     monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    ledger_path = tmp_path / ".auto-coder" / "jules_competition.db"
-    ledger = JulesCompetitionLedger(ledger_path)
-    ledger.create_generation("owner/repo", 7, "create", 0, SpeculativeGenerationBundle(candidate_ids=("candidate",), issue_oracle_snapshot="oracle", issue_oracle_fingerprint="fingerprint", source_branch="main"))
-    # Simulate a pre-marker generation whose only store was lost before upgrade.
-    ledger_path.unlink()
-    ledger_path.with_name(ledger_path.name + ".history-present").unlink()
-    pr = {"number": 59, "state": "open", "body": "", "changed_files": 1, "user": {"login": "octocat", "type": "User"}, "head": {"repo": {"full_name": "owner/repo"}, "ref": "unknown", "sha": "head"}, "base": {"repo": {"full_name": "owner/repo"}, "ref": "main", "sha": "base"}}
-    github = Mock(token="token")
-    api = Mock()
-    api.pulls.get.return_value = dict(pr)
     configure_speculative_jules_lifecycle(None)
     try:
-        ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
-        assert ingress.outcome is PRProcessingOutcome.DEFERRED
-        assert "unknown artifact fenced" in ingress.actions_taken[0]
-        with patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api), patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False), patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]), patch("auto_coder.pr_processor._record_pr_stage") as stage:
-            assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
-        assert stage.call_args.args[4]["classification"] == "UNKNOWN"
-        api.pulls.merge.assert_not_called()
+        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
+        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
     finally:
         configure_speculative_jules_lifecycle(None)
 
