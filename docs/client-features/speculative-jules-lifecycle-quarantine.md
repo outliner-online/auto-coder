@@ -21,8 +21,7 @@ Positive durable Codex or Claude publication ownership and established local
 publication markers may identify an unrelated PR even when the retired ledger is
 unavailable. Those signals never override a surviving retired-PR association.
 Dependabot identity is accepted only together with its namespaced publication
-branch, rather than from bot authorship alone. A durable marker records that a
-competition generation has existed, so loss of both SQLite stores remains fenced.
-A genuinely fresh installation does not create empty history merely by inspecting
-an ordinary PR. Missing, empty, or unavailable established history remains fenced
-unless independent evidence establishes unrelated ownership.
+branch, rather than from bot authorship alone. Missing, empty, or unavailable
+history remains fenced unless independent evidence establishes unrelated ownership.
+Absence of the history marker cannot prove a fresh installation because older
+generations predate the marker.
