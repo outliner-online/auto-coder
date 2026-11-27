@@ -239,7 +239,10 @@ def test_final_merge_fences_ambiguous_pr_before_exhaustion_comment(tmp_path: Pat
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor.check_pr_repair_exhaustion", return_value=exhausted),
             patch("auto_coder.pr_processor.publish_exhaustion_comment_deduped") as publish,
-            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            patch(
+                "auto_coder.pr_processor._resolve_pr_issue_numbers",
+                return_value=[],
+            ),
         ):
             assert _merge_pr("owner/repo", 50, {}, AutomationConfig(), github_client=github) is False
         publish.assert_not_called()
@@ -403,7 +406,10 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
             patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
             patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "merge.db")),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
-            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            patch(
+                "auto_coder.pr_processor._resolve_pr_issue_numbers",
+                return_value=[7],
+            ),
             patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
         ):
             assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
@@ -426,7 +432,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert get_speculative_jules_lifecycle(Mock()) is not None
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
@@ -456,7 +462,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
             ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
         assert ingress.actions_taken == ["ordinary"]
         ordinary_effect.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is None
+        assert get_speculative_jules_lifecycle(github) is not None
 
         metadata_api = Mock()
         metadata_api.pulls.get.return_value = dict(pr)
@@ -479,18 +485,61 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
                 "auto_coder.pr_processor._is_pr_review_thread_gate_enabled",
                 return_value=False,
             ),
-            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            patch(
+                "auto_coder.pr_processor._resolve_pr_issue_numbers",
+                return_value=[65],
+            ),
             patch("auto_coder.pr_processor._close_linked_issues"),
             patch("auto_coder.pr_processor._archive_jules_session"),
         ):
             assert _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
         outbound_api.pulls.merge.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is None
+        assert get_speculative_jules_lifecycle(github) is not None
 
         # Both production boundaries must preserve the fresh-install distinction.
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
+
+        ambiguous = dict(pr)
+        ambiguous["number"] = 65
+        ambiguous["body"] = ""
+        ambiguous["head"] = {
+            "repo": {"full_name": "owner/repo"},
+            "ref": "issue-65",
+            "sha": "ambiguous-head",
+        }
+        ingress = process_pull_request(github, AutomationConfig(), "owner/repo", ambiguous)
+        assert ingress.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in ingress.actions_taken[0]
+
+        metadata_api.pulls.get.return_value = ambiguous
+        with (
+            patch(
+                "auto_coder.util.gh_cache.get_ghapi_client",
+                return_value=metadata_api,
+            ),
+            patch(
+                "auto_coder.merge_operation_adapter.get_ghapi_client",
+                return_value=outbound_api,
+            ),
+            patch(
+                "auto_coder.merge_operation_state.get_merge_operation_store",
+                return_value=MergeOperationStore(db_path=tmp_path / "ambiguous-merge.db"),
+            ),
+            patch(
+                "auto_coder.pr_processor._is_pr_review_thread_gate_enabled",
+                return_value=False,
+            ),
+            patch(
+                "auto_coder.pr_processor._resolve_pr_issue_numbers",
+                return_value=[65],
+            ),
+            patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
+        ):
+            assert _merge_pr("owner/repo", 65, {}, AutomationConfig(), github_client=github) is False
+        assert outbound_api.pulls.merge.call_count == 1
+        assert record_stage.call_args.args[4]["classification"] == "UNKNOWN"
     finally:
         configure_speculative_jules_lifecycle(None)
 
@@ -540,6 +589,104 @@ def test_surviving_cleanup_association_fences_pr_after_primary_history_loss(
         outbound.return_value.pulls.merge.assert_not_called()
         assert len(cleanup.pending()) == 1
         github.close_pr.assert_not_called()
+    finally:
+        configure_speculative_jules_lifecycle(None)
+
+
+def test_unreadable_history_at_startup_preserves_proven_origin_and_unknown(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from auto_coder.automation_config import EmptyPRResult
+    from auto_coder.jules_competition_ledger import default_jules_competition_db_path
+    from auto_coder.merge_operation_state import MergeOperationStore
+    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.speculative_jules_lifecycle import default_cleanup_path
+
+    monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    ledger_path = default_jules_competition_db_path()
+    observation_path = tmp_path / "runtime" / "state" / "jules_candidate_observations.db"
+    cleanup_path = default_cleanup_path()
+    ledger_path.mkdir(parents=True)
+    observation_path.mkdir(parents=True)
+    cleanup_path.mkdir(parents=True)
+
+    github = Mock(token="token")
+    local_pr = {
+        "number": 71,
+        "state": "open",
+        "body": "<!-- auto-coder:local -->",
+        "changed_files": 0,
+        "user": {"login": "octocat", "type": "User"},
+        "head": {
+            "repo": {"full_name": "owner/repo"},
+            "ref": "local-feature",
+            "sha": "local-head",
+        },
+        "base": {
+            "repo": {"full_name": "owner/repo"},
+            "ref": "main",
+            "sha": "base",
+        },
+    }
+    ambiguous_pr = dict(local_pr)
+    ambiguous_pr["number"] = 72
+    ambiguous_pr["body"] = ""
+    ambiguous_pr["head"] = {
+        "repo": {"full_name": "owner/repo"},
+        "ref": "issue-72",
+        "sha": "ambiguous-head",
+    }
+    metadata_api = Mock()
+    outbound_api = Mock()
+    outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged"}
+
+    configure_speculative_jules_lifecycle(None)
+    try:
+        with patch(
+            "auto_coder.pr_processor._close_empty_pr",
+            return_value=EmptyPRResult(closed=True, actions=["ordinary"]),
+        ) as ordinary_effect:
+            ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(local_pr))
+        assert ingress.actions_taken == ["ordinary"]
+        ordinary_effect.assert_called_once()
+
+        ambiguous_ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(ambiguous_pr))
+        assert ambiguous_ingress.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in ambiguous_ingress.actions_taken[0]
+
+        with (
+            patch(
+                "auto_coder.util.gh_cache.get_ghapi_client",
+                return_value=metadata_api,
+            ),
+            patch(
+                "auto_coder.merge_operation_adapter.get_ghapi_client",
+                return_value=outbound_api,
+            ),
+            patch(
+                "auto_coder.merge_operation_state.get_merge_operation_store",
+                return_value=MergeOperationStore(db_path=tmp_path / "startup-merge.db"),
+            ),
+            patch(
+                "auto_coder.pr_processor._is_pr_review_thread_gate_enabled",
+                return_value=False,
+            ),
+            patch(
+                "auto_coder.pr_processor._resolve_pr_issue_numbers",
+                side_effect=lambda _repo, current, _client: ([72] if current.get("number") == 72 else []),
+            ),
+            patch("auto_coder.pr_processor._close_linked_issues"),
+            patch("auto_coder.pr_processor._archive_jules_session"),
+            patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
+        ):
+            metadata_api.pulls.get.return_value = dict(local_pr)
+            assert _merge_pr("owner/repo", 71, {}, AutomationConfig(), github_client=github)
+            metadata_api.pulls.get.return_value = dict(ambiguous_pr)
+            assert _merge_pr("owner/repo", 72, {}, AutomationConfig(), github_client=github) is False
+        outbound_api.pulls.merge.assert_called_once()
+        assert record_stage.call_args.args[4]["classification"] == "UNKNOWN"
     finally:
         configure_speculative_jules_lifecycle(None)
 
