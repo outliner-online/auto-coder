@@ -24,5 +24,5 @@ Dependabot identity is accepted only together with its namespaced publication
 branch, rather than from bot authorship alone. When either historical store is
 present, startup migrates pre-marker installations by recording a durable history
 marker outside SQLite. The marker keeps missing, empty, or unavailable established
-history fenced after later store loss. A genuinely fresh installation creates no
-empty history merely by inspecting an ordinary PR.
+history fenced after later store loss. Missing stores without a marker are also
+ambiguous because pre-marker history may have disappeared before migration.
