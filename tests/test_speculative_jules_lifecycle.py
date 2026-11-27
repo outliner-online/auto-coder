@@ -355,9 +355,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     # Generations created before retirement did not create the new marker.
     (tmp_path / ".auto-coder" / "jules_competition.db.history-present").unlink()
     configure_speculative_jules_lifecycle(None)
-    assert get_speculative_jules_lifecycle(Mock()) is not None
-    assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
-    configure_speculative_jules_lifecycle(None)
+    # Both stores disappear before the first retirement-time migration.
     ledger_path.unlink()
     observation_path.unlink()
     github = Mock(token="token")
@@ -381,7 +379,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         configure_speculative_jules_lifecycle(None)
 
 
-def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
+def test_missing_history_does_not_prove_an_installation_is_fresh(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -391,10 +389,9 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is None
-        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
-        assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
-        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
+        service = get_speculative_jules_lifecycle(Mock())
+        assert service is not None
+        assert not service.evaluate_pr("owner/repo", 59).allow_ordinary_processing
     finally:
         configure_speculative_jules_lifecycle(None)
 
