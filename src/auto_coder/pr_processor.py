@@ -13288,6 +13288,12 @@ def _merge_pr(
         from auto_coder.util.gh_cache import get_ghapi_client
 
         client = github_client or GitHubClient.get_instance()
+        exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number)
+        if exhaustion_info and exhaustion_info.is_exhausted:
+            logger.warning(f"Merge aborted for PR #{pr_number}: repair allowance exhausted for open blocker(s): {', '.join(exhaustion_info.exhausted_blocker_ids)}")
+            publish_exhaustion_comment_deduped(client, repo_name, pr_number, exhaustion_info)
+            return False
+
         if _is_pr_review_thread_gate_enabled(config, repo_name):
             review_thread_state = _get_review_thread_gate_state(client, repo_name, pr_number, config=config)
             if review_thread_state.lookup_error:
@@ -13347,12 +13353,6 @@ def _merge_pr(
                     {"classification": authority.classification.value, "reason": authority.reason},
                 )
                 return False
-
-        exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number)
-        if exhaustion_info and exhaustion_info.is_exhausted:
-            logger.warning(f"Merge aborted for PR #{pr_number}: repair allowance exhausted for open blocker(s): {', '.join(exhaustion_info.exhausted_blocker_ids)}")
-            publish_exhaustion_comment_deduped(client, repo_name, pr_number, exhaustion_info)
-            return False
 
         head_sha = expected_head_sha or pr_info.get("head", {}).get("sha") or ""
         if not head_sha:
