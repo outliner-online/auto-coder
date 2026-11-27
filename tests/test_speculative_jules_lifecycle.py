@@ -27,7 +27,14 @@ class Classifier:
         self.calls += 1
         return self.result
 
-    def classify_pr(self, repository: str, pr_repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> tuple[int, ClassificationResult]:
+    def classify_pr(
+        self,
+        repository: str,
+        pr_repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        independently_unrelated: bool = False,
+    ) -> tuple[int, ClassificationResult]:
         self.calls += 1
         return self.issue_number, self.result
 
@@ -215,14 +222,68 @@ def test_unavailable_ledger_blocks_human_and_bot_prs(tmp_path: Path) -> None:
     adapter.observe_candidate.assert_not_called()
 
 
-def test_empty_ledger_allows_pr_with_no_retained_association() -> None:
+def test_empty_ledger_does_not_infer_unrelated_ownership_from_empty_history() -> None:
     adapter = Mock()
     adapter.store.has_retired_pr_association.return_value = False
     ledger = Mock(list_issue_numbers=Mock(return_value=()))
 
     _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 50)
-    assert result.classification is ArtifactClassification.LEGACY
-    assert result.mutation_allowed is True
+    assert result.classification is ArtifactClassification.BLOCKED
+    assert result.mutation_allowed is False
+
+
+def test_recreated_empty_history_fences_ambiguous_pr_at_production_boundaries(tmp_path: Path, monkeypatch) -> None:
+    """REQ-002/006: two empty stores cannot authorize ingress or merge."""
+    from auto_coder.jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
+    from auto_coder.jules_competition_ledger import JulesCompetitionLedger
+    from auto_coder.merge_operation_state import MergeOperationStore
+    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.speculative_jules_lifecycle import RetiredJulesReader
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repository = "owner/repo"
+    pr = {
+        "number": 59,
+        "state": "open",
+        "body": "",
+        "changed_files": 1,
+        "user": {"login": "octocat", "type": "User"},
+        "head": {"repo": {"full_name": repository}, "ref": "ambiguous", "sha": "head-59"},
+        "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
+    }
+    ledger = JulesCompetitionLedger(tmp_path / "empty-ledger.db")
+    store = CandidateObservationStore(tmp_path / "empty-observations.db")
+    github = Mock(token="token")
+    service = SpeculativeJulesLifecycle(
+        RefreshingSpeculativeClassifier(
+            JulesCandidateObservationAdapter(ledger, store, RetiredJulesReader(), github),
+            ledger,
+        ),
+        SpeculativeCleanupStore(tmp_path / "cleanup-empty.db"),
+    )
+    configure_speculative_jules_lifecycle(service)
+    try:
+        ingress = process_pull_request(github, AutomationConfig(), repository, dict(pr))
+        assert ingress.outcome is PRProcessingOutcome.DEFERRED
+        assert "cannot be reconciled from empty history" in ingress.actions_taken[0]
+
+        metadata_api = Mock()
+        metadata_api.pulls.get.return_value = dict(pr)
+        outbound_api = Mock()
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch(
+                "auto_coder.merge_operation_state.get_merge_operation_store",
+                return_value=MergeOperationStore(db_path=tmp_path / "merge-operations-empty.db"),
+            ),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+        ):
+            assert _merge_pr(repository, 59, {}, AutomationConfig(), github_client=github) is False
+        outbound_api.pulls.merge.assert_not_called()
+    finally:
+        configure_speculative_jules_lifecycle(None)
 
 
 def test_unavailable_ledger_never_infers_unrelated_ownership_from_absence() -> None:
@@ -233,6 +294,104 @@ def test_unavailable_ledger_never_infers_unrelated_ownership_from_absence() -> N
     _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 50)
     assert result.classification is ArtifactClassification.BLOCKED
     assert result.mutation_allowed is False
+
+
+def test_unavailable_ledger_allows_durably_attributed_codex_pr_at_production_boundaries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """REQ-005/006: durable Codex proof survives ingress and final merge fences."""
+    from auto_coder.automation_config import EmptyPRResult
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+    from auto_coder.codex_pr_attribution import AttributionDisposition, CodexPrAttributionRepository
+    from auto_coder.jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
+    from auto_coder.merge_operation_state import MergeOperationStore
+    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.speculative_jules_lifecycle import RetiredJulesReader
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repository = "owner/repo"
+    pr_number = 60
+    issue_number = 605
+    CloudRunRepository(repository).save(
+        CloudRun(
+            repository,
+            issue_number,
+            0,
+            "codex-cloud",
+            task_id="task_e_verified60",
+            backend_name="codex-cloud",
+            submission_outcome="accepted",
+            launch_identity="launch-60",
+            publication_head_repository=repository,
+            publication_head_ref="codex-feature",
+        )
+    )
+    pr = {
+        "number": pr_number,
+        "state": "open",
+        "body": "Closes #605\nhttps://chatgpt.com/codex/tasks/task_e_verified60",
+        "changed_files": 0,
+        "user": {"login": "octocat", "type": "User"},
+        "head": {"repo": {"full_name": repository}, "ref": "codex-feature", "sha": "head-60"},
+        "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
+    }
+
+    class UnavailableLedger:
+        def list_issue_numbers(self, _repository: str) -> tuple[int, ...]:
+            raise OSError("offline")
+
+    github = Mock(token="token")
+    adapter = JulesCandidateObservationAdapter(
+        UnavailableLedger(),
+        CandidateObservationStore(tmp_path / "observations.db"),
+        RetiredJulesReader(),
+        github,
+    )
+    service = SpeculativeJulesLifecycle(
+        RefreshingSpeculativeClassifier(adapter, UnavailableLedger()),
+        SpeculativeCleanupStore(tmp_path / "cleanup.db"),
+    )
+    configure_speculative_jules_lifecycle(service)
+    try:
+        with (
+            patch(
+                "auto_coder.pr_processor._reject_unsafe_codex_cloud_pr",
+                return_value=SimpleNamespace(closed=False, metadata_error=None, authoritative_pr_data=None),
+            ),
+            patch("auto_coder.pr_processor._link_codex_cloud_pr_to_issue", return_value=None),
+            patch(
+                "auto_coder.pr_processor._close_empty_pr",
+                return_value=EmptyPRResult(closed=True, actions=["ordinary empty-PR effect"]),
+            ) as empty_effect,
+        ):
+            ingress = process_pull_request(github, AutomationConfig(), repository, dict(pr))
+        assert ingress.priority == "close"
+        assert ingress.actions_taken == ["ordinary empty-PR effect"]
+        empty_effect.assert_called_once()
+        assert CodexPrAttributionRepository(repository).get(pr_number).disposition is AttributionDisposition.VERIFIED
+
+        metadata_api = Mock()
+        metadata_api.pulls.get.return_value = dict(pr)
+        outbound_api = Mock()
+        outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged-sha"}
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch(
+                "auto_coder.merge_operation_state.get_merge_operation_store",
+                return_value=MergeOperationStore(db_path=tmp_path / "merge-operations-codex.db"),
+            ),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
+            patch("auto_coder.pr_processor._close_linked_issues"),
+            patch("auto_coder.pr_processor._archive_jules_session"),
+        ):
+            github.get_issue.return_value = {"state": "open", "body": "ordinary codex issue"}
+            assert _merge_pr(repository, pr_number, {}, AutomationConfig(), github_client=github) is True
+        outbound_api.pulls.merge.assert_called_once_with("owner", "repo", pr_number, merge_method="squash", sha="head-60")
+    finally:
+        configure_speculative_jules_lifecycle(None)
 
 
 def test_selected_association_does_not_override_an_unreadable_namespace() -> None:

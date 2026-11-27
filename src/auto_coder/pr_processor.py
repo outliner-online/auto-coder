@@ -3556,6 +3556,9 @@ def _get_review_thread_gate_state(
 
 def _record_codex_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> None:
     """Reevaluate PR attribution without authorizing any provider effect."""
+    # Never accept a marker supplied by a caller or a stale metadata object.
+    # Only the durable resolver below may establish unrelated ownership.
+    pr_data.pop("_verified_codex_pr_origin", None)
     try:
         from .cloud_run import CloudRunRepository
         from .codex_pr_attribution import CodexPrAttributionRepository, resolve_codex_pr_origin
@@ -3629,6 +3632,11 @@ def _process_pull_request_impl(
         )
 
         pr_number = pr_data["number"]
+
+        # Resolve durable non-Jules ownership before the historical lifecycle
+        # fence. This is a read-only attribution lookup; it cannot perform a
+        # provider or GitHub mutation.
+        _record_codex_pr_attribution(repo_name, pr_data)
 
         # Competition authority is checked before branch recovery, empty/stale
         # cleanup, labels, CI, repair, fallback, merge, or provider continuation.
@@ -13280,6 +13288,11 @@ def _merge_pr(
         except Exception as e:
             logger.error(f"Could not read PR #{pr_number} before merge: {e}")
             return False
+
+        # The strict, freshly-read PR must independently reestablish Codex
+        # ownership before an unavailable or recreated Jules history can be
+        # treated as unrelated at the final mutation boundary.
+        _record_codex_pr_attribution(repo_name, pr_info)
 
         # The ingress classification is not merge authority: selection or
         # invalidation may change while CI/review work is running.  Re-read the

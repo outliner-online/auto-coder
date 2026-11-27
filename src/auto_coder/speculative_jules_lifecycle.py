@@ -20,7 +20,14 @@ from .jules_candidate_observation import ArtifactClassification, ClassificationR
 class SpeculativeClassifier(Protocol):
     def classify(self, repository: str, issue_number: int, pr_repository: str, pr_number: int) -> ClassificationResult: ...
 
-    def classify_pr(self, repository: str, pr_repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> tuple[Optional[int], ClassificationResult]: ...
+    def classify_pr(
+        self,
+        repository: str,
+        pr_repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        independently_unrelated: bool = False,
+    ) -> tuple[Optional[int], ClassificationResult]: ...
 
     def selected_pr_number(self, repository: str, issue_number: int, generation_id: str) -> Optional[int]: ...
 
@@ -129,7 +136,14 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
         pr_data: Optional[Mapping[str, object]] = None,
     ) -> LifecycleDecision:
-        issue_number, result = self.classifier.classify_pr(repository, repository, pr_number, hinted_issue_numbers)
+        independently_unrelated = bool(pr_data is not None and isinstance(pr_data.get("_verified_codex_pr_origin"), str) and pr_data.get("_verified_codex_pr_origin"))
+        issue_number, result = self.classifier.classify_pr(
+            repository,
+            repository,
+            pr_number,
+            hinted_issue_numbers,
+            independently_unrelated,
+        )
         if result.classification is ArtifactClassification.LEGACY:
             return LifecycleDecision()
         if result.classification is ArtifactClassification.SELECTED:
@@ -151,7 +165,14 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
     ) -> LifecycleDecision:
         """Reestablish fresh selected-pair authority at the merge mutation boundary."""
-        issue_number, result = self.classifier.classify_pr(repository, repository, pr_number, hinted_issue_numbers)
+        independently_unrelated = bool(isinstance(pr_data.get("_verified_codex_pr_origin"), str) and pr_data.get("_verified_codex_pr_origin"))
+        issue_number, result = self.classifier.classify_pr(
+            repository,
+            repository,
+            pr_number,
+            hinted_issue_numbers,
+            independently_unrelated,
+        )
         if result.classification is ArtifactClassification.LEGACY:
             return LifecycleDecision()
         if issue_number is None or result.classification is not ArtifactClassification.SELECTED:
@@ -194,7 +215,14 @@ class RefreshingSpeculativeClassifier:
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
             )
 
-    def classify_pr(self, repository: str, pr_repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> tuple[Optional[int], ClassificationResult]:
+    def classify_pr(
+        self,
+        repository: str,
+        pr_repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        independently_unrelated: bool = False,
+    ) -> tuple[Optional[int], ClassificationResult]:
         try:
             retained_association = self.adapter.store.has_retired_pr_association(repository, pr_repository, pr_number)  # type: ignore[attr-defined]
         except Exception as exc:
@@ -205,17 +233,19 @@ class RefreshingSpeculativeClassifier:
         try:
             ledger_issues = self.ledger.list_issue_numbers(repository)  # type: ignore[attr-defined]
         except Exception as exc:
+            if independently_unrelated:
+                return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
             )
         issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
         if not issue_numbers:
-            if not retained_association:
+            if independently_unrelated:
                 return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
-                diagnostics=("retired Jules ownership cannot be reconciled without ledger namespaces or an Issue association",),
+                diagnostics=("retired Jules ownership cannot be reconciled from empty history",),
             )
         classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number)) for issue in issue_numbers)
         relevant = tuple(item for item in classified if item[1].classification is not ArtifactClassification.LEGACY)
