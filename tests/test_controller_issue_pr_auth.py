@@ -116,6 +116,7 @@ def test_uncertain_deployment_approval_is_not_repeated_after_renewal():
     requests = []
 
     def send(method, url, **kwargs):
+        method = method.upper()
         requests.append((method, url, kwargs["headers"]["Authorization"]))
         request = httpx.Request(method, url)
         if method == "POST":
@@ -131,8 +132,12 @@ def test_uncertain_deployment_approval_is_not_repeated_after_renewal():
     with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
         for _ in range(2):
             assert not check_github_actions_and_exit_if_in_progress(
-                "owner/repo", {"number": 7}, AutomationConfig(), github_client=client,
-                switch_branch_on_in_progress=False, github_checks=checks,
+                "owner/repo",
+                {"number": 7},
+                AutomationConfig(),
+                github_client=client,
+                switch_branch_on_in_progress=False,
+                github_checks=checks,
             )
 
     assert len([request for request in requests if request[0] == "POST"]) == 1
