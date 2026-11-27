@@ -73,6 +73,23 @@ def test_new_read_phase_changes_authority_identity_without_changing_provider_fac
     assert api.checks.reads == 2
 
 
+def test_personal_clients_do_not_share_observation_in_one_read_phase(monkeypatch):
+    from auto_coder.automation_config import AutomationConfig
+    from auto_coder.util.gh_cache import GitHubClient
+    from auto_coder.util.github_action import _check_github_actions_status
+
+    first_api = SimpleNamespace(actions=Actions(), checks=Checks())
+    second_api = SimpleNamespace(actions=Actions(), checks=Checks())
+    clients = [GitHubClient(token="first"), GitHubClient(token="second")]
+    monkeypatch.setattr(GitHubClient, "api_for", lambda self, *args, **kwargs: first_api if self is clients[0] else second_api)
+    pr = {"number": 12, "head": {"sha": "head"}}
+    with ci_read_phase("personal-isolation"):
+        _check_github_actions_status("owner/repo", pr, AutomationConfig(), github_client=clients[0])
+        _check_github_actions_status("owner/repo", pr, AutomationConfig(), github_client=clients[1])
+    assert first_api.actions.reads == second_api.actions.reads == 1
+    assert first_api.checks.reads == second_api.checks.reads == 1
+
+
 def test_partial_source_never_becomes_complete_or_cached_success():
     api = SimpleNamespace(actions=Actions(), checks=Checks())
     api.actions.list_workflow_runs_for_repo = lambda *args, **kwargs: {"wrong": []}

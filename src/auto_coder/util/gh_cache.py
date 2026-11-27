@@ -1072,6 +1072,8 @@ class GitHubClient:
         repository and effective permission scope rather than token bytes.
         """
         credential = self._credential_for(repo_name, dict(required_permissions or {}))
+        if credential.mode == "personal":
+            return hashlib.sha256(repr((credential.mode, credential.api_origin, repo_name, credential.permissions, credential.token)).encode("utf-8")).hexdigest()
         return credential.authority_key or hashlib.sha256(repr((credential.mode, credential.api_origin, repo_name, credential.permissions)).encode("utf-8")).hexdigest()
 
     @retry_with_backoff()

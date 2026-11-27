@@ -110,8 +110,8 @@ def test_local_pr_repair_receives_failure_beyond_first_page(tmp_path, monkeypatc
     repair_actions.resulting_head = "b" * 40
     repair_actions.synchronized = True
     with ExitStack() as stack:
-        stack.enter_context(patch("auto_coder.util.github_action.GitHubClient"))
-        stack.enter_context(patch("auto_coder.util.github_action.get_ghapi_client", return_value=api))
+        stack.enter_context(patch("auto_coder.util.github_action.GitHubClient.get_instance", side_effect=AssertionError("unexpected singleton")))
+        get_api = stack.enter_context(patch("auto_coder.util.github_action.get_ghapi_client", return_value=api))
         for name, value in {
             "_is_pr_review_thread_gate_enabled": False,
             "_apply_review_adjudication_effects": ([], False),
@@ -130,6 +130,7 @@ def test_local_pr_repair_receives_failure_beyond_first_page(tmp_path, monkeypatc
         actions = _handle_pr_merge(client, "owner/repo", pr, config, {})
 
     assert "GitHub Actions checks failed for PR #5467: 1 failed" in actions
+    get_api.assert_called_once_with(client.token)
     assert "Repair invoked" in actions
     assert not any("No specific failed checks" in action for action in actions)
     assert summary.call_args.args[2][0]["job_id"] == 101

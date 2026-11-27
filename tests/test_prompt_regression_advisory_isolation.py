@@ -104,6 +104,11 @@ def test_generated_report_requires_exact_bot_and_github_identity(get_api: MagicM
     comment = {"user": {"login": "github-actions[bot]"}, "body": body}
 
     assert is_verified_prompt_regression_advisory_comment(REPO, 17, HEAD, comment) is True
+    injected = MagicMock()
+    github_client.get_instance.reset_mock()
+    assert is_verified_prompt_regression_advisory_comment(REPO, 17, HEAD, comment, github_client=injected) is True
+    github_client.get_instance.assert_not_called()
+    get_api.assert_called_with(injected.token)
     assert is_verified_prompt_regression_advisory_comment(REPO, 17, HEAD, {**comment, "user": {"login": "human"}}) is False
     foreign = dict(identity, repository="foreign/repo")
     assert (

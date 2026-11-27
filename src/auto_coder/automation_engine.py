@@ -6399,7 +6399,7 @@ class AutomationEngine:
 
                         pr_head_sha = str(pr_data.get("head", {}).get("sha") or "")
                         for comment in comments:
-                            if is_verified_prompt_regression_advisory_comment(repo_name, pr_number, pr_head_sha, comment):
+                            if is_verified_prompt_regression_advisory_comment(repo_name, pr_number, pr_head_sha, comment, github_client=self.github):
                                 continue
                             user = comment.get("user")
                             if user and user.get("login") != "jules":

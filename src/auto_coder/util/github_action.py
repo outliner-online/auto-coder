@@ -151,6 +151,7 @@ def is_verified_prompt_regression_advisory_comment(
     pr_number: int,
     head_sha: str,
     comment: object,
+    github_client: Optional[GitHubClient] = None,
 ) -> bool:
     """Verify the narrowly specified generated advisory comment identity.
 
@@ -183,7 +184,7 @@ def is_verified_prompt_regression_advisory_comment(
     try:
         run_id = int(identity["run_id"])
         run_attempt = int(identity["run_attempt"])
-        client = GitHubClient.get_instance()
+        client = github_client or GitHubClient.get_instance()
         api = _ci_api_for(client, repo_name, required_permissions={"actions": "read"})
         owner, repo = repo_name.split("/")
         run = api.actions.get_workflow_run(owner, repo, run_id)
@@ -844,6 +845,7 @@ def _check_github_actions_status_from_history(
 def get_detailed_checks_from_history(
     status_result: GitHubActionsStatusResult,
     repo_name: str,
+    github_client: Optional[GitHubClient] = None,
 ) -> DetailedChecksResult:
     """Get detailed checks information from run IDs using API.
 
@@ -878,7 +880,7 @@ def get_detailed_checks_from_history(
 
             # Get jobs for this run using GhApi
             try:
-                client = GitHubClient.get_instance()
+                client = github_client or GitHubClient.get_instance()
                 api = _ci_api_for(client, repo_name, required_permissions={"actions": "read"})
                 owner, repo = repo_name.split("/")
 

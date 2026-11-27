@@ -102,6 +102,13 @@ def test_ci_authority_namespace_is_stable_across_token_renewal():
     assert "installation-two" not in second
 
 
+def test_ci_authority_namespace_separates_personal_credentials():
+    first = GitHubClient(token="personal-one")
+    second = GitHubClient(token="personal-two")
+    permissions = {"actions": "read", "checks": "read"}
+    assert first.authority_key_for("owner/repo", required_permissions=permissions) != second.authority_key_for("owner/repo", required_permissions=permissions)
+
+
 def test_linked_pr_reconciliation_uses_installation_for_both_reads(monkeypatch):
     provider = RenewableProvider()
     client = GitHubClient(auth_provider=provider, repository="owner/repo")

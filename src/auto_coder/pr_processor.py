@@ -9067,7 +9067,7 @@ def _handle_pr_merge(
 
         # Step 4: GitHub Actions failed - handle Jules PR feedback loop
         # Fetch detailed checks only when needed to save API calls
-        detailed_checks = get_detailed_checks_from_history(github_checks, repo_name)
+        detailed_checks = get_detailed_checks_from_history(github_checks, repo_name, github_client=github_client)
         failed_checks = detailed_checks.failed_checks
         actions.append(f"GitHub Actions checks failed for PR #{pr_number}: {len(failed_checks)} failed")
 
