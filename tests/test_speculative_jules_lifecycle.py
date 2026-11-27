@@ -452,6 +452,105 @@ def test_durable_claude_and_local_origins_survive_unavailable_ledger(
         assert service.evaluate_merge_authority(repository, pr["number"], pr, {}).allow_ordinary_processing
 
 
+@pytest.mark.parametrize("origin", ["claude", "local"])
+def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries(
+    tmp_path: Path,
+    monkeypatch,
+    origin: str,
+) -> None:
+    """REQ-005/006: production derives non-Jules proof at both PR gates."""
+    from auto_coder.automation_config import EmptyPRResult
+    from auto_coder.cloud_manager import CloudManager, CloudTaskBinding
+    from auto_coder.jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
+    from auto_coder.merge_operation_state import MergeOperationStore
+    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.speculative_jules_lifecycle import RetiredJulesReader
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("auto_coder.cloud_manager.Path.home", lambda: tmp_path)
+    repository = "owner/repo"
+    pr_number = 63 if origin == "claude" else 64
+    issue_number = 606 if origin == "claude" else 607
+    head_ref = f"{origin}-feature"
+    body = f"Closes #{issue_number}"
+    # Attribution comes from the durable exact-PR binding, not author type.
+    # Keep the merge otherwise eligible so this test isolates the Jules fence.
+    user = {"login": "octocat", "type": "User"}
+    if origin == "claude":
+        CloudManager(repository).ensure_binding(
+            pr_number,
+            CloudTaskBinding("claude-routine", "session-production", "claude-routine"),
+        )
+    else:
+        body += "\n<!-- auto-coder:local -->"
+        user = {"login": "octocat", "type": "User"}
+    pr = {
+        "number": pr_number,
+        "state": "open",
+        "body": body,
+        "changed_files": 0,
+        "user": user,
+        "head": {"repo": {"full_name": repository}, "ref": head_ref, "sha": f"head-{pr_number}"},
+        "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
+    }
+    assert "_verified_non_jules_pr_origin" not in pr
+
+    class UnavailableLedger:
+        def list_issue_numbers(self, _repository: str) -> tuple[int, ...]:
+            raise OSError("offline")
+
+    github = Mock(token="token")
+    adapter = JulesCandidateObservationAdapter(
+        UnavailableLedger(),
+        CandidateObservationStore(tmp_path / f"observations-{origin}.db"),
+        RetiredJulesReader(),
+        github,
+    )
+    configure_speculative_jules_lifecycle(
+        SpeculativeJulesLifecycle(
+            RefreshingSpeculativeClassifier(adapter, UnavailableLedger()),
+            SpeculativeCleanupStore(tmp_path / f"cleanup-{origin}.db"),
+        )
+    )
+    try:
+        with patch(
+            "auto_coder.pr_processor._close_empty_pr",
+            return_value=EmptyPRResult(closed=True, actions=[f"ordinary {origin} effect"]),
+        ) as empty_effect:
+            ingress = process_pull_request(github, AutomationConfig(), repository, dict(pr))
+        assert ingress.priority == "close"
+        assert ingress.actions_taken == [f"ordinary {origin} effect"]
+        empty_effect.assert_called_once()
+
+        metadata_api = Mock()
+        metadata_api.pulls.get.return_value = dict(pr)
+        outbound_api = Mock()
+        outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged-sha"}
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch(
+                "auto_coder.merge_operation_state.get_merge_operation_store",
+                return_value=MergeOperationStore(db_path=tmp_path / f"merge-{origin}.db"),
+            ),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
+            patch("auto_coder.pr_processor._close_linked_issues"),
+            patch("auto_coder.pr_processor._archive_jules_session"),
+        ):
+            github.get_issue.return_value = {"state": "open", "body": f"ordinary {origin} issue"}
+            assert _merge_pr(repository, pr_number, {}, AutomationConfig(), github_client=github) is True
+        outbound_api.pulls.merge.assert_called_once_with(
+            "owner",
+            "repo",
+            pr_number,
+            merge_method="squash",
+            sha=f"head-{pr_number}",
+        )
+    finally:
+        configure_speculative_jules_lifecycle(None)
+
+
 def test_unavailable_ledger_allows_durably_attributed_codex_pr_at_production_boundaries(
     tmp_path: Path,
     monkeypatch,
