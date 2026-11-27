@@ -71,13 +71,14 @@ def test_dispatch_admission_forwards_the_injected_controller_client():
 
 def test_production_dispatch_uses_controller_auth_and_suppresses_uncertain_retry():
     class DispatchProvider:
-        def __init__(self) -> None:
+        def __init__(self, token) -> None:
             self.requests = []
+            self.token = token
 
         def credential_for(self, repo_name, required_permissions):
             self.requests.append((repo_name, dict(required_permissions)))
             return ControllerCredential(
-                "controller-dispatch-token",
+                self.token,
                 "app",
                 repository=repo_name,
                 permissions=tuple(sorted(required_permissions.items())),
@@ -96,8 +97,10 @@ def test_production_dispatch_uses_controller_auth_and_suppresses_uncertain_retry
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         claims = DispatchClaimStore(root / "claims.db")
-        provider = DispatchProvider()
+        provider = DispatchProvider("controller-dispatch-token")
         controller = GitHubClient(auth_provider=provider, repository="owner/repo")
+        renewed_provider = DispatchProvider("renewed-controller-token")
+        restarted_controller = GitHubClient(auth_provider=renewed_provider, repository="owner/repo")
         pr = {
             "number": 125,
             "head": {"sha": "uncertain-head", "ref": "feature"},
@@ -121,7 +124,7 @@ def test_production_dispatch_uses_controller_auth_and_suppresses_uncertain_retry
         transport.request.side_effect = lose_dispatch_response
         with (
             patch.dict(os.environ, {"AUTO_CODER_INVALIDATION_DB": str(root / "invalidations.db")}),
-            patch("src.auto_coder.pr_processor.get_dispatch_claim_store", return_value=claims),
+            patch("src.auto_coder.pr_processor.get_dispatch_claim_store", return_value=claims) as get_claims,
             patch("src.auto_coder.pr_processor.select_pr_progress", side_effect=decisions),
             patch("src.auto_coder.pr_processor._check_github_actions_status", side_effect=authoritative_ci_status(success=True, ids=[])),
             patch("src.auto_coder.pr_processor.get_detailed_checks_from_history"),
@@ -130,9 +133,12 @@ def test_production_dispatch_uses_controller_auth_and_suppresses_uncertain_retry
             patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport),
             patch.object(controller, "get_pull_request_metadata_strict", return_value=pr),
             patch.object(controller, "get_pr_review_threads_strict", return_value=[]),
+            patch.object(restarted_controller, "get_pull_request_metadata_strict", return_value=pr),
+            patch.object(restarted_controller, "get_pr_review_threads_strict", return_value=[]),
         ):
             first_actions = _handle_pr_merge(controller, "owner/repo", pr, AutomationConfig(), {})
-            second_actions = _handle_pr_merge(controller, "owner/repo", pr, AutomationConfig(), {})
+            get_claims.return_value = DispatchClaimStore(root / "claims.db")
+            second_actions = _handle_pr_merge(restarted_controller, "owner/repo", pr, AutomationConfig(), {})
 
         dispatch_sends = [request for request in sends if request[0] == "POST" and request[1].endswith("/dispatches")]
         assert dispatch_sends == [
@@ -143,5 +149,6 @@ def test_production_dispatch_uses_controller_auth_and_suppresses_uncertain_retry
             )
         ], (first_actions, second_actions, provider.requests)
         assert provider.requests == [("owner/repo", {"actions": "write"})]
+        assert renewed_provider.requests == []
         assert any("outcome=indeterminate" in action for action in first_actions)
         assert any("dispatch already claimed" in action for action in second_actions)
