@@ -247,6 +247,8 @@ class RefreshingSpeculativeClassifier:
         classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number, independently_unrelated)) for issue in issue_numbers)
         relevant = tuple(item for item in classified if item[1].classification is not ArtifactClassification.LEGACY)
         if not relevant:
+            if retained_association:
+                return None, ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("retained association lacks readable ledger authority",))
             return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
         definitive = tuple(item for item in relevant if item[1].classification in (ArtifactClassification.ACTIVE_UNSELECTED, ArtifactClassification.SELECTED, ArtifactClassification.RETIRED))
         if len(definitive) == 1 and len(relevant) == 1:
@@ -339,13 +341,6 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
         ledger_path = default_jules_competition_db_path()
         observation_path = root / "jules_candidate_observations.db"
-        # Absence of both stores means this installation has no retired Jules
-        # history to reconcile.  Avoid manufacturing an ambiguous history by
-        # creating empty databases while inspecting an ordinary PR.  If either
-        # store exists, the classifier remains active and treats missing or
-        # empty counterpart evidence conservatively.
-        if not ledger_path.exists() and not observation_path.exists():
-            return None
         ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
             ledger,

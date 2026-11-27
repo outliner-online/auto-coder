@@ -334,21 +334,55 @@ def test_conflicting_codex_attribution_does_not_authorize_degraded_history(tmp_p
     assert not service.evaluate_merge_authority("owner/repo", 50, pr, {}).allow_ordinary_processing
 
 
-def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
+def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundaries(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from auto_coder.speculative_jules_lifecycle import get_speculative_jules_lifecycle
+    from auto_coder.jules_candidate_observation import CandidateObservationStore
+    from auto_coder.jules_competition_ledger import JulesCompetitionLedger, SpeculativeGenerationBundle
+    from auto_coder.merge_operation_state import MergeOperationStore
+    from auto_coder.pr_processor import _merge_pr
 
     monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    ledger_path = tmp_path / ".auto-coder" / "jules_competition.db"
+    observation_path = tmp_path / "runtime" / "state" / "jules_candidate_observations.db"
+    ledger = JulesCompetitionLedger(ledger_path)
+    ledger.create_generation("owner/repo", 7, "create", 0, SpeculativeGenerationBundle(candidate_ids=("candidate",), issue_oracle_snapshot="oracle", issue_oracle_fingerprint="fingerprint", source_branch="main"))
+    CandidateObservationStore(observation_path)
+    ledger_path.unlink()
+    observation_path.unlink()
+    github = Mock(token="token")
+    pr = {"number": 59, "state": "open", "body": "", "changed_files": 1, "user": {"login": "octocat", "type": "User"}, "head": {"repo": {"full_name": "owner/repo"}, "ref": "ambiguous", "sha": "head"}, "base": {"repo": {"full_name": "owner/repo"}, "ref": "main", "sha": "base"}}
+    metadata_api = Mock()
+    metadata_api.pulls.get.return_value = dict(pr)
+    outbound_api = Mock()
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is None
-        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
-        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
+        assert process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr)).outcome is PRProcessingOutcome.DEFERRED
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "merge.db")),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+        ):
+            assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
+        outbound_api.pulls.merge.assert_not_called()
     finally:
         configure_speculative_jules_lifecycle(None)
+
+
+def test_retained_association_with_missing_namespace_is_not_unrelated() -> None:
+    adapter = Mock()
+    adapter.store.has_retired_pr_association.return_value = True
+    adapter.classify.return_value = ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
+    ledger = Mock(list_issue_numbers=Mock(return_value=(8,)))
+    ledger.get_namespace_snapshot.return_value.generations = ()
+
+    _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr("owner/repo", "owner/repo", 59, independently_unrelated=True)
+    assert result.classification is ArtifactClassification.BLOCKED
+    assert not result.mutation_allowed
 
 
 def test_durable_claude_and_local_origins_survive_unavailable_ledger(
@@ -762,6 +796,11 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         assert restarted_adapter.store.has_retired_pr_association(repository, repository, 42) is True
         replacement_empty_ledger = JulesCompetitionLedger(tmp_path / "replacement-empty-ledger.db")
         assert replacement_empty_ledger.list_issue_numbers(repository) == ()
+        partial_ledger = JulesCompetitionLedger(tmp_path / "partial-ledger.db")
+        partial_ledger.create_generation(repository, 8, "partial", 0, SpeculativeGenerationBundle(candidate_ids=("other",), issue_oracle_snapshot="other", issue_oracle_fingerprint="other", source_branch="main"))
+        partial_adapter = JulesCandidateObservationAdapter(partial_ledger, restarted_adapter.store, RetiredJulesReader(), github)
+        _, partial_result = RefreshingSpeculativeClassifier(partial_adapter, partial_ledger).classify_pr(repository, repository, 42, independently_unrelated=True)
+        assert partial_result.classification is ArtifactClassification.BLOCKED
         for uncertain_ledger in (UnavailableLedger(), replacement_empty_ledger):
             configure_speculative_jules_lifecycle(
                 SpeculativeJulesLifecycle(

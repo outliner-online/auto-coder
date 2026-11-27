@@ -21,7 +21,5 @@ Positive durable Codex or Claude publication ownership and established local
 publication markers may identify an unrelated PR even when the retired ledger is
 unavailable. Those signals never override a surviving retired-PR association.
 Dependabot identity is accepted only together with its namespaced publication
-branch, rather than from bot authorship alone. A fresh installation with neither
-historical store does not create empty Jules databases while inspecting ordinary
-PRs. Once either store exists, missing, empty, or unavailable counterpart history
-remains fenced unless independent evidence establishes unrelated ownership.
+branch, rather than from bot authorship alone. Missing, empty, or unavailable
+history remains fenced unless independent evidence establishes unrelated ownership.
