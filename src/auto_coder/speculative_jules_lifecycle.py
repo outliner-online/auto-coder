@@ -196,18 +196,15 @@ class RefreshingSpeculativeClassifier:
         self.adapter = adapter
         self.ledger = ledger
 
-    def classify(self, repository: str, issue_number: int, pr_repository: str, pr_number: int) -> ClassificationResult:
+    def classify(self, repository: str, issue_number: int, pr_repository: str, pr_number: int, independently_unrelated: bool = False) -> ClassificationResult:
         try:
             result = self.adapter.classify(repository, issue_number, pr_repository, pr_number)  # type: ignore[attr-defined]
             if result.classification is ArtifactClassification.LEGACY:
                 snapshot = self.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
                 if any(binding.pr_repository.lower() == pr_repository.lower() and binding.pr_number == pr_number for generation in snapshot.generations for candidate in generation.candidates for binding in candidate.bindings):
                     return ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("ledger binding lacks matching observation authority",))
-                if snapshot.generations and not self.adapter.store.has_legacy_membership(repository, pr_repository, pr_number):  # type: ignore[attr-defined]
-                    pr = self.adapter.github.get_pull_request_metadata_strict(pr_repository, pr_number)  # type: ignore[attr-defined]
-                    user = pr.get("user") if isinstance(pr, Mapping) and pr.get("number") == pr_number else None
-                    if not isinstance(user, Mapping) or user.get("type") != "User" or not user.get("login"):
-                        return ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("unresolved retired Jules ownership",))
+                if snapshot.generations and not independently_unrelated and not self.adapter.store.has_legacy_membership(repository, pr_repository, pr_number):  # type: ignore[attr-defined]
+                    return ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("unresolved retired Jules ownership",))
             return result  # type: ignore[no-any-return]
         except Exception as exc:
             return ClassificationResult(
@@ -247,7 +244,7 @@ class RefreshingSpeculativeClassifier:
                 diagnostics=("retired Jules ownership cannot be reconciled from empty history",),
             )
         issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
-        classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number)) for issue in issue_numbers)
+        classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number, independently_unrelated)) for issue in issue_numbers)
         relevant = tuple(item for item in classified if item[1].classification is not ArtifactClassification.LEGACY)
         if not relevant:
             return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
@@ -342,12 +339,6 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
         ledger_path = default_jules_competition_db_path()
         observation_path = root / "jules_candidate_observations.db"
-        # A fresh installation has no retired provider history to fence.  Do
-        # not create empty history files merely by inspecting an ordinary PR:
-        # once either durable store exists, however, even an empty/recreated
-        # store is material evidence and the conservative classifier applies.
-        if not ledger_path.exists() and not observation_path.exists():
-            return None
         ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
             ledger,

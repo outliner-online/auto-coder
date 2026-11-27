@@ -334,19 +334,33 @@ def test_conflicting_codex_attribution_does_not_authorize_degraded_history(tmp_p
     assert not service.evaluate_merge_authority("owner/repo", 50, pr, {}).allow_ordinary_processing
 
 
-def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_missing_history_does_not_disable_the_production_fence(tmp_path: Path, monkeypatch) -> None:
     from auto_coder.speculative_jules_lifecycle import get_speculative_jules_lifecycle
 
     monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is None
-        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
-        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
+        service = get_speculative_jules_lifecycle(Mock())
+        assert service is not None
+        from auto_coder.merge_operation_state import MergeOperationStore
+        from auto_coder.pr_processor import _merge_pr
+
+        pr = {"number": 50, "state": "open", "body": "", "changed_files": 1, "user": {"login": "octocat", "type": "User"}, "head": {"sha": "head"}, "base": {"sha": "base"}}
+        github = Mock(token="token")
+        assert process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr)).outcome is PRProcessingOutcome.DEFERRED
+        metadata_api = Mock()
+        metadata_api.pulls.get.return_value = dict(pr)
+        outbound_api = Mock()
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "merge.db")),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+        ):
+            assert _merge_pr("owner/repo", 50, {}, AutomationConfig(), github_client=github) is False
+        outbound_api.pulls.merge.assert_not_called()
     finally:
         configure_speculative_jules_lifecycle(None)
 
@@ -639,7 +653,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         50: {
             "number": 50,
             "state": "open",
-            "body": "",
+            "body": "<!-- auto-coder:local -->",
             "changed_files": 1,
             "user": {"login": "octocat", "type": "User"},
             "head": {"repo": {"full_name": repository}, "ref": "ordinary", "sha": "head-50"},
@@ -649,7 +663,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
             "number": 51,
             "body": "",
             "changed_files": 1,
-            "user": {"login": "other-automation[bot]", "type": "Bot"},
+            "user": {"login": "other-human", "type": "User"},
             "head": {"repo": {"full_name": repository}, "ref": "unknown", "sha": "head-51"},
             "base": {"repo": {"full_name": repository}, "ref": "main", "sha": "base-sha"},
         },
@@ -694,10 +708,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         assert "stale or invalidated" in stale_selected.actions_taken[0]
         check_ci.assert_not_called()
 
-        # Mixed input: strict human identity proves this PR unrelated while the
-        # candidate remains fenced by the same restarted lifecycle.
-        _, ordinary = restarted.classifier.classify_pr(repository, repository, 50)
-        assert ordinary.classification is ArtifactClassification.LEGACY
+        # A local publication marker establishes the unrelated control.
         ordinary_result = process_pull_request(github, AutomationConfig(), repository, strict_prs[50])
         assert all("Speculative Jules" not in action for action in ordinary_result.actions_taken)
         assert process_pull_request(github, AutomationConfig(), repository, strict_prs[51]).outcome is PRProcessingOutcome.DEFERRED
