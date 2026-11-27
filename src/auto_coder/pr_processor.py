@@ -3591,12 +3591,14 @@ def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) ->
     try:
         from .cloud_manager import CloudManager
 
-        binding = CloudManager(repo_name).read_bindings_strict().get(str(pr_data.get("number")))
-        if binding is not None and binding.provider and binding.provider != "jules" and binding.task_id:
-            pr_data["_verified_non_jules_pr_origin"] = f"{binding.provider}:{binding.task_id}"
-            return
-        if binding is not None:
-            return
+        bindings = CloudManager(repo_name).read_bindings_strict()
+        # Cloud bindings are keyed by Issue, not PR number.
+        sessions = {session for _, session in _extract_session_id_candidates(str(pr_data.get("body") or ""))}
+        for issue_number in _resolve_pr_issue_numbers(repo_name, pr_data, None):
+            binding = bindings.get(str(issue_number))
+            if binding is not None and binding.provider == "claude-routine" and binding.task_id in sessions:
+                pr_data["_verified_non_jules_pr_origin"] = f"{binding.provider}:{binding.task_id}"
+                return
     except Exception as exc:
         logger.warning(f"Cloud PR attribution unavailable for #{pr_data.get('number')}: {type(exc).__name__}")
         return

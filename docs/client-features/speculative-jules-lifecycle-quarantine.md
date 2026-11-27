@@ -17,8 +17,8 @@ unreadable namespace also prevents a selected association in another namespace
 from granting authority. An unrecognized bot author alone does not establish
 that a PR is unrelated to an incomplete competition history.
 
-Positive durable Codex or Claude publication ownership and established local
-publication markers may identify an unrelated PR even when the retired ledger is
+Positive durable Codex publication ownership, a Claude session matching a
+linked Issue binding, and established local publication markers may identify an unrelated PR even when the retired ledger is
 unavailable. Those signals never override a surviving retired-PR association.
 Unavailable, empty, conflicting, or incomplete historical evidence is reported as
 `UNKNOWN` at ingress and final merge, distinct from a known selected candidate

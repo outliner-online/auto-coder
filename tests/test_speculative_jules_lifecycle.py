@@ -453,13 +453,13 @@ def test_durable_claude_and_local_origins_survive_unavailable_ledger(
     monkeypatch.setattr("auto_coder.cloud_manager.Path.home", lambda: tmp_path)
     repository = "owner/repo"
     CloudManager(repository).ensure_binding(
-        61,
+        601,
         CloudTaskBinding("claude-routine", "session_verified61", "claude-routine"),
     )
     prs = (
         {
             "number": 61,
-            "body": "",
+            "body": "Closes #601\nhttps://claude.ai/code/session_verified61",
             "user": {"login": "claude[bot]"},
             "head": {"ref": "claude-feature", "sha": "head-61"},
         },
@@ -511,9 +511,10 @@ def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries
     user = {"login": "octocat", "type": "User"}
     if origin == "claude":
         CloudManager(repository).ensure_binding(
-            pr_number,
+            issue_number,
             CloudTaskBinding("claude-routine", "session-production", "claude-routine"),
         )
+        body += "\nhttps://claude.ai/code/session-production"
     else:
         body += "\n<!-- auto-coder:local -->"
         user = {"login": "octocat", "type": "User"}
@@ -990,3 +991,36 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
 
     github.close_pr.assert_not_called()
     retired_reader.get_session.assert_not_called()
+
+
+def test_issue_binding_number_does_not_authorize_ambiguous_pr(tmp_path: Path, monkeypatch) -> None:
+    from auto_coder.cloud_manager import CloudManager, CloudTaskBinding
+    from auto_coder.jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
+    from auto_coder.pr_processor import _merge_pr
+    from auto_coder.speculative_jules_lifecycle import RetiredJulesReader
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repository = "owner/repo"
+    # This is ownership of issue 59, not ownership of PR 59.
+    CloudManager(repository).ensure_binding(59, CloudTaskBinding("claude-routine", "session-other", "claude-routine"))
+    pr = {"number": 59, "state": "open", "body": "", "changed_files": 1, "user": {"login": "octocat", "type": "User"}, "head": {"ref": "candidate", "sha": "head", "repo": {"full_name": repository}}, "base": {"ref": "main", "sha": "base", "repo": {"full_name": repository}}}
+
+    class UnavailableLedger:
+        def list_issue_numbers(self, _repository: str) -> tuple[int, ...]:
+            raise OSError("offline")
+
+    github = Mock(token="token")
+    ledger = UnavailableLedger()
+    adapter = JulesCandidateObservationAdapter(ledger, CandidateObservationStore(tmp_path / "observations.db"), RetiredJulesReader(), github)
+    configure_speculative_jules_lifecycle(SpeculativeJulesLifecycle(RefreshingSpeculativeClassifier(adapter, ledger), SpeculativeCleanupStore(tmp_path / "cleanup.db")))
+    try:
+        ingress = process_pull_request(github, AutomationConfig(), repository, dict(pr))
+        assert ingress.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in ingress.actions_taken[0]
+        api = Mock()
+        api.pulls.get.return_value = dict(pr)
+        with (patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api), patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False), patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[])):
+            assert _merge_pr(repository, 59, {}, AutomationConfig(), github_client=github) is False
+        api.pulls.merge.assert_not_called()
+    finally:
+        configure_speculative_jules_lifecycle(None)
