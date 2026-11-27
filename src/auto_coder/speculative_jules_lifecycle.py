@@ -84,11 +84,9 @@ class LifecycleDecision:
 class SpeculativeCleanupStore:
     """Durable close obligations; retirement is recorded before GitHub mutation."""
 
-    def __init__(self, path: Path, *, initialize: bool = True):
+    def __init__(self, path: Path):
         self.path = path
         self._lock = threading.RLock()
-        if not initialize:
-            return
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS cleanup (
@@ -396,11 +394,13 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         cleanup_path = default_cleanup_path()
         # Migrate pre-marker installations while at least one historical store
         # is still observable.  The marker then keeps the fence active if both
-        # SQLite files are lost later. Missing stores without a marker are also
-        # ambiguous: pre-marker history may have disappeared before migration.
+        # SQLite files are lost later.  Conversely, inspecting an installation
+        # that has never had either store must not manufacture empty history.
         if ledger_path.exists() or observation_path.exists():
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
+        elif not history_marker.exists() and not cleanup_path.exists():
+            return None
         ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
             ledger,
@@ -408,12 +408,10 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
             RetiredJulesReader(),
             github_client,  # type: ignore[arg-type]
         )
-        try:
-            cleanup_store = SpeculativeCleanupStore(cleanup_path)
-        except (OSError, sqlite3.Error):
-            # Preserve unavailable cleanup evidence for the guarded lookup.
-            cleanup_store = SpeculativeCleanupStore(cleanup_path, initialize=False)
-        _lifecycle = SpeculativeJulesLifecycle(RefreshingSpeculativeClassifier(adapter, ledger), cleanup_store)
+        _lifecycle = SpeculativeJulesLifecycle(
+            RefreshingSpeculativeClassifier(adapter, ledger),
+            SpeculativeCleanupStore(cleanup_path),
+        )
     return _lifecycle
 
 
