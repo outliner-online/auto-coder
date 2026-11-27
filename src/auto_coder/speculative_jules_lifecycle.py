@@ -339,6 +339,13 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
         root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
         ledger_path = default_jules_competition_db_path()
         observation_path = root / "jules_candidate_observations.db"
+        # Absence of both stores means this installation has no retired Jules
+        # history to reconcile.  Avoid manufacturing an ambiguous history by
+        # creating empty databases while inspecting an ordinary PR.  If either
+        # store exists, the classifier remains active and treats missing or
+        # empty counterpart evidence conservatively.
+        if not ledger_path.exists() and not observation_path.exists():
+            return None
         ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
             ledger,
