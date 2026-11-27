@@ -136,7 +136,7 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
         pr_data: Optional[Mapping[str, object]] = None,
     ) -> LifecycleDecision:
-        independently_unrelated = bool(pr_data is not None and isinstance(pr_data.get("_verified_codex_pr_origin"), str) and pr_data.get("_verified_codex_pr_origin"))
+        independently_unrelated = bool(pr_data is not None and isinstance(pr_data.get("_verified_non_jules_pr_origin"), str) and pr_data.get("_verified_non_jules_pr_origin"))
         issue_number, result = self.classifier.classify_pr(
             repository,
             repository,
@@ -165,7 +165,7 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
     ) -> LifecycleDecision:
         """Reestablish fresh selected-pair authority at the merge mutation boundary."""
-        independently_unrelated = bool(isinstance(pr_data.get("_verified_codex_pr_origin"), str) and pr_data.get("_verified_codex_pr_origin"))
+        independently_unrelated = bool(isinstance(pr_data.get("_verified_non_jules_pr_origin"), str) and pr_data.get("_verified_non_jules_pr_origin"))
         issue_number, result = self.classifier.classify_pr(
             repository,
             repository,
@@ -233,7 +233,7 @@ class RefreshingSpeculativeClassifier:
         try:
             ledger_issues = self.ledger.list_issue_numbers(repository)  # type: ignore[attr-defined]
         except Exception as exc:
-            if independently_unrelated:
+            if independently_unrelated and not retained_association:
                 return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
@@ -241,7 +241,7 @@ class RefreshingSpeculativeClassifier:
             )
         issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
         if not issue_numbers:
-            if independently_unrelated:
+            if independently_unrelated and not retained_association:
                 return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.BLOCKED,
@@ -337,13 +337,21 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
     global _lifecycle
     if _lifecycle is None and github_client is not None:
         from .jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
-        from .jules_competition_ledger import JulesCompetitionLedger
+        from .jules_competition_ledger import JulesCompetitionLedger, default_jules_competition_db_path
 
         root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
-        ledger = JulesCompetitionLedger()
+        ledger_path = default_jules_competition_db_path()
+        observation_path = root / "jules_candidate_observations.db"
+        # A fresh installation has no retired provider history to fence.  Do
+        # not create empty history files merely by inspecting an ordinary PR:
+        # once either durable store exists, however, even an empty/recreated
+        # store is material evidence and the conservative classifier applies.
+        if not ledger_path.exists() and not observation_path.exists():
+            return None
+        ledger = JulesCompetitionLedger(ledger_path)
         adapter = JulesCandidateObservationAdapter(
             ledger,
-            CandidateObservationStore(root / "jules_candidate_observations.db"),
+            CandidateObservationStore(observation_path),
             RetiredJulesReader(),
             github_client,  # type: ignore[arg-type]
         )

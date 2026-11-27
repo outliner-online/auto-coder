@@ -16,3 +16,11 @@ A ledger binding remains a fence if its separate observation is missing. An
 unreadable namespace also prevents a selected association in another namespace
 from granting authority. An unrecognized bot author alone does not establish
 that a PR is unrelated to an incomplete competition history.
+
+Positive durable Codex or Claude publication ownership and established local
+publication markers may identify an unrelated PR even when the retired ledger is
+unavailable. Those signals never override a surviving retired-PR association.
+Dependabot identity is accepted only together with its namespaced publication
+branch, rather than from bot authorship alone. A fresh installation with neither
+historical store does not create empty Jules databases while inspecting ordinary
+PRs; once either store exists, empty or unavailable history remains fenced.

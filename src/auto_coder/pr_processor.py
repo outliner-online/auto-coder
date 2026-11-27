@@ -3554,11 +3554,12 @@ def _get_review_thread_gate_state(
         return ReviewThreadGateState(lookup_error=str(e))
 
 
-def _record_codex_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> None:
-    """Reevaluate PR attribution without authorizing any provider effect."""
+def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> None:
+    """Reestablish durable non-Jules ownership without provider effects."""
     # Never accept a marker supplied by a caller or a stale metadata object.
     # Only the durable resolver below may establish unrelated ownership.
     pr_data.pop("_verified_codex_pr_origin", None)
+    pr_data.pop("_verified_non_jules_pr_origin", None)
     try:
         from .cloud_run import CloudRunRepository
         from .codex_pr_attribution import CodexPrAttributionRepository, resolve_codex_pr_origin
@@ -3576,11 +3577,44 @@ def _record_codex_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> Non
             pr_data["_codex_pr_attribution_required"] = True
         if result.origin is not None:
             pr_data["_verified_codex_pr_origin"] = result.origin.task_id
+            pr_data["_verified_non_jules_pr_origin"] = f"codex-cloud:{result.origin.task_id}"
         logger.debug(f"Codex PR attribution for #{pr_data.get('number')}: {result.disposition.value} ({result.boundary})")
     except Exception as exc:
         # Attribution is bookkeeping only. Its unavailable result must not
         # alter PR admission, provider routing, or unrelated processing.
         logger.warning(f"Codex PR attribution unavailable for #{pr_data.get('number')}: {type(exc).__name__}")
+
+    if pr_data.get("_verified_non_jules_pr_origin"):
+        return
+    try:
+        from .cloud_manager import CloudManager
+
+        binding = CloudManager(repo_name).read_bindings_strict().get(str(pr_data.get("number")))
+        if binding is not None and binding.provider and binding.provider != "jules" and binding.task_id:
+            pr_data["_verified_non_jules_pr_origin"] = f"{binding.provider}:{binding.task_id}"
+            return
+        if binding is not None:
+            return
+    except Exception as exc:
+        logger.warning(f"Cloud PR attribution unavailable for #{pr_data.get('number')}: {type(exc).__name__}")
+        return
+
+    # These established publication identities combine author and branch/body
+    # evidence; bot authorship or a PR number by itself never authorizes the
+    # bypass.  The caller supplies a current production PR observation.
+    author = (get_pr_author_login(pr_data) or "").casefold()
+    raw_head = pr_data.get("head")
+    head = raw_head if isinstance(raw_head, dict) else {}
+    head_ref = str(head.get("ref") or pr_data.get("headRefName") or pr_data.get("head_branch") or "")
+    if author == "dependabot[bot]" and head_ref.startswith("dependabot/"):
+        pr_data["_verified_non_jules_pr_origin"] = f"dependabot:{head_ref}"
+    elif _is_local_llm_pr(pr_data):
+        pr_data["_verified_non_jules_pr_origin"] = f"local:{head_ref or 'publication-marker'}"
+
+
+def _record_codex_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> None:
+    """Compatibility entry point for callers that request Codex attribution."""
+    _record_non_jules_pr_attribution(repo_name, pr_data)
 
 
 def process_pull_request(
@@ -3636,7 +3670,7 @@ def _process_pull_request_impl(
         # Resolve durable non-Jules ownership before the historical lifecycle
         # fence. This is a read-only attribution lookup; it cannot perform a
         # provider or GitHub mutation.
-        _record_codex_pr_attribution(repo_name, pr_data)
+        _record_non_jules_pr_attribution(repo_name, pr_data)
 
         # Competition authority is checked before branch recovery, empty/stale
         # cleanup, labels, CI, repair, fallback, merge, or provider continuation.
@@ -3678,7 +3712,7 @@ def _process_pull_request_impl(
             return processed_pr
         pr_data = unsafe_branch_result.authoritative_pr_data or pr_data
         processed_pr.pr_data = pr_data
-        _record_codex_pr_attribution(repo_name, pr_data)
+        _record_non_jules_pr_attribution(repo_name, pr_data)
         if unsafe_branch_result.closed:
             processed_pr.actions_taken = unsafe_branch_result.actions
             processed_pr.priority = "close"
@@ -13289,10 +13323,10 @@ def _merge_pr(
             logger.error(f"Could not read PR #{pr_number} before merge: {e}")
             return False
 
-        # The strict, freshly-read PR must independently reestablish Codex
-        # ownership before an unavailable or recreated Jules history can be
+        # The strict, freshly-read PR must independently reestablish non-Jules
+        # ownership before unavailable or recreated Jules history can be
         # treated as unrelated at the final mutation boundary.
-        _record_codex_pr_attribution(repo_name, pr_info)
+        _record_non_jules_pr_attribution(repo_name, pr_info)
 
         # The ingress classification is not merge authority: selection or
         # invalidation may change while CI/review work is running.  Re-read the

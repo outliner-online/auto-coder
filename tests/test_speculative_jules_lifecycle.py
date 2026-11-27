@@ -296,6 +296,83 @@ def test_unavailable_ledger_never_infers_unrelated_ownership_from_absence() -> N
     assert result.mutation_allowed is False
 
 
+def test_positive_non_jules_origin_cannot_override_retained_association() -> None:
+    adapter = Mock()
+    adapter.store.has_retired_pr_association.return_value = True
+
+    for ledger in (
+        Mock(list_issue_numbers=Mock(return_value=())),
+        Mock(list_issue_numbers=Mock(side_effect=OSError("offline"))),
+    ):
+        _, result = RefreshingSpeculativeClassifier(adapter, ledger).classify_pr(
+            "owner/repo",
+            "owner/repo",
+            50,
+            independently_unrelated=True,
+        )
+        assert result.classification is ArtifactClassification.BLOCKED
+        assert result.mutation_allowed is False
+
+
+def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from auto_coder.speculative_jules_lifecycle import get_speculative_jules_lifecycle
+
+    monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    configure_speculative_jules_lifecycle(None)
+    try:
+        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
+        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
+    finally:
+        configure_speculative_jules_lifecycle(None)
+
+
+def test_durable_claude_and_local_origins_survive_unavailable_ledger(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from auto_coder.cloud_manager import CloudManager, CloudTaskBinding
+    from auto_coder.pr_processor import _record_non_jules_pr_attribution
+
+    monkeypatch.setattr("auto_coder.cloud_manager.Path.home", lambda: tmp_path)
+    repository = "owner/repo"
+    CloudManager(repository).ensure_binding(
+        61,
+        CloudTaskBinding("claude-routine", "session_verified61", "claude-routine"),
+    )
+    prs = (
+        {
+            "number": 61,
+            "body": "",
+            "user": {"login": "claude[bot]"},
+            "head": {"ref": "claude-feature", "sha": "head-61"},
+        },
+        {
+            "number": 62,
+            "body": "<!-- auto-coder:local -->",
+            "user": {"login": "octocat"},
+            "head": {"ref": "issue-62", "sha": "head-62"},
+        },
+    )
+    adapter = Mock()
+    adapter.store.has_retired_pr_association.return_value = False
+    ledger = Mock(list_issue_numbers=Mock(side_effect=OSError("offline")))
+    service = SpeculativeJulesLifecycle(
+        RefreshingSpeculativeClassifier(adapter, ledger),
+        SpeculativeCleanupStore(tmp_path / "cleanup-origins.db"),
+    )
+
+    for pr in prs:
+        _record_non_jules_pr_attribution(repository, pr)
+        assert pr["_verified_non_jules_pr_origin"]
+        assert service.evaluate_pr(repository, pr["number"], pr_data=pr).allow_ordinary_processing
+        assert service.evaluate_merge_authority(repository, pr["number"], pr, {}).allow_ordinary_processing
+
+
 def test_unavailable_ledger_allows_durably_attributed_codex_pr_at_production_boundaries(
     tmp_path: Path,
     monkeypatch,
