@@ -224,6 +224,29 @@ def test_unavailable_ledger_blocks_human_and_bot_prs(tmp_path: Path) -> None:
     adapter.observe_candidate.assert_not_called()
 
 
+def test_final_merge_fences_ambiguous_pr_before_exhaustion_comment(tmp_path: Path) -> None:
+    from auto_coder.pr_processor import _merge_pr
+
+    service, _ = lifecycle(tmp_path, ClassificationResult(ArtifactClassification.BLOCKED))
+    configure_speculative_jules_lifecycle(service)
+    github = Mock(token="token")
+    api = Mock()
+    api.pulls.get.return_value = {"number": 50, "body": "", "head": {"sha": "head"}}
+    exhausted = SimpleNamespace(is_exhausted=True, exhausted_blocker_ids=("blocker",))
+    try:
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor.check_pr_repair_exhaustion", return_value=exhausted),
+            patch("auto_coder.pr_processor.publish_exhaustion_comment_deduped") as publish,
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+        ):
+            assert _merge_pr("owner/repo", 50, {}, AutomationConfig(), github_client=github) is False
+        publish.assert_not_called()
+    finally:
+        configure_speculative_jules_lifecycle(None)
+
+
 def test_empty_ledger_does_not_infer_unrelated_ownership_from_empty_history() -> None:
     adapter = Mock()
     adapter.store.has_retired_pr_association.return_value = False
@@ -359,10 +382,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
     # Generations created before retirement did not create the new marker.
     (tmp_path / ".auto-coder" / "jules_competition.db.history-present").unlink()
-    configure_speculative_jules_lifecycle(None)
-    assert get_speculative_jules_lifecycle(Mock()) is not None
-    assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
-    configure_speculative_jules_lifecycle(None)
+    # Both pre-marker stores disappear before the retired factory first runs.
     ledger_path.unlink()
     observation_path.unlink()
     github = Mock(token="token")
@@ -386,7 +406,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         configure_speculative_jules_lifecycle(None)
 
 
-def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
+def test_missing_history_does_not_disable_retired_fence(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -396,10 +416,10 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert get_speculative_jules_lifecycle(Mock()) is not None
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
-        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
+        assert (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
     finally:
         configure_speculative_jules_lifecycle(None)
 
