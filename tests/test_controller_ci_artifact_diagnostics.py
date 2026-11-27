@@ -1,6 +1,6 @@
 import io
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import httpx
 
@@ -10,6 +10,7 @@ from auto_coder.logger_config import setup_logger
 from auto_coder.util.github_action import (
     _create_github_action_log_summary,
     _get_playwright_artifact_logs,
+    filter_actionable_github_checks,
 )
 from auto_coder.util.github_request_outcome import github_http_client
 
@@ -164,7 +165,7 @@ def test_log_summary_threads_injected_client_to_artifacts_sorting_and_job_logs()
         ),
         patch(
             "auto_coder.util.github_action.filter_actionable_github_checks",
-            side_effect=lambda _repo, values: values,
+            side_effect=lambda _repo, values, **_kwargs: values,
         ),
         patch(
             "auto_coder.util.github_action._get_playwright_artifact_logs",
@@ -184,3 +185,55 @@ def test_log_summary_threads_injected_client_to_artifacts_sorting_and_job_logs()
     artifacts.assert_called_once_with("owner/repo", 7, github_client=controller)
     sorting.assert_called_once_with(jobs, "owner", "repo", 7, github_client=controller)
     logs.assert_called_once_with(jobs[0]["html_url"], github_client=controller)
+
+
+def test_advisory_filter_uses_injected_repository_client_without_singleton_fallback():
+    repository = "owner/repo"
+    head = "a" * 40
+
+    def workflow(run_id, path):
+        return {
+            "id": run_id,
+            "run_attempt": 1,
+            "head_sha": head,
+            "path": path,
+            "repository": {"full_name": repository},
+        }
+
+    diagnostic = workflow(30, ".github/workflows/test-impact-observation.yml")
+    ordinary = workflow(20, ".github/workflows/pr-tests.yml")
+    api = MagicMock()
+    api.actions.get_workflow_run.side_effect = [diagnostic, ordinary]
+
+    class Controller:
+        def __init__(self):
+            self.api_calls = MagicMock()
+
+        def api_for(self, repo_name, **kwargs):
+            self.api_calls(repo_name, **kwargs)
+            return api
+
+    controller = Controller()
+    checks = [
+        {
+            "id": check_id,
+            "details_url": f"https://github.com/{repository}/actions/runs/{run_id}/job/{check_id}",
+        }
+        for check_id, run_id in ((31, 30), (21, 20))
+    ]
+
+    with patch(
+        "auto_coder.util.github_action.GitHubClient.get_instance",
+        side_effect=AssertionError("legacy singleton must not be selected"),
+    ):
+        remaining = filter_actionable_github_checks(repository, checks, github_client=controller)
+
+    assert [check["id"] for check in remaining] == [21]
+    controller.api_calls.assert_called_once_with(
+        repository,
+        required_permissions={"actions": "read"},
+    )
+    assert api.actions.get_workflow_run.call_args_list == [
+        call("owner", "repo", 30),
+        call("owner", "repo", 20),
+    ]

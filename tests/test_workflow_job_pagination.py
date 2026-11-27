@@ -1,6 +1,6 @@
 """Regression coverage for CI failures beyond the first REST jobs page."""
 
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
 
 import pytest
 
@@ -52,7 +52,10 @@ def test_run_log_lookup_fetches_failed_job_on_second_page():
     with patch("auto_coder.util.github_action.GitHubClient"), patch("auto_coder.util.github_action.get_ghapi_client", return_value=api), patch("auto_coder.util.github_action.get_github_actions_logs_from_url", return_value="AssertionError: exact width") as job_logs:
         result = get_github_actions_logs_from_url("https://github.com/owner/repo/actions/runs/5467")
     assert result == "AssertionError: exact width"
-    job_logs.assert_called_once_with("https://github.com/owner/repo/actions/runs/5467/job/101")
+    job_logs.assert_called_once_with(
+        "https://github.com/owner/repo/actions/runs/5467/job/101",
+        github_client=ANY,
+    )
 
 
 @pytest.mark.parametrize("second_page", [RuntimeError("page unavailable"), {"total_count": 101, "jobs": []}])

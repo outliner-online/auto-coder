@@ -205,12 +205,16 @@ def is_verified_prompt_regression_advisory_comment(
     )
 
 
-def filter_actionable_github_checks(repo_name: str, checks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def filter_actionable_github_checks(
+    repo_name: str,
+    checks: List[Dict[str, Any]],
+    github_client: Optional[GitHubClient] = None,
+) -> List[Dict[str, Any]]:
     """Fail-closed filtering for correction inputs assembled outside aggregation."""
     if not checks:
         return []
     try:
-        client = GitHubClient.get_instance()
+        client = github_client or GitHubClient.get_instance()
         api = _ci_api_for(client, repo_name, required_permissions={"actions": "read"})
         owner, repo = repo_name.split("/")
         return _exclude_ci_advisories(checks, api, owner, repo)
@@ -1603,7 +1607,7 @@ def _get_github_actions_logs(
     failed_checks: List[Dict[str, Any]] = []
     pr_data: Optional[Dict[str, Any]] = None
     if len(args) >= 1 and isinstance(args[0], list):
-        failed_checks = filter_actionable_github_checks(repo_name, args[0])
+        failed_checks = filter_actionable_github_checks(repo_name, args[0], github_client=github_client)
     if len(args) >= 2 and isinstance(args[1], dict):
         pr_data = args[1]
 
@@ -1632,7 +1636,7 @@ def _get_github_actions_logs(
     if not pr_data:
         pr_data = None
     if len(args) >= 1 and isinstance(args[0], list):
-        failed_checks = filter_actionable_github_checks(repo_name, args[0])
+        failed_checks = filter_actionable_github_checks(repo_name, args[0], github_client=github_client)
     if len(args) >= 2 and isinstance(args[1], dict):
         pr_data = args[1]
     if not failed_checks:
@@ -2545,7 +2549,7 @@ def _create_github_action_log_summary(
     failed_checks: List[Dict[str, Any]] = []
     pr_data: Optional[Dict[str, Any]] = None
     if len(args) >= 1 and isinstance(args[0], list):
-        failed_checks = filter_actionable_github_checks(repo_name, args[0])
+        failed_checks = filter_actionable_github_checks(repo_name, args[0], github_client=github_client)
     if len(args) >= 2 and isinstance(args[1], dict):
         pr_data = args[1]
 
