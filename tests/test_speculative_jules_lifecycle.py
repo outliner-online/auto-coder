@@ -360,8 +360,6 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     configure_speculative_jules_lifecycle(None)
     ledger_path.unlink()
     observation_path.unlink()
-    # Model loss before the first retirement-time marker migration as well.
-    (tmp_path / ".auto-coder" / "jules_competition.db.history-present").unlink()
     github = Mock(token="token")
     pr = {"number": 59, "state": "open", "body": "", "changed_files": 1, "user": {"login": "octocat", "type": "User"}, "head": {"repo": {"full_name": "owner/repo"}, "ref": "ambiguous", "sha": "head"}, "base": {"repo": {"full_name": "owner/repo"}, "ref": "main", "sha": "base"}}
     metadata_api = Mock()
@@ -383,7 +381,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         configure_speculative_jules_lifecycle(None)
 
 
-def test_absent_history_does_not_establish_unrelated_ownership(
+def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -393,9 +391,10 @@ def test_absent_history_does_not_establish_unrelated_ownership(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        service = get_speculative_jules_lifecycle(Mock())
-        assert service is not None
-        assert not service.evaluate_pr("owner/repo", 59, pr_data={"number": 59}).allow_ordinary_processing
+        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
+        assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
+        assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
     finally:
         configure_speculative_jules_lifecycle(None)
 
