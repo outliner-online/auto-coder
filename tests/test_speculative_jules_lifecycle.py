@@ -456,6 +456,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
             ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
         assert ingress.actions_taken == ["ordinary"]
         ordinary_effect.assert_called_once()
+        assert get_speculative_jules_lifecycle(github) is None
 
         metadata_api = Mock()
         metadata_api.pulls.get.return_value = dict(pr)
@@ -484,6 +485,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
         ):
             assert _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
         outbound_api.pulls.merge.assert_called_once()
+        assert get_speculative_jules_lifecycle(github) is None
 
         # Both production boundaries must preserve the fresh-install distinction.
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
