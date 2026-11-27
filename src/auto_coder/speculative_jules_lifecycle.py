@@ -308,15 +308,16 @@ class RefreshingSpeculativeClassifier:
         if result.generation_id is None:
             return False
         try:
-            generation = self.ledger.get_namespace_snapshot(repository, issue_number).get_generation(result.generation_id)  # type: ignore[attr-defined]
-            if generation is None:
+            issue = self.adapter.github.get_issue(repository, issue_number)  # type: ignore[attr-defined]
+            if issue is None:
                 return False
+            issue_data = issue if isinstance(issue, Mapping) else {"state": getattr(issue, "state", None), "body": getattr(issue, "body", None)}
             return self.selected_merge_authorized(
                 repository,
                 issue_number,
                 result,
                 pr_data,
-                {"state": "open", "body": generation.issue_oracle_snapshot},
+                issue_data,
             )
         except Exception:
             return False

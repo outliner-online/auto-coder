@@ -853,6 +853,17 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         assert "stale or invalidated" in stale_selected.actions_taken[0]
         check_ci.assert_not_called()
 
+        # A changed Issue invalidates the selected acceptance even when the
+        # PR head still matches the originally accepted pair.
+        strict_prs[41]["head"]["sha"] = "head-41"
+        github.get_issue.return_value = {"state": "open", "body": "changed requirements"}
+        with patch("auto_coder.pr_processor._check_github_actions_status", return_value=green_ci) as check_ci:
+            stale_issue = process_pull_request(github, AutomationConfig(), repository, strict_prs[41])
+        assert stale_issue.outcome is PRProcessingOutcome.DEFERRED
+        assert "stale or invalidated" in stale_issue.actions_taken[0]
+        check_ci.assert_not_called()
+        strict_prs[41]["head"]["sha"] = "changed-head"
+
         # A local publication marker establishes the unrelated control.
         ordinary_result = process_pull_request(github, AutomationConfig(), repository, strict_prs[50])
         assert all("Speculative Jules" not in action for action in ordinary_result.actions_taken)
