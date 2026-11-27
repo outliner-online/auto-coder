@@ -559,15 +559,18 @@ def test_local_origin_survives_malformed_unrelated_cloud_bindings(
 
 
 @pytest.mark.parametrize("origin", ["claude", "local"])
-def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries(
+@pytest.mark.parametrize("unavailable_source", ["ledger", "observations"])
+def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_boundaries(
     tmp_path: Path,
     monkeypatch,
     origin: str,
+    unavailable_source: str,
 ) -> None:
     """REQ-005/006: production derives non-Jules proof at both PR gates."""
     from auto_coder.automation_config import EmptyPRResult
     from auto_coder.cloud_manager import CloudManager, CloudTaskBinding
     from auto_coder.jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
+    from auto_coder.jules_competition_ledger import JulesCompetitionLedger
     from auto_coder.merge_operation_state import MergeOperationStore
     from auto_coder.pr_processor import _merge_pr
     from auto_coder.speculative_jules_lifecycle import RetiredJulesReader
@@ -612,9 +615,14 @@ def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries
             raise OSError("offline")
 
     github = Mock(token="token")
+    ledger = UnavailableLedger() if unavailable_source == "ledger" else JulesCompetitionLedger(tmp_path / f"ledger-{origin}.db")
+    observations = CandidateObservationStore(tmp_path / f"observations-{origin}.db")
+    if unavailable_source == "observations":
+        observations.path.unlink()
+        observations.path.mkdir()
     adapter = JulesCandidateObservationAdapter(
-        UnavailableLedger(),
-        CandidateObservationStore(tmp_path / f"observations-{origin}.db"),
+        ledger,
+        observations,
         RetiredJulesReader(),
         github,
     )
@@ -626,7 +634,7 @@ def test_unavailable_ledger_allows_claude_and_local_prs_at_production_boundaries
     cleanup.path.mkdir()
     configure_speculative_jules_lifecycle(
         SpeculativeJulesLifecycle(
-            RefreshingSpeculativeClassifier(adapter, UnavailableLedger()),
+            RefreshingSpeculativeClassifier(adapter, ledger),
             cleanup,
         )
     )

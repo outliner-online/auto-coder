@@ -244,21 +244,45 @@ class RefreshingSpeculativeClassifier:
         hinted_issue_numbers: tuple[int, ...] = (),
         independently_unrelated: bool = False,
     ) -> tuple[Optional[int], ClassificationResult]:
+        observations_error: Optional[Exception] = None
         try:
             retained_association = self.adapter.store.has_retired_pr_association(repository, pr_repository, pr_number)  # type: ignore[attr-defined]
         except Exception as exc:
-            return None, ClassificationResult(
-                ArtifactClassification.UNKNOWN,
-                diagnostics=(f"retired Jules observations unavailable: {type(exc).__name__}",),
-            )
+            observations_error = exc
+            retained_association = False
         try:
             ledger_issues = self.ledger.list_issue_numbers(repository)  # type: ignore[attr-defined]
         except Exception as exc:
-            if independently_unrelated and not retained_association:
+            if independently_unrelated and observations_error is None and not retained_association:
                 return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
             return None, ClassificationResult(
                 ArtifactClassification.UNKNOWN,
                 diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
+            )
+        if observations_error is not None:
+            try:
+                ledger_association = any(
+                    binding.pr_repository.lower() == pr_repository.lower() and binding.pr_number == pr_number
+                    for issue_number in ledger_issues
+                    for generation in self.ledger.get_namespace_snapshot(repository, issue_number).generations  # type: ignore[attr-defined]
+                    for candidate in generation.candidates
+                    for binding in candidate.bindings
+                )
+            except Exception as exc:
+                return None, ClassificationResult(
+                    ArtifactClassification.UNKNOWN,
+                    diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
+                )
+            if ledger_association:
+                return None, ClassificationResult(
+                    ArtifactClassification.UNKNOWN,
+                    diagnostics=("ledger binding lacks readable observation authority",),
+                )
+            if independently_unrelated:
+                return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
+            return None, ClassificationResult(
+                ArtifactClassification.UNKNOWN,
+                diagnostics=(f"retired Jules observations unavailable: {type(observations_error).__name__}",),
             )
         if not ledger_issues:
             if independently_unrelated and not retained_association:
