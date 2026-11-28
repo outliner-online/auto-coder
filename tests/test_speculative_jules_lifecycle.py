@@ -387,7 +387,23 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     ledger_path.unlink()
     observation_path.unlink()
     github = Mock(token="token")
-    pr = {"number": 59, "state": "open", "body": "", "changed_files": 1, "user": {"login": "octocat", "type": "User"}, "head": {"repo": {"full_name": "owner/repo"}, "ref": "issue-7", "sha": "head"}, "base": {"repo": {"full_name": "owner/repo"}, "ref": "main", "sha": "base"}}
+    pr = {
+        "number": 59,
+        "state": "open",
+        "body": "",
+        "changed_files": 1,
+        "user": {"login": "google-labs-jules[bot]", "type": "Bot"},
+        "head": {
+            "repo": {"full_name": "owner/repo"},
+            "ref": "issue-7",
+            "sha": "head",
+        },
+        "base": {
+            "repo": {"full_name": "owner/repo"},
+            "ref": "main",
+            "sha": "base",
+        },
+    }
     metadata_api = Mock()
     metadata_api.pulls.get.return_value = dict(pr)
     outbound_api = Mock()
@@ -413,6 +429,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
             "number": 60,
             "body": "<!-- auto-coder:local -->",
             "changed_files": 0,
+            "user": {"login": "octocat", "type": "User"},
             "head": {**pr["head"], "ref": "local-feature", "sha": "local-head"},
         }
         with patch(
@@ -541,7 +558,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is not None
+        assert get_speculative_jules_lifecycle(Mock()) is None
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
@@ -571,7 +588,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
             ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
         assert ingress.actions_taken == ["ordinary"]
         ordinary_effect.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is not None
+        assert get_speculative_jules_lifecycle(github) is None
 
         metadata_api = Mock()
         metadata_api.pulls.get.return_value = dict(pr)
@@ -600,7 +617,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
         ):
             assert _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
         outbound_api.pulls.merge.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is not None
+        assert get_speculative_jules_lifecycle(github) is None
 
         # Both production boundaries must preserve the fresh-install distinction.
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()

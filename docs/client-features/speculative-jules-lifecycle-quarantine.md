@@ -28,9 +28,10 @@ branch, rather than from bot authorship alone. When either historical store is
 present, startup migrates pre-marker installations by recording a durable history
 marker outside SQLite. The marker keeps missing, empty, or unavailable established
 history fenced after later store loss. If every pre-marker store was lost before
-migration, remaining Issue provenance is treated as UNKNOWN unless independent
-non-Jules publication evidence establishes unrelated ownership. This fallback is
-read-only, so a genuinely fresh installation creates no empty history merely by
-inspecting an ordinary PR. If an established observation store cannot be opened,
-startup retains the readable ledger as authority: exact bindings remain fenced
-while independently attributed unrelated PRs keep their ordinary gates.
+migration, strict GitHub Jules identity evidence still activates an UNKNOWN fence
+unless independent non-Jules publication evidence establishes unrelated ownership.
+This fallback is read-only, so a genuinely fresh installation creates no empty
+history or global ambiguity merely by inspecting an ordinary PR. If an established
+observation store cannot be opened, startup retains the readable ledger as
+authority: exact bindings remain fenced while independently attributed unrelated
+PRs keep their ordinary gates.

@@ -65,9 +65,8 @@ class RetiredJulesReader:
 class UnavailableSpeculativeClassifier:
     """Retain an explicit unknown decision when history cannot be opened."""
 
-    def __init__(self, reason: str, *, require_issue_provenance: bool = False):
+    def __init__(self, reason: str):
         self.reason = reason
-        self.require_issue_provenance = require_issue_provenance
 
     def classify(
         self,
@@ -90,11 +89,6 @@ class UnavailableSpeculativeClassifier:
         independently_unrelated: bool = False,
     ) -> tuple[Optional[int], ClassificationResult]:
         if independently_unrelated:
-            return None, ClassificationResult(
-                ArtifactClassification.LEGACY,
-                mutation_allowed=True,
-            )
-        if self.require_issue_provenance and not hinted_issue_numbers:
             return None, ClassificationResult(
                 ArtifactClassification.LEGACY,
                 mutation_allowed=True,
@@ -444,7 +438,11 @@ def configure_speculative_jules_lifecycle(lifecycle: Optional[SpeculativeJulesLi
     _lifecycle = lifecycle
 
 
-def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> Optional[SpeculativeJulesLifecycle]:
+def get_speculative_jules_lifecycle(
+    github_client: Optional[object] = None,
+    *,
+    possible_retired_ownership: bool = False,
+) -> Optional[SpeculativeJulesLifecycle]:
     """Return configured authority, lazily creating the production adapter."""
     global _lifecycle
     if _lifecycle is None and github_client is not None:
@@ -464,17 +462,14 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
         elif not history_marker.exists() and not cleanup_path.exists():
-            # A pre-marker installation can lose every local history file before
-            # its first upgraded startup.  Keep a non-persisting ownership gate
-            # for PRs that still carry Issue provenance; independently verified
-            # non-Jules PRs retain their ordinary gates.  PRs without either
-            # signal remain outside this historical scope so a fresh installation
-            # does not manufacture global ambiguity from absence alone.
+            if not possible_retired_ownership:
+                return None
+            # Strict GitHub identity can outlive every pre-marker local store.
+            # Preserve an UNKNOWN decision for that possible retired artifact
+            # without manufacturing replacement history or globally fencing a
+            # genuinely fresh installation.
             _lifecycle = SpeculativeJulesLifecycle(
-                UnavailableSpeculativeClassifier(
-                    "retired Jules history is unavailable before migration",
-                    require_issue_provenance=True,
-                ),
+                UnavailableSpeculativeClassifier("retired Jules history is unavailable before migration"),
                 SpeculativeCleanupStore(cleanup_path, initialize=False),
             )
             return _lifecycle

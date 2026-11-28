@@ -3679,7 +3679,10 @@ def _process_pull_request_impl(
         # cleanup, labels, CI, repair, fallback, merge, or provider continuation.
         # ``--force`` therefore cannot turn a loser or an uncertain artifact into
         # ordinary work (Issue #2073, REQ-001/REQ-004).
-        speculative = get_speculative_jules_lifecycle(github_client)
+        speculative = get_speculative_jules_lifecycle(
+            github_client,
+            possible_retired_ownership=_is_jules_pr(pr_data),
+        )
         if speculative is not None:
             issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
             decision = speculative.evaluate_pr(repo_name, pr_number, tuple(issue_numbers), pr_data)
@@ -13330,7 +13333,10 @@ def _merge_pr(
         # durable competition immediately inside the final sender and fail
         # closed unless this exact PR is still the selected artifact.  Legacy
         # PRs remain governed by the ordinary merge gates.
-        speculative = get_speculative_jules_lifecycle(client)
+        speculative = get_speculative_jules_lifecycle(
+            client,
+            possible_retired_ownership=_is_jules_pr(pr_info),
+        )
         if speculative is not None:
             issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_info, client)
             issue_data: Dict[str, Any] = {}

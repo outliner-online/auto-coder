@@ -8,6 +8,7 @@ from src.auto_coder.automation_config import AutomationConfig, EmptyPRResult
 from src.auto_coder.automation_engine import AutomationEngine, Candidate
 from src.auto_coder.cloud_run import CloudRun, CloudRunRepository
 from src.auto_coder.pr_processor import (
+    PRProcessingOutcome,
     _close_empty_pr,
     _is_empty_pr,
     _link_jules_pr_to_issue,
@@ -314,7 +315,7 @@ class TestProcessPullRequestEmptyDiff:
     """Tests for process_pull_request with empty PRs."""
 
     @patch("src.auto_coder.pr_processor.increment_attempt")
-    def test_process_pull_request_closes_empty_pr(self, mock_increment):
+    def test_process_pull_request_fences_retired_jules_empty_pr(self, mock_increment):
         github_client = Mock()
         github_client.get_issue.return_value = {"state": "open", "number": 4800}
         mock_increment.return_value = 2
@@ -323,9 +324,11 @@ class TestProcessPullRequestEmptyDiff:
         pr_data = _empty_pr_data_with_commits()
         result = process_pull_request(github_client, config, "owner/repo", pr_data)
 
-        assert result.priority == "close"
-        assert any("Closed empty PR #4971" in action for action in result.actions_taken)
-        github_client.close_pr.assert_called_once()
+        assert result.priority == "defer"
+        assert result.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in result.actions_taken[0]
+        mock_increment.assert_not_called()
+        github_client.close_pr.assert_not_called()
 
 
 class TestAutomationEngineEmptyPRRequeue:
