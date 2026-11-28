@@ -2504,7 +2504,8 @@ class TestAdversarialValidationPRFlow:
         mock_worktree.assert_called_once_with("owner/repo", 100, "abc123456789")
         mock_run_validation.assert_called_once()
         mock_merge_pr.assert_called_once()
-        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", mock_run_validation.return_value)
+        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", mock_run_validation.return_value, new_effect_authorizer=ANY)
+        assert callable(dedicated_reviewer_publication.call_args.kwargs["new_effect_authorizer"])
         observe_activity.assert_called_once()
         assert record_snapshot.call_args.args[2] == {}
         assert "auto-coder-adversarial-validation-attempt" in record_snapshot.call_args.args[1]
@@ -2579,7 +2580,8 @@ class TestAdversarialValidationPRFlow:
         mock_checkout.assert_not_called()
         mock_merge_pr.assert_not_called()
         client.add_comment_to_pr.assert_not_called()
-        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", result)
+        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", result, new_effect_authorizer=ANY)
+        assert callable(dedicated_reviewer_publication.call_args.kwargs["new_effect_authorizer"])
         assert any("Adversarial validation failed for PR #100" in action for action in actions)
         if local:
             from auto_coder.execution_trace import Outcome
@@ -2738,7 +2740,8 @@ class TestAdversarialValidationPRFlow:
         mock_run_validation.assert_called_once()
         mock_merge_pr.assert_not_called()
         client.add_comment_to_pr.assert_not_called()
-        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", mock_run_validation.return_value)
+        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", mock_run_validation.return_value, new_effect_authorizer=ANY)
+        assert callable(dedicated_reviewer_publication.call_args.kwargs["new_effect_authorizer"])
         assert any("Adversarial validation blocked PR #100" in a for a in actions)
 
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)

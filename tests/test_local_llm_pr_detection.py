@@ -14,6 +14,7 @@ from auto_coder.issue_processor import _create_pr_for_issue
 from auto_coder.pr_processor import PRActionList, _handle_pr_merge, _is_local_llm_pr, is_local_llm_pr
 from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_mock_pr_history
 from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
@@ -191,6 +192,7 @@ class TestHandlePrMergeFixLimitation:
         config = AutomationConfig()
         config.AUTO_MERGE = True
         github_client = MagicMock()
+        install_mock_pr_history(github_client, "sha_101")
         github_client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
         github_client.get_pr_comments_strict.return_value = []
         github_client.get_pr_review_threads_strict.return_value = []

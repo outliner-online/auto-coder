@@ -23,6 +23,7 @@ from auto_coder.pr_processor import (
 )
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_accepted_finding_bridge import _simulated_review_source
 
 REPOSITORY = "owner/repo"
@@ -62,6 +63,7 @@ def _client():
     github.get_pr_reviews_strict.return_value = []
     github.get_pull_request.return_value = _pr()
     github.get_pull_request_metadata_strict.return_value = _pr()
+    install_pr_history(github, lambda _repo, _pr: github.get_pull_request_metadata_strict.return_value["head"]["sha"])
     github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(head_ref="feature", head_sha=HEAD, base_ref="main")
     return github
 

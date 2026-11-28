@@ -14,6 +14,7 @@ from auto_coder import pr_processor as processor
 from auto_coder.jules_client import JulesClient
 from auto_coder.pr_processor import CloudTaskOrigin, CloudTaskOriginResolution
 from auto_coder.util.gh_cache import GitHubClient, PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
+from tests.pr_automation_fakes import install_pr_history
 
 REPOSITORY = "owner/repo"
 PR_NUMBER = 42
@@ -64,6 +65,7 @@ def feedback_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Feedbac
     history = Path.home() / ".auto-coder" / "owner" / "repo" / "config.toml"
     history.parent.mkdir(parents=True, exist_ok=True)
     github = GitHubClient("current-token")
+    install_pr_history(github, HEAD)
     provider = JulesClient()
     thread = ReviewThread(id="PRRT_feedback", is_resolved=False, comments=[ReviewThreadComment(database_id=501, author_login="reviewer[bot]", author_id=90, body=FINDING)])
     fixture = FeedbackFixture(github, provider, history, tmp_path / "feedback.json", thread)

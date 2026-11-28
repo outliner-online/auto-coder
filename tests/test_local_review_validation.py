@@ -20,6 +20,7 @@ from auto_coder.pr_processor import _review_feedback_identity
 from auto_coder.review_thread_validation import ClaimedReviewThread
 from auto_coder.util.gh_cache import ReviewThread, ReviewThreadComment
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_local_review_repair import _git, _repository, _request
 
 
@@ -535,6 +536,7 @@ def test_same_commit_actionable_validation_routes_to_local_repair_even_with_forc
     saved = AdversarialValidationResult(result=status, summary="Unresolved original validation", findings=[finding])
     thread = ReviewThread(id="original", comments=[ReviewThreadComment(database_id=1, body=format_adversarial_finding_comment(finding), author_login="auto-coder-reviewer[bot]")])
     client = MagicMock()
+    install_pr_history(client, head)
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
     client.get_pr_comments_strict.return_value = []
     client.get_pr_review_threads_strict.return_value = [thread]

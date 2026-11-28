@@ -23,6 +23,7 @@ from auto_coder.cli_helpers import AdversarialValidationAvailability
 from auto_coder.controller_git_identity import ControllerGitIdentity, ControllerGitIdentityError
 from auto_coder.execution_trace import get_trace_collector
 from auto_coder.github_app_reviewer import ReviewPublicationResult
+from auto_coder.pr_automation_guard import PRCommit, PRCommitHistory
 from auto_coder.reviewer_session_registry import ReviewerSession, ReviewerSessionRegistry
 from auto_coder.utils import CommandExecutor
 from tests.ci_observation_fakes import authoritative_ci_status
@@ -63,6 +64,13 @@ class ReviewFlow:
         metadata = _build_pr_data(self.head(), base_sha=self.base)
         metadata["head"]["repo"] = {"full_name": REPO_NAME}
         return metadata
+
+    def history(self, repository: str, pr_number: int) -> PRCommitHistory:
+        assert (repository, pr_number) == (REPO_NAME, PR_NUMBER)
+        head = self.head()
+        shas = _git(["rev-list", "--reverse", f"{self.base}..{head}"], self.remote).splitlines()
+        commits = tuple(PRCommit(sha, _git(["show", "-s", "--format=%B", sha], self.remote)) for sha in shas)
+        return PRCommitHistory(head, len(commits), commits)
 
     def run(self):
         # GitHub exposes the updated branch through this ref after a push.
@@ -251,6 +259,7 @@ def flow(tmp_path, monkeypatch, _use_real_commands, audit_store, request):
     client.get_pull_request.side_effect = lambda *_args, **_kwargs: scenario.metadata()
     client.get_pull_request_metadata_strict.side_effect = lambda *_args, **_kwargs: scenario.metadata()
     client.get_pull_request_head_sha_strict.side_effect = lambda *_args, **_kwargs: scenario.head()
+    client.get_pr_automation_history_strict.side_effect = scenario.history
     client.get_pr_diff.side_effect = lambda *_args, **_kwargs: _git(["diff", "--binary", base, scenario.head()], repository)
 
     (repository / "sample.py").write_text("staged caller changes\n", encoding="utf-8")

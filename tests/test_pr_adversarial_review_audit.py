@@ -53,6 +53,7 @@ from auto_coder.two_tier_pr_gate import TwoTierPrGate
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from auto_coder.utils import bind_command_execution_cwd, reset_command_execution_cwd
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 REPO_NAME = "owner/repo"
 PR_NUMBER = 4242
@@ -164,6 +165,7 @@ def _build_github_client(head_sha: str, issue_body: str = VALID_ISSUE_BODY, *, r
     client.get_pr_reviews_strict.return_value = []
     client.get_pull_request.return_value = _build_pr_data(head_sha, repo=repo, base_sha=base_sha)
     client.get_pull_request_metadata_strict.return_value = _build_pr_data(head_sha, repo=repo, base_sha=base_sha)
+    install_pr_history(client, lambda _repo, _pr: client.get_pull_request_metadata_strict.return_value["head"]["sha"])
     client.get_pull_request_head_sha_strict.return_value = head_sha
     return client
 
