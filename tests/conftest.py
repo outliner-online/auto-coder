@@ -96,6 +96,27 @@ def _clear_sensitive_env(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _identify_test_runtime_as_confirmed_fresh(monkeypatch, _clear_sensitive_env):
+    """Record explicit post-Jules provenance for the isolated test runtime."""
+    installation_id = "pytest-confirmed-fresh-installation"
+    monkeypatch.setenv("AUTO_CODER_INSTALLATION_ID", installation_id)
+    runtime_root = Path(os.environ["HOME"]) / ".auto-coder"
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(runtime_root))
+    receipt = runtime_root / "state" / "retired_jules_installation_provenance.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "retired-jules-installation-provenance-v1",
+                "state": "confirmed-fresh",
+                "installation_id": installation_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _stub_reviewer_app_identity(monkeypatch):
     """Stub the dedicated adversarial-reviewer App identity for tests.
 
