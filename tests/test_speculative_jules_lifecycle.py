@@ -357,12 +357,9 @@ def test_conflicting_codex_attribution_does_not_authorize_degraded_history(tmp_p
     assert not service.evaluate_merge_authority("owner/repo", 50, pr, {}).allow_ordinary_processing
 
 
-@pytest.mark.parametrize("author,head_ref", [("google-labs-jules[bot]", "issue-7"), ("octocat", "unknown")])
 def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundaries(
     tmp_path: Path,
     monkeypatch,
-    author: str,
-    head_ref: str,
 ) -> None:
     from auto_coder.automation_config import EmptyPRResult
     from auto_coder.jules_candidate_observation import CandidateObservationStore
@@ -395,10 +392,10 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         "state": "open",
         "body": "",
         "changed_files": 1,
-        "user": {"login": author, "type": "Bot" if author.endswith("[bot]") else "User"},
+        "user": {"login": "google-labs-jules[bot]", "type": "Bot"},
         "head": {
             "repo": {"full_name": "owner/repo"},
-            "ref": head_ref,
+            "ref": "issue-7",
             "sha": "head",
         },
         "base": {
@@ -420,6 +417,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
             patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
             patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "merge.db")),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[7]),
             patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
         ):
             assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
@@ -429,8 +427,10 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         unrelated = {
             **pr,
             "number": 60,
-            # Independently established local publication remains eligible.
-            "body": "<!-- auto-coder:local -->",
+            # This ordinary PR has no extra durable attribution marker.  The
+            # preceding request-scoped Jules fallback must not become a
+            # process-wide fence for later PRs.
+            "body": "",
             "changed_files": 0,
             "user": {"login": "octocat", "type": "User"},
             "head": {**pr["head"], "ref": "local-feature", "sha": "local-head"},
@@ -561,7 +561,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is not None
+        assert get_speculative_jules_lifecycle(Mock()) is None
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
@@ -591,7 +591,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
             ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
         assert ingress.actions_taken == ["ordinary"]
         ordinary_effect.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is not None
+        assert get_speculative_jules_lifecycle(github) is None
 
         metadata_api = Mock()
         metadata_api.pulls.get.return_value = dict(pr)
@@ -620,7 +620,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
         ):
             assert _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
         outbound_api.pulls.merge.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is not None
+        assert get_speculative_jules_lifecycle(github) is None
 
         # Both production boundaries must preserve the fresh-install distinction.
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()

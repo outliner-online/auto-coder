@@ -468,8 +468,16 @@ def get_speculative_jules_lifecycle(
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
         elif not history_marker.exists() and not cleanup_path.exists():
-            # No surviving history cannot distinguish a fresh installation from
-            # lost pre-migration history. Require independent origin evidence.
+            if not possible_retired_ownership:
+                return None
+            # Strict GitHub identity can outlive every pre-marker local store.
+            # Preserve an UNKNOWN decision for that possible retired artifact
+            # without manufacturing replacement history or globally fencing a
+            # genuinely fresh installation.
+            # This fallback is evidence about this PR, not evidence about the
+            # installation.  Do not cache it: otherwise one recognizable Jules
+            # PR would make every later PR in this process inherit an UNKNOWN
+            # history decision even though no durable history was discovered.
             return SpeculativeJulesLifecycle(
                 UnavailableSpeculativeClassifier("retired Jules history is unavailable before migration"),
                 SpeculativeCleanupStore(cleanup_path, initialize=False),
