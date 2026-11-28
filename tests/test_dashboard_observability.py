@@ -28,6 +28,7 @@ from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsSta
 from auto_coder.util.github_request_outcome import GitHubRequestContext, github_http_client
 from auto_coder.webhook_server import process_github_payload
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
@@ -551,11 +552,14 @@ def _run_admission_to_view(mock_ui, item_type: str, item_number: int) -> None:
         config.PR_ALLOWLIST = []
     candidate = Candidate(
         type=item_type,
-        data={"number": item_number, "title": "Denied", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.", "labels": [], "head": {"sha": "a" * 40}},
+        data={"number": item_number, "title": "Denied", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior." + ("\n<!-- auto-coder:local -->" if item_type == "pr" else ""), "labels": [], "head": {"sha": "a" * 40}},
         priority=0,
     )
 
-    result = AutomationEngine(MagicMock(), config)._process_single_candidate_unified("owner/repo", candidate, config)
+    github = MagicMock()
+    if item_type == "pr":
+        install_pr_history(github, candidate.data["head"]["sha"])
+    result = AutomationEngine(github, config)._process_single_candidate_unified("owner/repo", candidate, config)
 
     assert result.target_outcome is ExplicitTargetOutcome.SKIPPED
     snapshot = get_trace_collector().get_snapshot(repository="owner/repo", item_type=item_type, item_number=item_number)
@@ -647,6 +651,7 @@ class TestJoinedProductionToView:
         from auto_coder.merge_operation_state import MergeOperation, MergeOperationIdentity, OperationStatus
 
         github = MagicMock()
+        install_pr_history(github, "newer-head")
         github.get_pull_request_metadata_strict.return_value = {"raw": True}
         github.get_pr_details.return_value = {"number": 2201, "head": {"sha": "newer-head"}}
         engine = AutomationEngine(github, AutomationConfig())
@@ -835,6 +840,7 @@ class TestNewOriginCoverage:
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 2701, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
         client = MagicMock()
+        install_pr_history(client, pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
         client.get_pr_review_threads_strict.return_value = []
         scheduler = AdversarialValidationScheduler(concurrency=2)
@@ -1014,17 +1020,19 @@ class TestOutcomeMatrixCoverage:
         config = AutomationConfig()
         pr_data = {"number": 3001, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": "a" * 40}}
         client = MagicMock()
+        install_pr_history(client, pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
         client.get_pr_review_threads_strict.return_value = []
 
         with get_trace_collector().start_execution("owner/repo", "pr", 3001, origin="worker"):
             actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
 
-        assert any("Jules CI repair was attempted" in a for a in actions)
+        assert any("Jules CI repair was not sent" in a for a in actions)
+        mock_send_feedback.assert_not_called()
         snapshot = get_trace_collector().get_snapshot(item_type="pr", item_number=3001)
         repair_events = [e for e in snapshot.events if e.stage_id == "pr.repair-delegation"]
         assert len(repair_events) == 1
-        assert repair_events[0].outcome == Outcome.ACCEPTED_HANDOFF.value
+        assert repair_events[0].outcome == Outcome.SKIPPED.value
         assert repair_events[0].facts["backend"] == "jules"
         # Accepting the continuation is not proof of a repair, passing CI, or
         # a merge (REQ-006 of Issue #1946, REQ-007 of Issue #1948).
@@ -1047,6 +1055,7 @@ class TestOutcomeMatrixCoverage:
             "user": {"login": "google-labs-jules[bot]"},
         }
         github = MagicMock()
+        install_pr_history(github, pr_data["head"]["sha"])
 
         with (
             patch("auto_coder.pr_processor._reject_unsafe_codex_cloud_pr") as unsafe,
@@ -1068,12 +1077,12 @@ class TestOutcomeMatrixCoverage:
                 actions = _handle_pr_merge(github, "owner/repo", pr_data, config, {})
 
         assert actions.repair_result is not None
-        assert actions.repair_result.disposition is RepairDisposition.DEFERRED
+        assert actions.repair_result.disposition is RepairDisposition.REFUSED
         assert actions.repair_result.attempt_started is False
         provider.assert_not_called()
         snapshot = get_trace_collector().get_snapshot(item_type="pr", item_number=3002)
         event = next(event for event in snapshot.events if event.stage_id == "pr.repair-delegation")
-        assert event.outcome == Outcome.DEFERRED.value
+        assert event.outcome == Outcome.SKIPPED.value
         assert event.facts["attempt_started"] is False
         diagram = _mounted_detail(mock_ui, "pr", 3002)
         _assert_required_stage_visible(diagram, "repair delegation")
@@ -1426,6 +1435,7 @@ def test_claude_pr_slot_admission_reaches_detail_view(mock_ui, tmp_path, known_s
     github.get_issue_details.side_effect = lambda issue: issue
     github.get_pull_request.return_value = {"number": 2027, "state": "open"}
     github.get_pr_details.side_effect = lambda pr: pr
+    install_pr_history(github, "a" * 40)
     engine = AutomationEngine(github, config)
     slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
     engine.implementation_slots = slots
@@ -1435,7 +1445,13 @@ def test_claude_pr_slot_admission_reaches_detail_view(mock_ui, tmp_path, known_s
     if active_execution:
         assert slots.start_execution(owner) is not None
     session = "session_recorded" if known_session else "session_unknown"
-    pr = {"number": 2027, "title": "Dashboard", "body": f"https://claude.ai/code/{session}", "user": {"id": 1, "login": "developer"}, "labels": []}
+    from auto_coder.cloud_manager import CloudManager, CloudTaskBinding
+
+    # Publication provenance is independent of an implementation-slot match.
+    # A related-Issue reference provides origin context, not lifecycle ownership.
+    publication_issue = 1993 if known_session else 2993
+    CloudManager("owner/repo").ensure_binding(publication_issue, CloudTaskBinding("claude-routine", session, "claude-routine"))
+    pr = {"number": 2027, "title": "Dashboard", "body": f"Related to #{publication_issue}\nhttps://claude.ai/code/{session}", "user": {"id": 1, "login": "developer"}, "labels": []}
     with patch.object(engine, "_process_single_candidate_reserved", return_value=CandidateProcessingResult("pr", 2027, "Dashboard", True, ["processing reached"])) as dispatch:
         result = engine._process_single_candidate_unified("owner/repo", Candidate("pr", pr, 0), config)
     admitted = known_session and not active_execution
@@ -1547,6 +1563,7 @@ def test_pr_no_commit_checkpoint_reaches_mounted_detail(mock_ui, tmp_path, monke
         "user": {"login": "maintainer"},
     }
     github = MagicMock()
+    install_pr_history(github, data["head"]["sha"])
     github.get_pr_comments.return_value = []
     github.get_pr_comments_strict.return_value = []
     github.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)

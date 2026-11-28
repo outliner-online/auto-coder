@@ -56,6 +56,7 @@ from auto_coder.util.gh_cache import GitHubClient, ReviewThread, ReviewThreadCom
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from auto_coder.utils import CommandResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_mock_pr_history, install_pr_history
 from tests.test_accepted_finding_bridge import _simulated_review_source
 from tests.test_review_thread_closure_receipt import BASE, HEAD, PR_NUMBER, REPOSITORY, THREAD_ID
 from tests.test_review_thread_closure_receipt import receipt_scenario as receipt_scenario
@@ -66,6 +67,7 @@ def controller_github_mock() -> MagicMock:
     """Expose the legacy controller identity for production authority checks."""
     client = MagicMock()
     client.get_authenticated_user_login.return_value = "controller"
+    install_mock_pr_history(client, "original1")
     return client
 
 
@@ -74,6 +76,7 @@ def controller_github_client() -> GitHubClient:
     client = GitHubClient("test-token")
     client.get_authenticated_user_login = MagicMock(return_value="controller")
     client.get_authenticated_controller_identity = lambda *_: ControllerIdentity(client.get_authenticated_user_login(), account_id=2 if client.get_authenticated_user_login() == "implementer" else 20)
+    install_mock_pr_history(client, "original1")
     return client
 
 
@@ -167,6 +170,7 @@ def test_real_thread_closure_reuses_reply_after_pr_publication_failure(receipt_s
         monkeypatch.setattr(StaleReviewThreadRegistry, "record", record_pending)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     client = scenario.client()
+    install_pr_history(client, HEAD)
     issue = {"number": 42, "title": "Retry counter", "body": "## Requirements\nREQ-001: Reset the retry counter before each retry."}
     pr_data = {
         "number": PR_NUMBER,
@@ -307,6 +311,7 @@ def test_real_thread_closure_reuses_reply_after_pr_publication_failure(receipt_s
             registry_path = tmp_path / "reconstructed-process-rollback.json"
             assert not registry_path.exists()
             reconstructed_client = scenario.client()
+            install_pr_history(reconstructed_client, HEAD)
 
             blocked_actions = _handle_pr_merge(reconstructed_client, REPOSITORY, pr_data, config, {})
 
@@ -2108,6 +2113,7 @@ class TestAdversarialValidationPRFlow:
                 return None
 
         client = ManifestChangingClient()
+        install_pr_history(client, "head-h2")
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": "head-h2"}}
         config = AutomationConfig()
         config.AUTO_MERGE = True
@@ -2498,7 +2504,8 @@ class TestAdversarialValidationPRFlow:
         mock_worktree.assert_called_once_with("owner/repo", 100, "abc123456789")
         mock_run_validation.assert_called_once()
         mock_merge_pr.assert_called_once()
-        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", mock_run_validation.return_value)
+        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", mock_run_validation.return_value, new_effect_authorizer=ANY)
+        assert callable(dedicated_reviewer_publication.call_args.kwargs["new_effect_authorizer"])
         observe_activity.assert_called_once()
         assert record_snapshot.call_args.args[2] == {}
         assert "auto-coder-adversarial-validation-attempt" in record_snapshot.call_args.args[1]
@@ -2573,7 +2580,8 @@ class TestAdversarialValidationPRFlow:
         mock_checkout.assert_not_called()
         mock_merge_pr.assert_not_called()
         client.add_comment_to_pr.assert_not_called()
-        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", result)
+        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", result, new_effect_authorizer=ANY)
+        assert callable(dedicated_reviewer_publication.call_args.kwargs["new_effect_authorizer"])
         assert any("Adversarial validation failed for PR #100" in action for action in actions)
         if local:
             from auto_coder.execution_trace import Outcome
@@ -2732,7 +2740,8 @@ class TestAdversarialValidationPRFlow:
         mock_run_validation.assert_called_once()
         mock_merge_pr.assert_not_called()
         client.add_comment_to_pr.assert_not_called()
-        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", mock_run_validation.return_value)
+        dedicated_reviewer_publication.assert_called_once_with("owner/repo", 100, "abc123456789", mock_run_validation.return_value, new_effect_authorizer=ANY)
+        assert callable(dedicated_reviewer_publication.call_args.kwargs["new_effect_authorizer"])
         assert any("Adversarial validation blocked PR #100" in a for a in actions)
 
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
@@ -3585,7 +3594,7 @@ class TestAtomicMergeSHAPrecondition:
         from auto_coder.pr_processor import _merge_pr
 
         mock_api = MagicMock()
-        mock_api.pulls.get.return_value = {"number": 100, "user": {"login": "developer"}}
+        mock_api.pulls.get.return_value = {"number": 100, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "developer"}}
         mock_api.pulls.merge.return_value = {"merged": True, "sha": "mergedsha"}
         mock_get_ghapi.return_value = mock_api
         mock_get_ghapi_adapter.return_value = mock_api
@@ -3640,7 +3649,7 @@ class TestAtomicMergeSHAPrecondition:
         from auto_coder.util.github_request_outcome import DeliveryCertainty, GitHubApiOutcome, GitHubRequestContext, GitHubRequestError, GitHubRequestOutcome, GitHubResponseMetadata, RequestProvenance
 
         mock_api = MagicMock()
-        mock_api.pulls.get.return_value = {"number": 100, "user": {"login": "developer"}, "mergeable": True}
+        mock_api.pulls.get.return_value = {"number": 100, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "developer"}, "mergeable": True}
         # GitHub returns HTTP 409 Conflict when head branch was modified: a
         # synchronous merge PUT 409 means the expected head no longer
         # matches, so the operation is superseded rather than confirmed
@@ -3672,6 +3681,7 @@ class TestAtomicMergeSHAPrecondition:
             )
 
         assert result is False
+        mock_api.pulls.merge.assert_called_once()
         mock_close_issues.assert_not_called()
         mock_archive.assert_not_called()
 
@@ -4815,6 +4825,7 @@ class TestClaimedReviewThreadValidationFlow:
             ],
         )
         client = _closure_client([claimed])
+        install_pr_history(client, head_sha)
         client.get_pull_request_head_sha_strict.return_value = head_sha
         client.get_pr_comments.return_value = []
         client.get_pr_comments_strict = client.get_pr_comments
@@ -4889,6 +4900,7 @@ class TestClaimedReviewThreadValidationFlow:
             ],
         )
         client = _closure_client([claimed])
+        install_pr_history(client, head_sha)
         client.get_pull_request_head_sha_strict.return_value = head_sha
         client.get_pr_comments.return_value = []
         client.get_pr_comments_strict = client.get_pr_comments

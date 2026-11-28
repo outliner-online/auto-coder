@@ -58,6 +58,7 @@ from auto_coder.two_tier_pr_gate import TwoTierPrGate
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
 from auto_coder.util.github_action import GitHubActionsStatusResult, _check_github_actions_status
 from auto_coder.utils import CommandResult
+from tests.pr_automation_fakes import install_mock_pr_history
 from tests.test_accepted_finding_bridge import _simulated_review_source
 
 pytestmark = [pytest.mark.pr_lifecycle_contract, pytest.mark.pr_repair_contract]
@@ -133,11 +134,13 @@ def test_public_processing_preserves_typed_repair_evidence(tmp_path, monkeypatch
     pr_data = {
         "number": PR_NUMBER,
         "title": "Typed repair",
-        "body": "Closes #2501",
+        "body": "<!-- auto-coder:local-llm -->\n\nCloses #2501",
+        "user": {"login": "local-maintainer"},
         "labels": [],
         "head": {"ref": "feature", "sha": H1},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
 
     def take_actions(_client, _repo, _pr, _config, status, **_kwargs):
         status.repair_result = repair_result
@@ -203,6 +206,7 @@ def test_handler_preserves_terminal_optional_base_update_evidence(tmp_path, monk
     update_actions = PRActionList(("base executor completed",))
     update_actions.repair_result = base_result
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
 
     with (
         patch("auto_coder.pr_processor._reject_unsafe_codex_cloud_pr") as unsafe,
@@ -340,6 +344,7 @@ def test_handler_preserves_real_interpreter_newest_attempt_semantics(tmp_path, m
     config.AUTO_MERGE = False
     pr_data = {"number": PR_NUMBER, "body": "Fixes #2503", "labels": [], "head": {"ref": "feature", "sha": H1}}
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
 
     with (
         patch("auto_coder.util.github_action.get_ghapi_client", return_value=MagicMock()),
@@ -379,6 +384,7 @@ def test_direct_processing_routes_conflicts_only_to_authorized_effect_boundary(t
     }
     exhaustion = SimpleNamespace(is_exhausted=True, exhausted_blocker_ids=("conflict",)) if exhausted else None
     client = MagicMock()
+    install_mock_pr_history(client, H1)
 
     remediation_actions = PRActionList(("controlled repair boundary",))
     with (
@@ -417,6 +423,7 @@ def test_public_conflict_facade_preserves_typed_remediation_result(
     config.ENABLE_MERGEABILITY_REMEDIATION = True
     pr_data = {"number": PR_NUMBER, "body": "Closes #2501", "labels": [], "head": {"ref": "issue-2501", "sha": H1}}
     client = MagicMock()
+    install_mock_pr_history(client, H1)
     result = PRRepairResult(disposition, ("wording intentionally unrelated",), reason="typed reason", retry_not_before=retry_not_before)
     remediation = PRActionList(("arbitrary diagnostic",))
     remediation.repair_result = result
@@ -510,6 +517,7 @@ def test_base_update_publication_result_reaches_remediation_consumer(
     successful_push = CommandResult(True, "", "", 0)
     push_result = successful_push if publication == "succeeds" else failed_push
     github_client = MagicMock(token="controlled-token")
+    install_mock_pr_history(github_client, H1)
     github_client.get_pull_request.return_value = api.pulls.get.return_value
     github_client.get_pr_details.return_value = {
         **api.pulls.get.return_value,
@@ -605,6 +613,7 @@ def _run_ci_consumer(snapshot, *, head=H1, remote_head=None, thread_state=None, 
     remote_head = head if remote_head is None else remote_head
     pr_data = {"number": PR_NUMBER, "body": body, "labels": [], "head": {"ref": "feature", "sha": head}}
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=101)
     client.get_authenticated_user_login.return_value = "controller"
     client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = []
@@ -644,7 +653,7 @@ def run_public_ci_consumer(snapshot, *, head, pr_number=PR_NUMBER, thread_state=
     config.pr_review_thread_gate = thread_state is not None
     pr_data = {
         "number": pr_number,
-        "body": "Fixes #99",
+        "body": "<!-- auto-coder:local-llm -->\nFixes #99",
         "labels": [],
         "state": "open",
         "user": {"login": "human"},
@@ -652,6 +661,7 @@ def run_public_ci_consumer(snapshot, *, head, pr_number=PR_NUMBER, thread_state=
         "base": {"ref": "main"},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=101)
     client.get_authenticated_user_login.return_value = "controller"
     client.get_pr_comments.return_value = []
@@ -719,6 +729,7 @@ def test_known_empty_handler_preserves_ci_wait_without_dispatch(tmp_path, monkey
         "head": {"ref": "issue-2503", "sha": H1},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     api = MagicMock()
     api.headers = {}
     api.checks.list_for_ref.return_value = {"check_runs": []}
@@ -872,6 +883,7 @@ def test_green_ci_retains_durable_strong_review_gate(tmp_path, monkeypatch, stro
         "base": {"ref": "main", "sha": "base-1"},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     client.get_pr_review_threads_strict.return_value = []
     client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [{"body": format_adversarial_validation_comment(AdversarialValidationResult(result="PASS"), H1)}]
     client.get_pull_request.return_value = {"head": {"sha": H1}, "base": {"sha": "base-1"}}
@@ -934,6 +946,7 @@ def test_head_change_crosses_observable_final_boundary_before_merge():
     config.pr_review_thread_gate = False
     pr_data = {"number": PR_NUMBER, "body": "Closes #2501", "labels": [], "head": {"ref": "issue-2501", "sha": H1}}
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     cycles = iter(range(20))
 
     def observe_remote(*_args):
@@ -998,6 +1011,7 @@ def test_final_attempt_admission_serializes_newer_and_current_work(tmp_path, reg
     config.ENABLE_ADVERSARIAL_VALIDATION = True
     pr_data = {"number": PR_NUMBER, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": H1}}
     client = MagicMock()
+    install_mock_pr_history(client, H1)
     client.get_pr_review_threads_strict.return_value = []
     client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = [{"body": format_adversarial_validation_comment(AdversarialValidationResult(result="PASS"), H1)}]
     client.get_pull_request.return_value = {"head": {"sha": H1}}
@@ -1067,6 +1081,7 @@ def test_terminal_ci_failure_retains_cloud_owner_without_local_repair(tmp_path, 
         "base": {"ref": "main", "sha": "base-1"},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
 
     requests = []
 
@@ -1124,7 +1139,6 @@ def test_terminal_ci_failure_retains_cloud_owner_without_local_repair(tmp_path, 
             RepairDisposition.DEFERRED,
             "temporary provider wait",
         ),
-        ("jules", None, RepairDisposition.ACCEPTED_OR_UNCERTAIN, "Jules producer does not expose delivery certainty"),
     ],
 )
 def test_public_processing_preserves_cloud_ci_executor_result(
@@ -1149,8 +1163,18 @@ def test_public_processing_preserves_cloud_ci_executor_result(
         "base": {"ref": "main", "sha": "base-1"},
     }
     github = MagicMock(token="controlled-token")
+    install_mock_pr_history(github, H1)
 
     with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "auto_coder.pr_processor._record_non_jules_pr_attribution",
+                side_effect=lambda _repo, data, _client=None: data.__setitem__(
+                    "_verified_non_jules_pr_origin",
+                    "codex-cloud:task_result_owner",
+                ),
+            )
+        )
         unsafe = stack.enter_context(patch("auto_coder.pr_processor._reject_unsafe_codex_cloud_pr"))
         stack.enter_context(patch("auto_coder.pr_processor._close_empty_pr", return_value=SimpleNamespace(closed=False)))
         stack.enter_context(patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=SimpleNamespace(closed=False)))
@@ -1200,6 +1224,8 @@ def test_public_processing_preserves_cloud_ci_executor_result(
 
 def test_controller_reentry_carries_cloud_repair_to_new_head_and_final_merge(tmp_path, monkeypatch):
     """REQ-004/005: discovery, worker handoff, durable ownership and H2 merge stay joined."""
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
     pr_data = {
         "number": PR_NUMBER,
@@ -1207,12 +1233,27 @@ def test_controller_reentry_carries_cloud_repair_to_new_head_and_final_merge(tmp
         "body": "Closes #2501\nhttps://chatgpt.com/codex/tasks/task_joined_lifecycle",
         "labels": [],
         "user": {"login": "chatgpt-codex-connector[bot]"},
-        "head": {"ref": "issue-2501", "sha": H1},
+        "head": {"repo": {"full_name": REPOSITORY}, "ref": "issue-2501", "sha": H1},
         "base": {"ref": "main", "sha": "base-1"},
         "created_at": "2026-01-01T00:00:00Z",
         "mergeable": True,
     }
+    CloudRunRepository(REPOSITORY).save(
+        CloudRun(
+            REPOSITORY,
+            2501,
+            0,
+            "codex-cloud",
+            task_id="task_joined_lifecycle",
+            backend_name="codex-cloud",
+            submission_outcome="accepted",
+            launch_identity="joined-lifecycle-launch",
+            publication_head_repository=REPOSITORY,
+            publication_head_ref="issue-2501",
+        )
+    )
     github = MagicMock(token="controlled-token")
+    install_mock_pr_history(github, H1)
     github.get_open_prs_json.side_effect = lambda _repo: [dict(pr_data, head=dict(pr_data["head"]))]
     github.get_open_issues_json.return_value = []
     github.get_issue.return_value = {"number": 2501}
@@ -1288,7 +1329,7 @@ def test_controller_reentry_carries_cloud_repair_to_new_head_and_final_merge(tmp
         stack.enter_context(patch.object(slots, "reconcile"))
         collection_label.return_value.__enter__.return_value = True
         worker_label.return_value.__enter__.return_value = True
-        unsafe.side_effect = lambda _client, _repo, candidate, _config: SimpleNamespace(closed=False, metadata_error=None, actions=[], authoritative_pr_data=candidate)
+        unsafe.side_effect = lambda _client, _repo, candidate, _config, **_kwargs: SimpleNamespace(closed=False, metadata_error=None, actions=[], authoritative_pr_data=candidate)
         first = next(candidate for candidate in engine._get_candidates(REPOSITORY) if candidate.type == "pr")
         first_result = engine._process_single_candidate_unified(REPOSITORY, first, config)
         reopened = ImplementationSlotRepository(REPOSITORY, 1, slots_path)
@@ -1324,6 +1365,7 @@ def test_terminal_ci_head_change_defers_codex_dispatch_without_provider_effect(t
         "base": {"ref": "main", "sha": "base-1"},
     }
     github = MagicMock(token="controlled-token")
+    install_mock_pr_history(github, H1)
     provider = MagicMock()
     origin = CloudTaskOrigin("codex-cloud", "task_e_ci_owner", provider)
     dispatched = []
@@ -1373,6 +1415,7 @@ def test_terminal_ci_jules_owner_enters_typed_dispatch_once(tmp_path, monkeypatc
         "base": {"ref": "main", "sha": "base-1"},
     }
     github = MagicMock(token="controlled-token")
+    install_mock_pr_history(github, H1)
     requests = []
 
     def capture_dispatch(request, operation):
@@ -1396,12 +1439,12 @@ def test_terminal_ci_jules_owner_enters_typed_dispatch_once(tmp_path, monkeypatc
         unsafe.return_value = SimpleNamespace(metadata_error=None, actions=[], authoritative_pr_data=pr_data, closed=False)
         actions = _handle_pr_merge(github, REPOSITORY, pr_data, config, {})
 
-    producer.assert_called_once()
-    assert len(requests) == 1
-    assert requests[0].origin is RepairOrigin.JULES
-    assert requests[0].owner_identity == "session_jules_ci"
-    assert requests[0].kind.value == "ci_failure"
-    assert "existing Jules helper sent feedback" in actions
+    producer.assert_not_called()
+    assert requests == []
+    assert actions.repair_result is not None
+    assert actions.repair_result.disposition is RepairDisposition.REFUSED
+    assert actions.repair_attempt_started is False
+    assert "Jules CI repair was not sent" in " ".join(actions)
 
 
 def _retire_public_jules_session(repo_name: str, session_id: str) -> None:
@@ -1436,16 +1479,7 @@ def _retire_public_jules_session(repo_name: str, session_id: str) -> None:
 @pytest.mark.parametrize("force", [False, True], ids=["ordinary", "explicit-force"])
 @pytest.mark.parametrize(
     ("scenario", "expected_disposition", "expected_attempt", "expected_outcome"),
-    [
-        ("changed-head", RepairDisposition.DEFERRED, False, Outcome.DEFERRED),
-        ("changed-head-wording", RepairDisposition.DEFERRED, False, Outcome.DEFERRED),
-        ("draining", RepairDisposition.DEFERRED, False, Outcome.DEFERRED),
-        ("retired", RepairDisposition.DEFERRED, False, Outcome.DEFERRED),
-        ("preparation-failed", RepairDisposition.FAILED, False, Outcome.FAILED),
-        ("sent", RepairDisposition.ACCEPTED_OR_UNCERTAIN, True, Outcome.ACCEPTED_HANDOFF),
-        ("response-unknown", RepairDisposition.ACCEPTED_OR_UNCERTAIN, True, Outcome.ACCEPTED_HANDOFF),
-        ("notice-failed", RepairDisposition.ACCEPTED_OR_UNCERTAIN, True, Outcome.ACCEPTED_HANDOFF),
-    ],
+    [("retired", RepairDisposition.REFUSED, False, Outcome.SKIPPED)],
 )
 def test_public_jules_ci_repair_retains_actual_send_boundary(tmp_path, monkeypatch, force, scenario, expected_disposition, expected_attempt, expected_outcome):
     """Issue #2771: public PR routes preserve real no-send and attempted-send evidence."""
@@ -1470,6 +1504,7 @@ def test_public_jules_ci_repair_retains_actual_send_boundary(tmp_path, monkeypat
         "base": {"ref": "main", "sha": "base-1"},
     }
     github = MagicMock(token="controlled-token")
+    install_mock_pr_history(github, H1)
     github.get_pull_request_metadata_strict.return_value = {
         "number": PR_NUMBER,
         "state": "open",
@@ -1547,7 +1582,7 @@ def test_public_jules_ci_repair_retains_actual_send_boundary(tmp_path, monkeypat
     if scenario == "draining":
         assert "graceful shutdown" in result.repair_result.reason
     if scenario == "retired":
-        assert result.repair_result.reason == "outbound Jules admission refused"
+        assert result.repair_result.reason == "Jules CI repair is retired; historical sessions cannot authorize provider work"
     if scenario == "notice-failed":
         assert any("Failed to post comment" in action for action in result.repair_result.actions)
     if scenario == "response-unknown":
@@ -1582,6 +1617,7 @@ def test_terminal_ci_failure_enters_typed_synchronous_local_repair(tmp_path, mon
         "base": {"ref": "main", "sha": "base-1"},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     produced = PRActionList(("local candidate failed to synchronize",))
     produced.repair_attempt_started = True
     produced.resulting_head = H2
@@ -1654,6 +1690,7 @@ def test_public_local_ci_repair_real_authority_fences_first_checkout_mutation(tm
         "base": {"ref": "main", "sha": "base-1"},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     client.get_pull_request_metadata_strict.return_value = {
         "number": PR_NUMBER,
         "state": "open",
@@ -1769,6 +1806,7 @@ def test_public_local_ci_repair_shutdown_refusal_never_publishes_existing_diff(t
         "base": {"ref": "main", "sha": "base-1"},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     client.get_pull_request_metadata_strict.return_value = {
         "state": "open",
         "merged_at": None,
@@ -1847,6 +1885,7 @@ def test_public_local_ci_repair_uses_real_h1_to_h2_git_result(tmp_path, monkeypa
         "base": {"ref": "main", "sha": "base-1"},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
 
     def real_git_repair(*_args, on_invocation_started=None, **_kwargs):
         assert on_invocation_started is not None
@@ -1914,6 +1953,7 @@ def test_durable_cloud_conflict_receipt_governs_replay_without_local_substitute(
         "base": {"ref": "main", "sha": "base-1"},
     }
     github = MagicMock()
+    install_mock_pr_history(github, H1)
     github.get_pr_comments.return_value = []
     github.token = "controlled-token"
     api = MagicMock()
@@ -2002,6 +2042,7 @@ def test_durable_review_repair_receipt_replays_through_pr_entry_without_local_ef
         "base": {"ref": "main", "sha": "base-1"},
     }
     client = MagicMock(token="controlled-token")
+    install_mock_pr_history(client, H1)
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=101)
     client.get_authenticated_user_login.return_value = "controller"
     client.get_pr_comments.return_value = client.get_pr_comments_strict.return_value = []

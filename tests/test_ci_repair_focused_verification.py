@@ -43,6 +43,7 @@ from src.auto_coder.pr_repair_dispatch import RepairDisposition, RepairFactState
 from src.auto_coder.prompt_loader import render_prompt
 from src.auto_coder.util.github_action import DetailedChecksResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 SCRIPT = r"""#!/bin/bash
 # Records every invocation. File state decides the outcome; unscoped runs are flagged.
@@ -445,6 +446,7 @@ def _run_production_base_update(
         "base": {"ref": "main"},
     }
     client = MagicMock()
+    install_pr_history(client, "input-head")
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=701)
     client.get_pr_review_threads_strict.return_value = []
     config = AutomationConfig(automatic_test_fix=False)

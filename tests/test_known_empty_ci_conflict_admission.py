@@ -57,7 +57,7 @@ def test_real_ci_decoding_controls_conflicting_candidate_admission(mock_github_c
         "mergeable_state": "dirty",
         "head": {"ref": "feature", "sha": head_sha},
         "labels": [],
-        "body": "Closes #2496",
+        "body": "<!-- auto-coder:local-llm -->\n\nCloses #2496",
         "created_at": "2026-10-14T00:00:00Z",
         "user": {"login": "allowed"},
     }
@@ -102,7 +102,7 @@ def test_known_empty_collector_diagnostics_match_policy_membership(mock_github_c
         "mergeable_state": "clean" if mergeable else "dirty",
         "head": {"ref": "issue-2506", "sha": head_sha},
         "labels": [],
-        "body": "Closes #2506",
+        "body": "<!-- auto-coder:local-llm -->\n\nCloses #2506",
         "created_at": "2026-10-14T00:00:00Z",
         "user": {"login": "allowed"},
     }
@@ -150,7 +150,7 @@ def test_unavailable_ci_conflict_survives_collection_and_reaches_remediation(moc
         "mergeable_state": "dirty",
         "head": {"ref": "issue-2503", "sha": head_sha},
         "labels": [],
-        "body": "Closes #2503",
+        "body": "<!-- auto-coder:local-llm -->\n\nCloses #2503",
         "created_at": "2026-10-14T00:00:00Z",
         "user": {"login": "allowed"},
     }
@@ -210,7 +210,7 @@ def test_pending_candidate_recovers_and_reconstructed_engine_processes_durable_w
         "mergeable_state": "dirty",
         "head": {"ref": "issue-2506", "sha": head_sha},
         "labels": [],
-        "body": "Closes #2506",
+        "body": "<!-- auto-coder:local-llm -->\n\nCloses #2506",
         "created_at": "2026-10-14T00:00:00Z",
         "user": {"login": "allowed"},
     }

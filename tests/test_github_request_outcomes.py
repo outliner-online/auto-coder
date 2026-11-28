@@ -11,7 +11,7 @@ import pytest
 from auto_coder.adversarial_validator import AdversarialValidationResult
 from auto_coder.github_app_reviewer import GitHubAppReviewer, ReviewerAppConfig
 from auto_coder.logger_config import setup_logger
-from auto_coder.util.gh_cache import ActionsSecretPublisher, GitHubClient, InvalidOpenEntitiesObservation, OpenGitHubEntities, get_ghapi_client
+from auto_coder.util.gh_cache import GitHubClient, InvalidOpenEntitiesObservation, OpenGitHubEntities, get_ghapi_client
 from auto_coder.util.github_request_outcome import (
     DeliveryCertainty,
     DiagnosticTransport,
@@ -56,7 +56,7 @@ def test_strict_open_entities_types_only_rejected_observations(monkeypatch, resp
 
 
 def test_process_boundary_refuses_distinct_production_credentials_without_a_send(tmp_path, monkeypatch):
-    """Controller, reviewer-App, and secret publication all reach one seam."""
+    """Controller and reviewer-App credentials both reach one seam."""
     sent = []
 
     def forbidden_send(self, request):
@@ -75,18 +75,14 @@ def test_process_boundary_refuses_distinct_production_credentials_without_a_send
 
         reviewer = GitHubAppReviewer(ReviewerAppConfig("123", private_key_path=key))
         assert reviewer.publish("acme/widgets", 2, "sha", AdversarialValidationResult(result="PASS")).success is False
-
-        with pytest.raises(Exception):
-            ActionsSecretPublisher("secret-token").set_repository_secret("acme/widgets", "VALUE", "secret")
     finally:
         configure_github_request_boundary()
 
     assert sent == []
-    assert len(observations) == 3
+    assert len(observations) == 2
     assert {item.context.subsystem for item in observations} == {
         "controller-issue-read",
         "reviewer-app",
-        "actions-secrets",
     }
     assert all(item.delivery is DeliveryCertainty.DEFINITELY_NOT_SENT for item in observations)
 

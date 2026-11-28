@@ -7,6 +7,7 @@ import pytest
 from src.auto_coder.automation_config import AutomationConfig
 from src.auto_coder.issue_context import extract_linked_issues_from_pr_body
 from src.auto_coder.pr_processor import _close_linked_issues, _merge_pr
+from tests.pr_automation_fakes import install_pr_history
 
 
 class TestExtractLinkedIssues:
@@ -235,13 +236,12 @@ class TestCloseLinkedIssues:
 class TestMergePRWithIssueClosing:
     """Test that _merge_pr closes linked issues after successful merge."""
 
-    @patch("src.auto_coder.pr_processor._archive_jules_session")
     @patch("src.auto_coder.pr_processor._close_linked_issues")
     @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")
     @patch("auto_coder.util.gh_cache.get_ghapi_client")
     @patch("src.auto_coder.pr_processor.GitHubClient")
-    def test_merge_pr_closes_issues_on_success(self, mock_github_client, mock_get_ghapi_client, mock_get_ghapi_client_adapter, mock_close_issues, mock_archive_session, tmp_path):
-        """Test that successful merge triggers issue closing."""
+    def test_merge_pr_closes_issues_without_mutating_historical_jules_session(self, mock_github_client, mock_get_ghapi_client, mock_get_ghapi_client_adapter, mock_close_issues, tmp_path):
+        """A confirmed historical Jules merge never archives or restarts its session."""
         from src.auto_coder.merge_operation_state import MergeOperationStore
 
         config = AutomationConfig()
@@ -255,17 +255,30 @@ class TestMergePRWithIssueClosing:
         mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         head_sha = "e" * 40
-        mock_api.pulls.get.return_value = {"number": 123, "user": {"login": "some-developer"}, "head": {"sha": head_sha}}
+        install_pr_history(mock_github_client.get_instance.return_value, head_sha)
+        mock_api.pulls.get.return_value = {
+            "number": 123,
+            "user": {"login": "google-labs-jules"},
+            "body": "https://jules.google.com/session/historical-session",
+            "head": {"sha": head_sha},
+        }
         # Mock successful merge
         mock_api.pulls.merge.return_value = {"merged": True, "sha": "mergedsha"}
 
         store = MergeOperationStore(db_path=tmp_path / "merge_ops.db")
-        with patch("src.auto_coder.merge_operation_state.get_merge_operation_store", return_value=store):
+        with (
+            patch("src.auto_coder.merge_operation_state.get_merge_operation_store", return_value=store),
+            patch("src.auto_coder.pr_processor.get_speculative_jules_lifecycle", return_value=None),
+            patch("src.auto_coder.jules_client.JulesClient", side_effect=AssertionError("historical Jules session accessed")),
+            patch(
+                "src.auto_coder.jules_engine.check_and_restart_recurrent_jules_task_for_pr",
+                side_effect=AssertionError("recurrent Jules task restarted"),
+            ),
+        ):
             result = _merge_pr("test/repo", 123, {}, config)
 
         assert result is True
         mock_close_issues.assert_called_once_with("test/repo", 123, mock_github_client.get_instance.return_value)
-        mock_archive_session.assert_called_once_with("test/repo", 123)
 
     @patch("src.auto_coder.pr_processor._archive_jules_session")
     @patch("src.auto_coder.pr_processor._close_linked_issues")
@@ -292,6 +305,7 @@ class TestMergePRWithIssueClosing:
 
         # Not a conflict; a real head SHA is present.
         head_sha = "1" * 40
+        install_pr_history(mock_github_client.get_instance.return_value, head_sha)
         mock_api.pulls.get.return_value = {"number": 123, "user": {"login": "some-developer"}, "head": {"sha": head_sha}, "mergeable": True}
 
         store = MergeOperationStore(db_path=tmp_path / "merge_ops.db")
@@ -322,7 +336,8 @@ class TestMergePRWithIssueClosing:
         mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         head_sha = "f" * 40
-        mock_api.pulls.get.return_value = {"number": 123, "user": {"login": "some-developer"}, "head": {"sha": head_sha}}
+        install_pr_history(mock_github_client.get_instance.return_value, head_sha)
+        mock_api.pulls.get.return_value = {"number": 123, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "some-developer"}, "head": {"sha": head_sha}}
         # Mock successful merge (API handles it same as direct now)
         mock_api.pulls.merge.return_value = {"merged": True, "sha": "mergedsha"}
 
@@ -332,4 +347,4 @@ class TestMergePRWithIssueClosing:
 
         assert result is True
         mock_close_issues.assert_called_once_with("test/repo", 123, mock_github_client.get_instance.return_value)
-        mock_archive_session.assert_called_once_with("test/repo", 123)
+        mock_archive_session.assert_not_called()

@@ -513,79 +513,9 @@ def _dispatch_jules_competition(
     label_context: Optional[LabelManagerContext],
     implementation_slots: Optional[ImplementationSlotRepository],
 ) -> List[str]:
-    """Create or resume one fixed-width Jules competition before any POST.
-
-    This boundary is reached only after the ordinary controller admission gates.
-    Persisting the complete candidate set first makes repeated explicit runs
-    resumptions rather than additional logical attempts.
-    """
-    from .jules_candidate_submission import CandidateRequest, JulesCandidateSubmissionAdapter
-    from .jules_competition_ledger import CapturedPolicySettings, JulesCompetitionLedger, SpeculativeGenerationBundle
-
+    """Refuse creation or resumption of retired Jules competitions."""
     issue_number = int(issue_data["number"])
-    if not config.pr_adversarial_validation:
-        return [f"Deferred Jules competition for issue #{issue_number}: independent PR adversarial validation is disabled"]
-    from .cli_helpers import create_adversarial_validation_backend_manager
-
-    if create_adversarial_validation_backend_manager(validation_kind="pr") is None:
-        return [f"Deferred Jules competition for issue #{issue_number}: no independent PR adversarial validation backend is configured"]
-    oracle = str(issue_data.get("body") or "")
-    fingerprint = hashlib.sha256(oracle.encode("utf-8")).hexdigest()
-    root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
-    ledger = JulesCompetitionLedger()
-    snapshot = ledger.get_namespace_snapshot(repo_name, issue_number)
-    generation = snapshot.get_active_generation()
-    if generation is None:
-        candidate_ids = tuple(f"candidate-{index + 1}" for index in range(config.JULES_SPECULATIVE_PARALLELISM))
-        bundle = SpeculativeGenerationBundle(
-            source_attempt_number=get_current_attempt(repo_name, issue_number),
-            candidate_ids=candidate_ids,
-            issue_oracle_snapshot=oracle,
-            issue_oracle_fingerprint=fingerprint,
-            source_branch=config.MAIN_BRANCH,
-            policy_settings=CapturedPolicySettings(
-                timeout_seconds=config.JULES_ISSUE_PR_TIMEOUT_HOURS * 3600,
-                provider_name="jules",
-                extra_settings=(("pr_ci_timeout_hours", str(config.JULES_PR_CI_TIMEOUT_HOURS)),),
-            ),
-        )
-        admitted = ledger.create_generation(
-            repo_name,
-            issue_number,
-            f"production-admit:{repo_name}:{issue_number}:{fingerprint}",
-            snapshot.epoch,
-            bundle,
-        )
-        generation = admitted.snapshot.get_generation(admitted.generation_id or "") if admitted.admitted else admitted.snapshot.get_active_generation()
-    if generation is None:
-        return [f"Deferred Jules competition for issue #{issue_number}: generation admission unavailable"]
-
-    adapter = JulesCandidateSubmissionAdapter(ledger, jules_client, root / "jules_candidate_submissions.db")
-    results = []
-    for candidate_id in generation.candidate_ids:
-        current_generation = ledger.get_namespace_snapshot(repo_name, issue_number).get_generation(generation.generation_id)
-        if not new_work_allowed() or current_generation is None or not current_generation.is_active() or current_generation.has_winner():
-            break
-        results.append(adapter.submit(CandidateRequest(repo_name, issue_number, generation.generation_id, candidate_id, f"{repo_name}#{issue_number}", task_payload)))
-
-    accepted_sessions = tuple(result.session_id for result in results if result.session_id)
-    if implementation_slots is not None:
-        owner = ImplementationOwner("issue", issue_number)
-        for session_id in accepted_sessions:
-            if not implementation_slots.record_provider_session(owner, session_id):
-                raise RuntimeError(f"Could not retain Jules candidate ownership for issue #{issue_number}")
-    if label_context:
-        label_context.keep_label()
-    unknown = sum(result.outcome.value == "UNKNOWN" for result in results)
-    exhausted = sum(result.outcome.value == "DEFINITELY_NOT_ACCEPTED" for result in results)
-    get_trace_logger().log(
-        "Jules Competition",
-        f"Dispatched Jules competition for issue #{issue_number}",
-        item_type="issue",
-        item_number=issue_number,
-        details={"generation_id": generation.generation_id, "requested": len(generation.candidate_ids), "accepted": len(accepted_sessions), "unknown": unknown, "exhausted": exhausted},
-    )
-    return [f"Jules competition {generation.generation_id} for issue #{issue_number}: " f"requested={len(generation.candidate_ids)}, accepted={len(accepted_sessions)}, unknown={unknown}, exhausted={exhausted}"]
+    return [f"Deferred retired Jules competition for issue #{issue_number}: speculative execution is disabled"]
 
 
 def _process_issue_claude_routine_mode(

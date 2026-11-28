@@ -543,7 +543,8 @@ def deliver_ordinary(repository, pr_data, github, origin, pending, state_path, d
     with processor._cloud_review_delivery_lock:
         processor._record_review_feedback_state(state_path, delivered, members)
     try:
-        accepted = processor._send_followup_with_quota_admission(origin.client, repository, origin.task_id, prompt, tuple(sorted(members)), repair_target=target, recovery_provider="codex-cloud", final_authority_check=current, strong_source=source, strong_revision=row["sealed_revision"])
+        with processor._pr_automation_client_scope(github):
+            accepted = processor._send_followup_with_quota_admission(origin.client, repository, origin.task_id, prompt, tuple(sorted(members)), repair_target=target, recovery_provider="codex-cloud", final_authority_check=current, strong_source=source, strong_revision=row["sealed_revision"])
     except CodexWorkAuthorityRefused:
         processor._record_review_feedback_state(state_path, delivered, set(), remove_pending=members)
         return processor.CloudReviewRepairResult(["Accepted Strong correction held: final authority refused before wire"], deferred=True, wait_reason=processor.WAIT_INDETERMINATE, diagnostic_reason="unconfirmed_delivery_receipt")

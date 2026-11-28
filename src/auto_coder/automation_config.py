@@ -960,6 +960,7 @@ class CandidateProcessingResult:
 class PRProcessingOutcome(str, Enum):
     """Machine-readable outcome of a pull-request processing operation."""
 
+    BLOCKED = "blocked"
     SUCCESS = "success"
     DEFERRED = "deferred"
     FAILED = "failed"

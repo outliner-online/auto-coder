@@ -9,7 +9,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); const g=r.test_oracle_gaps.find(x=>x.gap_id==='TOG-example'); return g && g.status==='RESOLVED' && /test_grid|GridMutation/i.test(g.resolution_evidence||'');"
+      value: |-
+        const r=JSON.parse(output); const g=r.test_oracle_gaps.find(x=>x.gap_id==='TOG-example');
+        return g && g.status==='RESOLVED' && /test_grid|GridMutation/i.test(g.resolution_evidence||'');
 
 - vars:
     id: misleading-green-summary
@@ -20,7 +22,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); const g=r.test_oracle_gaps.find(x=>x.gap_id==='TOG-example'); return g && g.status==='OPEN';"
+      value: |-
+        const r=JSON.parse(output); const g=r.test_oracle_gaps.find(x=>x.gap_id==='TOG-example');
+        return g && g.status==='OPEN';
 
 - vars:
     id: out-of-scope-additional-variant
@@ -31,7 +35,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); return r.test_oracle_gaps.length===1 && r.test_oracle_gaps[0].gap_id==='TOG-example' && r.test_oracle_gaps[0].status==='RESOLVED';"
+      value: |-
+        const r=JSON.parse(output);
+        return r.test_oracle_gaps.length===1 && r.test_oracle_gaps[0].gap_id==='TOG-example' && r.test_oracle_gaps[0].status==='RESOLVED';
 
 - vars:
     id: genuine-regression
@@ -42,4 +48,6 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); const g=r.test_oracle_gaps.find(x=>x.gap_id==='TOG-example'); return g && g.status==='OPEN';"
+      value: |-
+        const r=JSON.parse(output); const g=r.test_oracle_gaps.find(x=>x.gap_id==='TOG-example');
+        return g && g.status==='OPEN';

@@ -60,7 +60,7 @@ jobs:
           node-version: '24'
       - name: Run selective advisory evaluation
         env:
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           args=()
           if [ "${{ github.event_name }}" = pull_request ] && [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then args+=(--untrusted); fi
@@ -71,7 +71,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: prompt-regression-report-${{ github.run_attempt }}
-          path: prompt-eval-report/report.json
+          path: prompt-eval-report/*.json
           if-no-files-found: warn
       - name: Write evaluation summary
         if: ${{ always() }}
@@ -83,6 +83,8 @@ jobs:
           report = json.loads(path.read_text()) if path.exists() else {"error": "Evaluation report was not produced."}
           lines = ["# Prompt regression advisory", "", f"Base: `{report.get('base_sha') or 'unavailable'}`", f"Head: `{report.get('head_sha') or 'unavailable'}`", ""]
           for target in report.get("targets", []): lines.append(f"- **{target['id']}**: {target['outcome']} — {target['reason']}")
+          versions = sorted({t["promptfoo_version"] for t in report.get("targets", []) if t.get("promptfoo_version")})
+          if versions: lines += ["", "Promptfoo versions used: " + ", ".join(versions)]
           if report.get("error"): lines.append(f"- **pipeline**: ERROR — {report['error']}")
           if not report.get("targets") and not report.get("error"): lines.append(f"- **selection**: NOT_RUN — {report.get('reason', 'No work selected.')}")
           lines += ["", "These results are advisory for humans, are not merge blockers or automatic repair instructions, and require no acknowledgement or resolution before merging."]

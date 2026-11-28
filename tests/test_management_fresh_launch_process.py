@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -119,7 +120,8 @@ def test_cli_retains_all_fences_until_possible_fresh_child_exits(tmp_path, fault
         (tmp_path / "holder-release").touch()
         (tmp_path / "child-release").touch()
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
         # The normal child shares only this disposable driver's process group.
         for name in ("child.json", "holder.json"):
@@ -127,9 +129,13 @@ def test_cli_retains_all_fences_until_possible_fresh_child_exits(tmp_path, fault
             if path.exists():
                 record = json.loads(path.read_text())
                 if alive(record):
-                    if name == "holder.json":
-                        os.killpg(record["pid"], signal.SIGKILL)
-                    else:
-                        os.kill(record["pid"], signal.SIGKILL)
+                    # A released or group-killed child can disappear after the
+                    # identity check. Its absence completes cleanup; other
+                    # signal errors and the no-leak assertion still fail.
+                    with suppress(ProcessLookupError):
+                        if name == "holder.json":
+                            os.killpg(record["pid"], signal.SIGKILL)
+                        else:
+                            os.kill(record["pid"], signal.SIGKILL)
                     wait_for(lambda: not alive(record), "disposable process leaked", timeout=5)
         log.close()

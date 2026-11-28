@@ -9,13 +9,14 @@ from auto_coder.automation_engine import AutomationEngine
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_mock_pr_history
 
 
 def _pr(number: int, *, labels: list[str] | None = None, mergeable: bool = True) -> dict:
     return {
         "number": number,
         "title": f"PR {number}",
-        "body": "",
+        "body": "<!-- auto-coder:local-llm -->",
         "head": {"ref": f"pr-{number}", "sha": "a" * 40},
         "labels": labels or [],
         "mergeable": mergeable,
@@ -58,6 +59,7 @@ def collection_dependencies():
 
 def _collect(github: MagicMock, prs: list[dict], issues: list[dict]):
     github.get_open_prs_json.return_value = prs
+    install_mock_pr_history(github, "a" * 40)
     github.get_open_issues_json.return_value = issues
     engine = AutomationEngine(github, config=AutomationConfig(env_override=False))
     return engine, engine._get_candidates("owner/repo")

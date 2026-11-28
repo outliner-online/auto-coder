@@ -125,8 +125,6 @@ from .issue_stage_routing import (
     review_classification,
     standalone_review_generation,
 )
-from .jules_client import invalidate_jules_sessions_cache
-from .jules_engine import check_and_resume_or_archive_sessions, check_and_start_recurrent_jules_tasks
 from .label_manager import LabelManager
 from .llm_backend_config import active_repo_context, get_pr_review_allowlist_from_config, get_review_adjudicator_allowlist_from_config
 from .local_job_handoff import LocalJobClaim, LocalJobKind, LocalJobRecord, LocalJobStore, LocalJobStoreUnavailable
@@ -244,7 +242,6 @@ def _reconciliation_request_error(error: BaseException) -> GitHubRequestError | 
     return None
 
 
-JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS = 60 * 60
 LOCAL_JOB_WORKSPACE_RECLAMATION_INTERVAL_SECONDS = 60 * 60
 MAINTENANCE_INTERVAL_SECONDS = 60
 CAPACITY_STATE_CHECK_INTERVAL_SECONDS = 1
@@ -590,6 +587,16 @@ class _MergeOperationResumeHandler:
             get_merge_operation_store().supersede(operation.identity)
             _record_pr_stage_result(pr_number, "pr.merge-operation-resume-refresh", f"pr#{pr_number} merge-operation resume refresh", Outcome.SUPERSEDED, {"reason": "PR is terminal", "state": pr_data.get("state"), "merged": pr_data.get("merged") is True})
             return Outcome.SUPERSEDED
+        from .pr_processor import _pr_automation_decision, _reconcile_guarded_merge
+
+        guard = _pr_automation_decision(engine.github, operation.identity.repository, pr_number)
+        if not guard.allowed:
+            if guard.stopped:
+                try:
+                    _reconcile_guarded_merge(engine.github, operation.identity.repository, pr_number)
+                except Exception as exc:
+                    logger.warning("Stopped PR merge receipt remains unresolved: {}", exc)
+            return Outcome.BLOCKED if guard.stopped else Outcome.DEFERRED
         current_head = str((pr_data.get("head") or {}).get("sha") or "")
         if current_head and current_head != operation.expected_head_sha:
             # A newer head invalidates this operation's own execution
@@ -1089,10 +1096,6 @@ class AutomationEngine:
         self._pr_local_job_runner: Optional[LocalJobRunner] = None
         self._issue_job_runtimes: Dict[str, IssueJobRuntime] = {}
         self._issue_runtime_composition: Optional[IssueRuntimeComposition] = None
-        # Full Jules discovery is deliberately delayed after startup.  Claiming
-        # a cycle advances this deadline before any HTTP work begins, so a
-        # failed listing cannot cause a hot retry on the next loop iteration.
-        self._next_jules_session_list_refresh = time.monotonic() + JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS
         # Local workspace reclamation has its own provider-neutral cadence.
         # Claiming advances the deadline before store access so a broken store
         # cannot turn the producer into a cleanup retry hot loop.
@@ -1328,15 +1331,6 @@ class AutomationEngine:
                 await asyncio.gather(force_wait, return_exceptions=True)
             await asyncio.sleep(0)
 
-    def _claim_jules_session_list_refresh(self) -> bool:
-        """Claim the hourly full-list maintenance cycle when it is due."""
-        now = time.monotonic()
-        if now < self._next_jules_session_list_refresh:
-            return False
-
-        self._next_jules_session_list_refresh = now + JULES_SESSION_LIST_REFRESH_INTERVAL_SECONDS
-        return True
-
     def _claim_local_job_workspace_reclamation(self) -> bool:
         """Claim the hourly provider-neutral local workspace cleanup cycle."""
         now = time.monotonic()
@@ -1394,18 +1388,6 @@ class AutomationEngine:
             if "closed pr #" in action_lower or "closed unfixable pr" in action_lower or "closed stale jules pr" in action_lower or "closed empty jules pr" in action_lower or "closing pr" in action_lower:
                 return True
         return False
-
-    async def check_and_start_recurrent_jules_tasks_async(self, repo_name: str) -> None:
-        """Scan .auto-coder/prompts/*.md files and start recurrent Jules tasks if not already running."""
-        try:
-            await self._run_local_critical(
-                "recurrent provider scan",
-                check_and_start_recurrent_jules_tasks,
-                repo_name,
-                self._get_implementation_slots(repo_name),
-            )
-        except Exception as e:
-            logger.error(f"Error checking/starting recurrent Jules tasks: {e}")
 
     def handle_stale_jules_issue_sessions(self, repo_name: str) -> List[str]:
         """Hand issues over to backend_with_high_score when Jules times out without a PR."""
@@ -2956,7 +2938,7 @@ class AutomationEngine:
                 rediscover_pr_repair_finalizations(repo_name, local_job_store, get_pending_work_store(repo_name))
                 self._wake_pending_work()
                 return
-            phase = resume_pr_correction_publication(job, local_job_store)
+            phase = resume_pr_correction_publication(job, local_job_store, github_client=self.github)
             wake = asyncio.run_coroutine_threadsafe(self.invalidate_entity(job.repository, "pr", job.target_number), self._loop)
             wake.result()
             claim = LocalJobClaim(job, True)
@@ -3699,7 +3681,6 @@ class AutomationEngine:
             logger.info("Closed item handled on startup, continuing to producer loop")
             get_health_monitor().record_event("producer_startup", "closed item handled on startup", repo_name)
 
-        skip_jules_sessions = False
         iteration = 0
         while True:
             try:
@@ -3723,58 +3704,17 @@ class AutomationEngine:
                     if self.is_draining:
                         return
 
-                # This targeted durable consumer runs immediately on startup and
-                # at the 60-second maintenance cadence. It never calls the
-                # account-wide Jules listing used by the separate hourly cycle.
-                from .speculative_jules_lifecycle import consume_due_speculative_work
-
-                await self._run_local_critical(
-                    "speculative Jules competition maintenance",
-                    consume_due_speculative_work,
-                    repo_name,
-                    self.github,
-                    lambda number: self.invalidate_entity(repo_name, "issue", number),
-                    lambda number: self.invalidate_entity(repo_name, "pr", number),
-                )
-                if self.is_draining:
-                    return
                 heartbeat("producer:check-updates", f"iteration {iteration}")
                 # Check updates
                 await self._run_local_critical("update check", check_for_updates_and_restart)
                 if self.is_draining:
                     return
 
-                if not skip_jules_sessions and self._claim_jules_session_list_refresh():
-                    # All list-dependent maintenance shares this cycle's fresh listing.
-                    invalidate_jules_sessions_cache()
-
-                    # Resume sessions
-                    heartbeat("producer:jules-sessions", f"iteration {iteration}")
-                    await self._run_local_critical("remote session reconciliation", check_and_resume_or_archive_sessions, repo_name)
-                    if self.is_draining:
-                        return
-
-                    # Take issues away from Jules sessions that timed out without creating a PR
-                    await self._run_local_critical("stale remote session reconciliation", self.handle_stale_jules_issue_sessions, repo_name)
-
-                    if self.is_draining:
-                        return
-
-                    # Check and start recurrent Jules tasks
-                    await self.check_and_start_recurrent_jules_tasks_async(repo_name)
-                    if self.is_draining:
-                        return
-                elif skip_jules_sessions:
-                    logger.info("Resumed loop early after PR merge/close; skipping Jules session enumeration")
-                    skip_jules_sessions = False
-
                 if self.is_draining:
                     return
 
                 heartbeat("producer:maintenance-sleep", f"{MAINTENANCE_INTERVAL_SECONDS}s")
-                woken_early = await self._sleep_or_wake(MAINTENANCE_INTERVAL_SECONDS)
-                if woken_early:
-                    skip_jules_sessions = True
+                await self._sleep_or_wake(MAINTENANCE_INTERVAL_SECONDS)
 
             except asyncio.CancelledError:
                 logger.info("Producer loop cancelled")
@@ -5176,6 +5116,10 @@ class AutomationEngine:
                     elif result.error:
                         logger.error(f"Worker {worker_id} failed to process {candidate.type} #{item_number}: {result.error}")
                         get_trace_logger().log("Worker", f"Worker {worker_id} failed to process {candidate.type} #{item_number}", item_type=candidate.type, item_number=item_number, details={"worker_id": worker_id, "error": result.error})
+                    elif candidate.type == "pr" and result.outcome is PRProcessingOutcome.BLOCKED:
+                        diagnostic = result.target_reason or "; ".join(result.actions)
+                        logger.warning("Worker {} blocked pr #{}: {}", worker_id, item_number, diagnostic)
+                        get_trace_logger().log("Worker", f"Worker {worker_id} blocked pr #{item_number}", item_type="pr", item_number=item_number, details={"worker_id": worker_id, "outcome": "blocked", "reason": diagnostic, "actions": result.actions, "requires_external_intervention": True})
                     elif candidate.type == "pr" and result.outcome is PRProcessingOutcome.DEFERRED:
                         diagnostic = "; ".join(result.actions)
                         logger.info(f"Worker {worker_id} deferred pr #{item_number}: {diagnostic}")
@@ -6138,6 +6082,7 @@ class AutomationEngine:
             _is_dependabot_pr,
             _is_jules_pr,
             _reject_unsafe_codex_cloud_pr,
+            evaluate_retired_jules_ingress,
             is_current_head_adversarial_review_blocked,
         )
         from .pr_progress_policy import ProgressPhase, ProgressRoute, PRProgressInputs, PRProgressScope, select_pr_progress
@@ -6164,17 +6109,31 @@ class AutomationEngine:
             pr_data_list.sort(key=lambda x: x.get("created_at", ""))
 
             safe_pr_data_list = []
+            guarded_open_pr_numbers: set[int] = set()
+            withheld_open_pr_numbers: set[int] = set()
             for pr_data in pr_data_list:
                 pr_number = pr_data.get("number")
                 if not isinstance(pr_number, int):
                     logger.warning(f"Skipping PR missing/invalid number in data: {pr_data}")
                     continue
 
+                from .pr_processor import _pr_automation_decision
+
+                if not _pr_automation_decision(self.github, repo_name, pr_number).allowed:
+                    guarded_open_pr_numbers.add(pr_number)
+                    continue
+
+                authority = evaluate_retired_jules_ingress(self.github, repo_name, pr_data)
+                if not authority.allow_ordinary_processing:
+                    logger.info("PR #{} withheld at retired Jules ingress: {} ({})", pr_number, authority.classification.value, authority.reason)
+                    withheld_open_pr_numbers.add(pr_number)
+                    continue
+
                 # Branch identity is a safety invariant, not a normal PR
                 # processing decision. Reject unsafe Codex Cloud heads before
                 # even preloading CI, or author/label/CI gates can defer them
                 # indefinitely.
-                unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, pr_data, self.config)
+                unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, pr_data, self.config, refresh_metadata=False)
                 if unsafe_branch_result.closed or unsafe_branch_result.metadata_error:
                     for action in unsafe_branch_result.actions:
                         logger.info(f"PR #{pr_number}: {action}")
@@ -6494,7 +6453,9 @@ class AutomationEngine:
 
             # Numbers of the PRs that are currently open, used to tell a live PR apart
             # from a closed one still listed in an issue timeline
-            open_pr_numbers = {pr.get("number") for pr in pr_data_list if isinstance(pr.get("number"), int)}
+            # A withheld PR remains open and still owns its linked Issue.
+            # Excluding it from processing must not launch a replacement attempt.
+            open_pr_numbers = guarded_open_pr_numbers | withheld_open_pr_numbers | {pr.get("number") for pr in pr_data_list if isinstance(pr.get("number"), int)}
 
             for issue_data in all_issues:
                 number = issue_data.get("number")
@@ -6948,6 +6909,25 @@ class AutomationEngine:
             result.error = f"Item number is missing for {candidate.type} #{candidate.data.get('number', 'N/A')}"
             return result
         if candidate.type == "pr":
+            from .pr_processor import _pr_automation_decision, evaluate_retired_jules_ingress
+
+            guard = _pr_automation_decision(self.github, repo_name, item_number)
+            if not guard.allowed:
+                result.target_outcome = ExplicitTargetOutcome.BLOCKED if guard.stopped else ExplicitTargetOutcome.DEFERRED
+                result.outcome = PRProcessingOutcome.BLOCKED if guard.stopped else PRProcessingOutcome.DEFERRED
+                result.target_reason = guard.reason
+                result.actions = [guard.reason]
+                if not guard.stopped:
+                    result.retry_not_before = time.time() + 60
+                return result
+
+            authority = evaluate_retired_jules_ingress(self.github, repo_name, candidate.data, refresh_metadata=False)
+            if not authority.allow_ordinary_processing:
+                result.outcome = PRProcessingOutcome.DEFERRED
+                result.target_outcome = ExplicitTargetOutcome.DEFERRED
+                result.target_reason = authority.reason
+                result.actions = [f"Speculative Jules {authority.classification.value.lower()} artifact fenced: {authority.reason}"]
+                return result
             try:
                 self.refresh_review_adjudications(repo_name, candidate.data)
             except Exception as exc:
@@ -8498,9 +8478,27 @@ class AutomationEngine:
                 previous_binding = CloudManager(repo_name).read_bindings_strict().get(str(item_number))
 
             if item_type == "pr":
-                from .pr_processor import _reject_unsafe_codex_cloud_pr
+                from .pr_processor import _pr_automation_decision, _reject_unsafe_codex_cloud_pr, evaluate_retired_jules_ingress
 
-                unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, candidate.data, config)
+                guard = _pr_automation_decision(self.github, repo_name, item_number)
+                if not guard.allowed:
+                    result.target_outcome = ExplicitTargetOutcome.BLOCKED if guard.stopped else ExplicitTargetOutcome.DEFERRED
+                    result.outcome = PRProcessingOutcome.BLOCKED if guard.stopped else PRProcessingOutcome.DEFERRED
+                    result.target_reason = guard.reason
+                    result.actions = [guard.reason]
+                    if not guard.stopped:
+                        result.retry_not_before = time.time() + 60
+                    return result
+
+                authority = evaluate_retired_jules_ingress(self.github, repo_name, candidate.data)
+                if not authority.allow_ordinary_processing:
+                    result.outcome = PRProcessingOutcome.DEFERRED
+                    result.target_outcome = ExplicitTargetOutcome.DEFERRED
+                    result.target_reason = authority.reason
+                    result.actions = [f"Speculative Jules {authority.classification.value.lower()} artifact fenced: {authority.reason}"]
+                    return result
+
+                unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, candidate.data, config, refresh_metadata=False)
                 if unsafe_branch_result.closed:
                     result.actions = list(unsafe_branch_result.actions)
                     result.success = True
@@ -8710,6 +8708,7 @@ class AutomationEngine:
                     result.final_gate = pr_result.final_gate
                     result.success = pr_result.outcome != PRProcessingOutcome.FAILED
                     result.target_outcome = {
+                        PRProcessingOutcome.BLOCKED: ExplicitTargetOutcome.BLOCKED,
                         PRProcessingOutcome.SUCCESS: ExplicitTargetOutcome.SUCCESS,
                         PRProcessingOutcome.DEFERRED: ExplicitTargetOutcome.DEFERRED,
                         PRProcessingOutcome.FAILED: ExplicitTargetOutcome.FAILED,
@@ -9112,28 +9111,6 @@ class AutomationEngine:
 
                 # Check for updates and restart if necessary
                 check_for_updates_and_restart()
-
-                if self._claim_jules_session_list_refresh():
-                    # All list-dependent maintenance shares this cycle's fresh listing.
-                    invalidate_jules_sessions_cache()
-
-                    # Check and resume failed Jules sessions. Passing the real
-                    # ImplementationSlotRepository is required so retired-session
-                    # guards (REQ-009) actually apply in this production maintenance
-                    # loop instead of silently no-opping on the None default.
-                    check_and_resume_or_archive_sessions(
-                        repo_name,
-                        self._get_implementation_slots(repo_name),
-                    )
-
-                    # Take issues away from Jules sessions that timed out without creating a PR
-                    self.handle_stale_jules_issue_sessions(repo_name)
-
-                    # Check and start recurrent Jules tasks
-                    check_and_start_recurrent_jules_tasks(
-                        repo_name,
-                        self._get_implementation_slots(repo_name),
-                    )
 
                 # Pull latest changes for monitored repository
                 try:

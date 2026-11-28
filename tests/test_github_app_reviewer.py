@@ -73,6 +73,13 @@ def configured_reviewer(tmp_path: Path, client: RecordingClient, monkeypatch: py
     key = tmp_path / "reviewer.pem"
     key.write_text("fake private key", encoding="utf-8")
     monkeypatch.setattr("auto_coder.github_app_reviewer.jwt.encode", lambda *args, **kwargs: "fake-app-jwt")
+    if isinstance(client, httpx.Client):
+        from auto_coder.github_request_governor import GitHubRequestGovernor
+        from auto_coder.util import github_request_outcome
+
+        governor = GitHubRequestGovernor(store_path=tmp_path / "reviewer-governor.sqlite3")
+        monkeypatch.setattr(github_request_outcome, "_admission_hook", governor.admit_blocking)
+        monkeypatch.setattr(github_request_outcome, "_observation_hook", governor.observe)
     return GitHubAppReviewer(ReviewerAppConfig("4765828", "client", key), api_url="https://api.github.test", client=client, clock=lambda: now)
 
 

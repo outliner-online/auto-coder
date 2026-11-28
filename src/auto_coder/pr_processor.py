@@ -131,6 +131,7 @@ from .local_review_repair import LocalReviewRepairOutcome
 from .logger_config import get_gh_logger, get_logger
 from .ordinary_closure_evidence import ApplicationStatus, ClosureEvidenceRecord, EvidenceState, ObservedTarget, restore_ordinary_result
 from .ordinary_correction_references import build_correction_reference_context
+from .pr_automation_guard import PRAutomationRefused
 from .pr_blocker_closure import _BLOCKER_ID_RE, _GAP_ID_RE
 from .pr_processing_evidence import FinalGateEvidence
 from .pr_progress_policy import CIEvidenceState, ProgressPhase, ProgressRoute, PRProgressInputs, PRProgressScope, select_pr_progress
@@ -205,7 +206,7 @@ from .reviewer_session_registry import ReviewerSessionRegistry
 from .runtime_locks import LockAcquisitionTimeout, ensure_lock_directory, file_lock, lock_path
 from .security_utils import redact_string
 from .shutdown_context import new_work_allowed
-from .speculative_jules_lifecycle import get_speculative_jules_lifecycle
+from .speculative_jules_lifecycle import ArtifactClassification, LifecycleDecision, get_speculative_jules_lifecycle
 from .stale_jules_recovery import stale_jules_recovery_context
 from .test_log_utils import extract_all_failed_tests, extract_first_failed_test, extract_important_errors
 from .test_result import TestResult
@@ -730,6 +731,8 @@ def _strict_pull_request_target(github_client: Any, repo_name: str, pr_number: i
 
 def _review_publication_authorized(github_client: Any, repo_name: str, pr_number: int, expected_head: str, expected_ref: str) -> bool:
     """Read the open PR's exact destination before publishing a reviewer edit."""
+    if not _pr_automation_decision(github_client, repo_name, pr_number).allowed:
+        return False
     live = _strict_pull_request_target(github_client, repo_name, pr_number)
     head = live["head"]
     return bool(expected_ref) and (head.get("sha"), head.get("ref"), (head.get("repo") or {}).get("full_name")) == (expected_head, expected_ref, repo_name)
@@ -1421,6 +1424,13 @@ def _resume_closure_before_admission(
     config: AutomationConfig,
 ) -> Tuple[Optional[RetainedClosureResumption], bool]:
     pr_number = int(pr_data["number"])
+    guard = _pr_automation_decision(github_client, repo_name, pr_number)
+    if not guard.allowed:
+        actions.append(guard.reason)
+        if processing_status is not None:
+            processing_status.outcome = PRProcessingOutcome.BLOCKED if guard.stopped else PRProcessingOutcome.DEFERRED
+            processing_status.target_reason = guard.reason
+        return None, True
     try:
         retained = EffectiveDecisionStore(repo_name).load(pr_number)
         ordinary = retained.ordinary_correction if retained is not None else None
@@ -1764,12 +1774,13 @@ def _retain_accepted_finding_roots(repo_name: str, pr_number: int, inputs: TwoTi
 class _GitHubClosureThreadTransport:
     """Resolve an exact authenticated root using accepted closure evidence."""
 
-    def __init__(self, client: GitHubClient, payload: AcceptedReviewPayload, thread: ReviewThread, finding: Finding, authorize: Callable[[], bool]):
+    def __init__(self, client: GitHubClient, payload: AcceptedReviewPayload, thread: ReviewThread, finding: Finding, authorize: Callable[[], bool], new_effect_authorizer: Optional[Callable[[], bool]] = None):
         self.client = client
         self.payload = payload
         self.thread = thread
         self.finding = finding
         self.authorize = authorize
+        self.new_effect_authorizer = new_effect_authorizer or (lambda: True)
 
     def _invalidate_retained_discussion_authority(self) -> None:
         try:
@@ -1863,7 +1874,7 @@ class _GitHubClosureThreadTransport:
         observed = self.reconcile(operation)
         if observed.status != REJECTED:
             return observed
-        if not self.authorize():
+        if not self.authorize() or not self.new_effect_authorizer():
             return EffectAttempt(REJECTED, reason="Closure authority is no longer current")
         if not self._discussion_is_current():
             self._invalidate_retained_discussion_authority()
@@ -1896,8 +1907,10 @@ class _GitHubClosureThreadTransport:
             prior = observation.receipt
             if prior is not None and prior.phase in {"PENDING", "ROLLBACK_REQUIRED"} and prior.operation_key != receipt.operation_key:
                 return EffectAttempt(REJECTED, reason="A prior closure receipt requires reconciliation")
+            if not self.new_effect_authorizer():
+                return EffectAttempt(REJECTED, reason="PR automation is stopped or its authority is unavailable")
             observation = put_receipt(self.client, observation, receipt)
-            if not self.authorize():
+            if not self.authorize() or not self.new_effect_authorizer():
                 return EffectAttempt(REJECTED, reason="Closure authority changed before resolution")
             if not self._discussion_is_current():
                 self._invalidate_retained_discussion_authority()
@@ -1916,7 +1929,7 @@ class _GitHubClosureThreadTransport:
             return EffectAttempt(CONFIRMED, self.thread.id)
 
 
-def _consume_closure_thread_resolutions(payload: AcceptedReviewPayload, strong: StrongAuditRound, reviewer: GitHubAppReviewer, executor: ReviewEffectExecutor, authorize: Callable[[], bool], client: GitHubClient) -> Tuple[bool, str]:
+def _consume_closure_thread_resolutions(payload: AcceptedReviewPayload, strong: StrongAuditRound, reviewer: GitHubAppReviewer, executor: ReviewEffectExecutor, authorize: Callable[[], bool], client: GitHubClient, new_effect_authorizer: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
     """Finish accepted FIXED/INVALID roots before acknowledging closure effects."""
 
     def unavailable(reason: str) -> Tuple[bool, str]:
@@ -1946,7 +1959,7 @@ def _consume_closure_thread_resolutions(payload: AcceptedReviewPayload, strong: 
             unfinished.append({"thread_id": matches[0].id if len(matches) == 1 else "", "phase": "root-identity", "reason": f"Exact root for {finding.finding_id} is unavailable"})
             continue
         thread = matches[0]
-        transport = _GitHubClosureThreadTransport(client, payload, thread, finding, authorize)
+        transport = _GitHubClosureThreadTransport(client, payload, thread, finding, authorize, new_effect_authorizer)
         try:
             with controller_authority_scope(client, payload.repository):
                 operation = executor.apply(payload, "finding-thread-resolution", f"github-thread:{thread.id}", transport, authorize)
@@ -2025,6 +2038,10 @@ def _consume_pending_two_tier_publication(repo_name: str, pr_number: int, inputs
             and (payload.mode != "ORDINARY_CLOSURE" or (current.accepted_closure is not None and current.accepted_closure.closure_id == payload.round_id))
         )
 
+    def authorize_new_effect() -> bool:
+        client = github_client or GitHubClient.get_instance()
+        return is_current() and _pr_automation_decision(client, repo_name, pr_number).allowed
+
     try:
         reviewer = GitHubAppReviewer(load_reviewer_app_config(repo_name=repo_name))
     except Exception:
@@ -2034,7 +2051,7 @@ def _consume_pending_two_tier_publication(repo_name: str, pr_number: int, inputs
         payload,
         "review-publication",
         TWO_TIER_REVIEW_DESTINATION,
-        _GitHubReviewEffectTransport(reviewer, payload, is_current),
+        _GitHubReviewEffectTransport(reviewer, payload, authorize_new_effect),
         is_current,
     )
     if operation.status != CONFIRMED:
@@ -2052,7 +2069,7 @@ def _consume_pending_two_tier_publication(repo_name: str, pr_number: int, inputs
 
         try:
             client = github_client or GitHubClient.get_instance()
-            resolved, reason = _consume_closure_thread_resolutions(payload, strong, reviewer, executor, authorize_closure, client)
+            resolved, reason = _consume_closure_thread_resolutions(payload, strong, reviewer, executor, authorize_closure, client, authorize_new_effect)
             if resolved and not authorize_closure():
                 _record_pr_stage(pr_number, "pr.review-thread-closure", f"pr#{pr_number} review-thread closure", Outcome.BLOCKED, {"examined_head": payload.target_head, "effect": "accepted-ordinary-closure", "reason": "Closure authority changed before acknowledgement"})
                 return False, "closure authority changed before acknowledgement"
@@ -2708,10 +2725,14 @@ def _retain_claude_quota_deferral(
 
 
 @contextmanager
-def _new_pr_correction_request(repository: str, pr_number: int):
+def _new_pr_correction_request(repository: str, pr_number: int, github_client: Any = None):
     """Other existing PR senders invalidate the old series, without registering one."""
     from .pr_no_commit_recovery import NoCommitRecovery, pr_correction_lock
 
+    client = github_client or _controller_feedback_client.get() or GitHubClient.get_instance()
+    guard = _pr_automation_decision(client, repository, pr_number)
+    if not guard.allowed:
+        raise PRAutomationRefused(guard)
     path = _cloud_review_repair_state_path(repository)
     with pr_correction_lock(path, pr_number):
         if path.exists():
@@ -2729,6 +2750,20 @@ def _retire_closed_cloud_checkpoint(repository: str, pr_number: int) -> None:
 
 
 _controller_feedback_state_path: ContextVar[Optional[Path]] = ContextVar("controller_feedback_state_path", default=None)
+_controller_feedback_client: ContextVar[Any] = ContextVar("controller_feedback_client", default=None)
+
+
+@contextmanager
+def _pr_automation_client_scope(github_client: Any):
+    """Carry the current repository credential client to the final send gate."""
+    if github_client is None:
+        yield
+        return
+    token = _controller_feedback_client.set(github_client)
+    try:
+        yield
+    finally:
+        _controller_feedback_client.reset(token)
 
 
 @contextmanager
@@ -2736,9 +2771,11 @@ def _controller_review_feedback_scope(github_client: Any, repo_name: str):
     """Pin the controller declaration while retaining accepted provider evidence."""
     with controller_authority_scope(github_client, repo_name):
         token = _controller_feedback_state_path.set(_cloud_review_repair_state_path(repo_name))
+        client_token = _controller_feedback_client.set(github_client)
         try:
             yield
         finally:
+            _controller_feedback_client.reset(client_token)
             _controller_feedback_state_path.reset(token)
 
 
@@ -2830,11 +2867,29 @@ def _send_followup_with_quota_admission_impl(
     client: Any, repository: str, task_id: str, message: str, identities: tuple[str, ...] = (), *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None
 ) -> bool:
     """Serialize Claude usage rechecks and fence final provider assignment."""
+
+    def guard_current() -> bool:
+        if repair_target is None:
+            return True
+        github = _controller_feedback_client.get() or GitHubClient.get_instance()
+        return _pr_automation_decision(github, repository, repair_target.pr_number).allowed
+
+    if not guard_current():
+        return False
     context = getattr(type(client), "followup_quota_context", None)
     if not callable(context):
         bounded_sender = getattr(type(client), "send_existing_pr_followup", None)
         if repair_target is not None and callable(bounded_sender):
-            return bounded_sender(client, task_id, message, repair_target, identities, **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}), **({"strong_source": strong_source, "strong_revision": strong_revision} if strong_source is not None else {}))
+            return bounded_sender(
+                client,
+                task_id,
+                message,
+                repair_target,
+                identities,
+                new_effect_authorizer=guard_current,
+                **({"final_authority_check": final_authority_check} if final_authority_check is not None else {}),
+                **({"strong_source": strong_source, "strong_revision": strong_revision} if strong_source is not None else {}),
+            )
         if final_authority_check is not None:
             raise ValueError("Scoped final authority requires the bounded native sender")
         return client.send_followup(task_id, message, identities) if identities else client.send_followup(task_id, message)
@@ -2845,6 +2900,8 @@ def _send_followup_with_quota_admission_impl(
     with store.admission(repository, backend_name, credential_context) as claim:
         client._followup_admission = claim
         try:
+            if not guard_current():
+                return False
             return client.send_followup(task_id, message)
         finally:
             client._followup_admission = None
@@ -3373,7 +3430,7 @@ def _verify_pending_local_correction(
                     return True
             if not may_send:
                 return False
-            return publish_adversarial_review(repo_name, pr_number, head_sha, result).success
+            return publish_adversarial_review(repo_name, pr_number, head_sha, result, new_effect_authorizer=lambda: _pr_automation_new_effect_refusal(github_client, repo_name, pr_number)).success
 
         observed_targets: dict[str, ClaimedReviewThread] = {}
 
@@ -3554,8 +3611,12 @@ def _get_review_thread_gate_state(
         return ReviewThreadGateState(lookup_error=str(e))
 
 
-def _record_codex_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> None:
-    """Reevaluate PR attribution without authorizing any provider effect."""
+def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any], github_client: Optional[Any] = None) -> None:
+    """Reestablish durable non-Jules ownership without provider effects."""
+    # Never accept a marker supplied by a caller or a stale metadata object.
+    # Only the durable resolver below may establish unrelated ownership.
+    pr_data.pop("_verified_codex_pr_origin", None)
+    pr_data.pop("_verified_non_jules_pr_origin", None)
     try:
         from .cloud_run import CloudRunRepository
         from .codex_pr_attribution import CodexPrAttributionRepository, resolve_codex_pr_origin
@@ -3571,13 +3632,110 @@ def _record_codex_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> Non
         has_accepted_codex_work = any(run.provider == "codex-cloud" and run.submission_outcome == "accepted" for issue_number in linked_issues for run in runs.list_for_issue(issue_number))
         if _is_codex_pr(pr_data) or has_accepted_codex_work or result.origin is not None:
             pr_data["_codex_pr_attribution_required"] = True
-        if result.origin is not None:
+        if result.disposition is AttributionDisposition.CONFLICT:
+            return
+        if result.disposition is AttributionDisposition.VERIFIED and result.origin is not None:
             pr_data["_verified_codex_pr_origin"] = result.origin.task_id
+            pr_data["_verified_non_jules_pr_origin"] = f"codex-cloud:{result.origin.task_id}"
         logger.debug(f"Codex PR attribution for #{pr_data.get('number')}: {result.disposition.value} ({result.boundary})")
     except Exception as exc:
         # Attribution is bookkeeping only. Its unavailable result must not
         # alter PR admission, provider routing, or unrelated processing.
         logger.warning(f"Codex PR attribution unavailable for #{pr_data.get('number')}: {type(exc).__name__}")
+
+    if pr_data.get("_verified_non_jules_pr_origin"):
+        return
+    try:
+        from .cloud_manager import CloudManager
+
+        bindings = CloudManager(repo_name).read_bindings_strict()
+        # Cloud bindings are keyed by Issue, not PR number.
+        sessions = {session for _, session in _extract_session_id_candidates(str(pr_data.get("body") or ""))}
+        for issue_number in _resolve_pr_issue_numbers(repo_name, pr_data, None):
+            binding = bindings.get(str(issue_number))
+            if binding is not None and binding.provider == "claude-routine" and binding.task_id in sessions:
+                pr_data["_verified_non_jules_pr_origin"] = f"{binding.provider}:{binding.task_id}"
+                return
+    except Exception as exc:
+        logger.warning(f"Cloud PR attribution unavailable for #{pr_data.get('number')}: {type(exc).__name__}")
+
+    # These established publication identities combine author and branch/body
+    # evidence; bot authorship or a PR number by itself never authorizes the
+    # bypass.  The caller supplies a current production PR observation.
+    author = (get_pr_author_login(pr_data) or "").casefold()
+    raw_head = pr_data.get("head")
+    head = raw_head if isinstance(raw_head, dict) else {}
+    head_ref = str(head.get("ref") or pr_data.get("headRefName") or pr_data.get("head_branch") or "")
+    if author == "dependabot[bot]" and head_ref.startswith("dependabot/"):
+        pr_data["_verified_non_jules_pr_origin"] = f"dependabot:{head_ref}"
+    elif any(marker in str(pr_data.get("body") or "") for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
+        controller_identity = None
+        if author.endswith("[bot]") and github_client is not None:
+            try:
+                controller_identity = github_client.get_authenticated_controller_identity(repo_name)
+            except Exception as exc:
+                logger.warning(f"Controller identity unavailable for local PR #{pr_data.get('number')}: {type(exc).__name__}")
+        if _is_local_llm_pr(pr_data, controller_identity):
+            pr_data["_verified_non_jules_pr_origin"] = f"local:{head_ref or 'publication-marker'}"
+
+
+def _record_codex_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> None:
+    """Compatibility entry point for callers that request Codex attribution."""
+    _record_non_jules_pr_attribution(repo_name, pr_data)
+
+
+def evaluate_retired_jules_ingress(github_client: Any, repo_name: str, pr_data: Dict[str, Any], *, refresh_metadata: bool = True) -> LifecycleDecision:
+    """Apply the same read-only origin fence before every PR ingress effect."""
+    # Reduced queue/list snapshots are not enough to prove publication origin.
+    # Reuse the existing uncached safety read before any policy may mutate the PR.
+    head = pr_data.get("head")
+    reduced_snapshot = "body" not in pr_data or not isinstance(head, dict) or not isinstance(head.get("ref"), str)
+    if (refresh_metadata or reduced_snapshot) and callable(getattr(type(github_client), "get_pull_request_metadata_strict", None)):
+        refreshed, metadata_error = _resolve_pr_safety_metadata(github_client, repo_name, pr_data)
+        if metadata_error or refreshed.get("number") != pr_data.get("number"):
+            reason = metadata_error or "GitHub returned a different PR identity"
+            decision = LifecycleDecision(ArtifactClassification.UNKNOWN, False, False, f"authoritative PR origin lookup failed: {reason}")
+            _record_pr_stage(
+                pr_data["number"],
+                "pr.speculative-jules-authority",
+                f"pr#{pr_data['number']} speculative Jules authority",
+                Outcome.DEFERRED,
+                {"classification": decision.classification.value, "reason": decision.reason},
+            )
+            return decision
+        if refreshed is not pr_data:
+            pr_data.clear()
+            pr_data.update(refreshed)
+    _record_non_jules_pr_attribution(repo_name, pr_data, github_client)
+    lifecycle = get_speculative_jules_lifecycle(github_client)
+    if lifecycle is None:
+        return LifecycleDecision()
+    issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
+    decision = lifecycle.evaluate_pr(repo_name, pr_data["number"], tuple(issue_numbers), pr_data)
+    if not decision.allow_ordinary_processing:
+        _record_pr_stage(
+            pr_data["number"],
+            "pr.speculative-jules-authority",
+            f"pr#{pr_data['number']} speculative Jules authority",
+            Outcome.DEFERRED,
+            {"classification": decision.classification.value, "cleanup_pending": decision.cleanup_pending},
+        )
+    return decision
+
+
+def _pr_automation_decision(github_client: Any, repo_name: str, pr_number: int):
+    from .pr_automation_guard import assess_pr_automation
+
+    decision = assess_pr_automation(github_client, repo_name, pr_number)
+    if not decision.allowed:
+        _record_pr_stage(
+            pr_number,
+            "pr.automation-stop",
+            f"pr#{pr_number} automation stop",
+            Outcome.BLOCKED if decision.stopped else Outcome.DEFERRED,
+            {"reason": decision.reason, "head_sha": decision.head_sha, "observed_commits": decision.observed_commits, "commit_limit": decision.commit_limit, "revert_sha": decision.revert_sha},
+        )
+    return decision
 
 
 def process_pull_request(
@@ -3629,27 +3787,21 @@ def _process_pull_request_impl(
         )
 
         pr_number = pr_data["number"]
+        guard = _pr_automation_decision(github_client, repo_name, pr_number)
+        if not guard.allowed:
+            processed_pr.priority = "blocked" if guard.stopped else "defer"
+            processed_pr.outcome = PRProcessingOutcome.BLOCKED if guard.stopped else PRProcessingOutcome.DEFERRED
+            processed_pr.target_reason = guard.reason
+            processed_pr.actions_taken = [guard.reason]
+            return processed_pr
 
-        # Competition authority is checked before branch recovery, empty/stale
-        # cleanup, labels, CI, repair, fallback, merge, or provider continuation.
-        # ``--force`` therefore cannot turn a loser or an uncertain artifact into
-        # ordinary work (Issue #2073, REQ-001/REQ-004).
-        speculative = get_speculative_jules_lifecycle(github_client)
-        if speculative is not None:
-            issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
-            decision = speculative.evaluate_pr(repo_name, pr_number, tuple(issue_numbers))
-            if not decision.allow_ordinary_processing:
-                processed_pr.priority = "cleanup" if decision.cleanup_pending else "defer"
-                processed_pr.outcome = PRProcessingOutcome.DEFERRED
-                processed_pr.actions_taken = [f"Speculative Jules {decision.classification.value.lower()} artifact fenced: {decision.reason}"]
-                _record_pr_stage(
-                    pr_number,
-                    "pr.speculative-jules-authority",
-                    f"pr#{pr_number} speculative Jules authority",
-                    Outcome.DEFERRED,
-                    {"classification": decision.classification.value, "cleanup_pending": decision.cleanup_pending},
-                )
-                return processed_pr
+        # All public ingress origins use the same pre-effect authority.
+        decision = evaluate_retired_jules_ingress(github_client, repo_name, pr_data)
+        if not decision.allow_ordinary_processing:
+            processed_pr.priority = "cleanup" if decision.cleanup_pending else "defer"
+            processed_pr.outcome = PRProcessingOutcome.DEFERRED
+            processed_pr.actions_taken = [f"Speculative Jules {decision.classification.value.lower()} artifact fenced: {decision.reason}"]
+            return processed_pr
 
         try:
             from .durable_repair_allowance import reconcile_unfulfilled_grant_reevaluations
@@ -3661,7 +3813,7 @@ def _process_pull_request_impl(
         # Resolve the execution origin before any diff, CI, merge, or checkout
         # behavior. ``work`` is Codex Cloud's shared/transient branch identity,
         # not a safe identity for an independently managed task.
-        unsafe_branch_result = _reject_unsafe_codex_cloud_pr(github_client, repo_name, pr_data, config)
+        unsafe_branch_result = _reject_unsafe_codex_cloud_pr(github_client, repo_name, pr_data, config, refresh_metadata=False)
         if unsafe_branch_result.metadata_error:
             processed_pr.actions_taken = list(unsafe_branch_result.actions)
             processed_pr.priority = "defer"
@@ -3670,7 +3822,7 @@ def _process_pull_request_impl(
             return processed_pr
         pr_data = unsafe_branch_result.authoritative_pr_data or pr_data
         processed_pr.pr_data = pr_data
-        _record_codex_pr_attribution(repo_name, pr_data)
+        _record_non_jules_pr_attribution(repo_name, pr_data, github_client)
         if unsafe_branch_result.closed:
             processed_pr.actions_taken = unsafe_branch_result.actions
             processed_pr.priority = "close"
@@ -4322,6 +4474,9 @@ def _resolve_pr_issue_numbers(
     repo_name: str,
     pr_data: Dict[str, Any],
     github_client: Any,
+    *,
+    include_body_links: bool = True,
+    include_session_history: bool = True,
 ) -> List[int]:
     """Resolve associated source issue numbers for a PR using body, session ID, branch, or title.
 
@@ -4334,14 +4489,17 @@ def _resolve_pr_issue_numbers(
         List of unique issue numbers associated with the PR
     """
     body = pr_data.get("body", "") or ""
-    issue_numbers = extract_linked_issues_from_pr_body(body)
-    if issue_numbers:
-        return issue_numbers
+    if include_body_links:
+        issue_numbers = extract_linked_issues_from_pr_body(body)
+        if issue_numbers:
+            return issue_numbers
 
-    # Try resolving via session ID, branch name, or title
-    resolved_issue = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
-    if resolved_issue:
-        return [resolved_issue]
+    # Historical provider bindings remain useful for diagnostics, but callers
+    # that may authorize fresh work must be able to exclude them explicitly.
+    if include_session_history:
+        resolved_issue = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
+        if resolved_issue:
+            return [resolved_issue]
 
     # Additional generic fallback: check branch name for patterns like "issue-123" or "fix-123"
     branch_name = ""
@@ -4443,6 +4601,8 @@ def _reject_unsafe_codex_cloud_pr(
     repo_name: str,
     pr_data: Dict[str, Any],
     config: AutomationConfig,
+    *,
+    refresh_metadata: bool = True,
 ) -> UnsafeCodexCloudPRResult:
     """Close a Codex Cloud PR published from the shared remote ``work`` branch.
 
@@ -4453,7 +4613,7 @@ def _reject_unsafe_codex_cloud_pr(
     existing retry path.
     """
     result = UnsafeCodexCloudPRResult()
-    authoritative_pr_data, metadata_error = _resolve_pr_safety_metadata(github_client, repo_name, pr_data)
+    authoritative_pr_data, metadata_error = _resolve_pr_safety_metadata(github_client, repo_name, pr_data, refresh=refresh_metadata)
     result.authoritative_pr_data = authoritative_pr_data
     if metadata_error:
         result.metadata_error = metadata_error
@@ -4572,9 +4732,23 @@ def _close_empty_pr(
         logger.info(f"PR #{pr_number} has zero effective diff against base branch. Closing it.")
 
         # Resolve the issue(s) that this PR was created for
-        issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
+        is_jules_pr = _is_jules_pr(pr_data)
+        issue_numbers = _resolve_pr_issue_numbers(
+            repo_name,
+            pr_data,
+            github_client,
+            # Before Jules retirement, the producer wrote a closing reference
+            # derived only from session history into the PR body. That text
+            # has no durable provenance marker, so an empty historical Jules
+            # PR cannot safely use a body link as fresh retry authority.
+            # Independent branch/title associations remain available.
+            include_body_links=not is_jules_pr,
+            include_session_history=not is_jules_pr,
+        )
 
-        close_comment = f"Auto-Coder: Closing PR #{pr_number} because it has no effective diff against the base branch. " "The linked issue(s) will be retried with an incremented attempt count."
+        close_comment = f"Auto-Coder: Closing PR #{pr_number} because it has no effective diff against the base branch."
+        if issue_numbers:
+            close_comment += " Eligible linked issue(s) will be retried with an incremented attempt count."
         client = github_client or GitHubClient.get_instance()
         client.close_pr(repo_name, pr_number, close_comment)
         _remove_reviewer_sessions_for_closed_pr(repo_name, pr_number)
@@ -4949,7 +5123,7 @@ def _start_mergeability_remediation(
             remediation_pr_data = dict(pr_details)
             remediation_pr_data["number"] = pr_number
             remediation_pr_data["base_branch"] = base_branch
-            update_actions = _update_with_base_branch(repo_name, remediation_pr_data, AutomationConfig())
+            update_actions = _update_with_base_branch(repo_name, remediation_pr_data, AutomationConfig(), github_client=client)
             actions.extend(update_actions)
             actions.repair_result = update_actions.repair_result
             actions.quota_deferred = update_actions.quota_deferred
@@ -6439,13 +6613,23 @@ def _pin_retained_review_publisher(repo_name: str, pr_number: int, head_sha: str
     return identity
 
 
-def _publish_effective_review(repo_name: str, pr_number: int, head_sha: str, result: AdversarialValidationResult, authority: Optional[ApprovalAuthority]) -> Any:
+def _pr_automation_new_effect_refusal(github_client: Any, repo_name: str, pr_number: int) -> str:
+    decision = _pr_automation_decision(github_client, repo_name, pr_number)
+    return "" if decision.allowed else decision.reason
+
+
+def _publish_effective_review(repo_name: str, pr_number: int, head_sha: str, result: AdversarialValidationResult, authority: Optional[ApprovalAuthority], *, github_client: Any = None) -> Any:
     """Publish the effective review; an approval carries its last pre-send authority check."""
     publisher = _pin_retained_review_publisher(repo_name, pr_number, head_sha, result)
+    client = github_client or _controller_feedback_client.get() or GitHubClient.get_instance()
+
+    def new_effect_authorizer() -> str:
+        return _pr_automation_new_effect_refusal(client, repo_name, pr_number)
+
     if authority is None:
         if publisher is None:
-            return publish_adversarial_review(repo_name, pr_number, head_sha, result)
-        return publish_adversarial_review(repo_name, pr_number, head_sha, result, expected_publisher=publisher)
+            return publish_adversarial_review(repo_name, pr_number, head_sha, result, new_effect_authorizer=new_effect_authorizer)
+        return publish_adversarial_review(repo_name, pr_number, head_sha, result, expected_publisher=publisher, new_effect_authorizer=new_effect_authorizer)
     with contextlib.ExitStack() as ordering:
         if result.allows_auto_merge:
             # An APPROVE can be sent: hold the accepted-state lifecycle's transition fence from the
@@ -6453,8 +6637,8 @@ def _publish_effective_review(repo_name: str, pr_number: int, head_sha: str, res
             # (and refuses) the approval or follows it.
             ordering.enter_context(authority.transition_fence())
         if publisher is None:
-            return publish_adversarial_review(repo_name, pr_number, head_sha, result, approval_authority=authority)
-        return publish_adversarial_review(repo_name, pr_number, head_sha, result, approval_authority=authority, expected_publisher=publisher)
+            return publish_adversarial_review(repo_name, pr_number, head_sha, result, approval_authority=authority, new_effect_authorizer=new_effect_authorizer)
+        return publish_adversarial_review(repo_name, pr_number, head_sha, result, approval_authority=authority, expected_publisher=publisher, new_effect_authorizer=new_effect_authorizer)
 
 
 def _authentic_root_threads(repo_name: str, state: ClaimedReviewThreadGateState) -> Sequence[ClaimedReviewThread]:
@@ -7914,6 +8098,7 @@ def _coordinate_pr_review(
                                 ledger=blocker_ledger,
                                 base_sha=base_sha_for_closure,
                                 review_attempt_id=runtime.active_attempt_id or "",
+                                new_effect_authorizer=lambda: _pr_automation_new_effect_refusal(github_client, repo_name, pr_number),
                             )
                             resolved_thread_ids = list(closure_report)
                             unfinished_closure_outcomes = tuple(getattr(closure_report, "unfinished_outcomes", ()))
@@ -8003,7 +8188,7 @@ def _coordinate_pr_review(
                         except (OSError, ValueError) as exc:
                             actions.append(f"Adversarial review publication blocked PR #{pr_number}: remediation-generation snapshot could not be persisted: {exc}")
                             return actions
-                    publication = _publish_effective_review(repo_name, pr_number, head_sha, val_result, _approval_authority_for(repo_name, pr_data, head_sha, effective_application, raw_val_result, claimed_review_threads, attempt_repository, attempt.sequence))
+                    publication = _publish_effective_review(repo_name, pr_number, head_sha, val_result, _approval_authority_for(repo_name, pr_data, head_sha, effective_application, raw_val_result, claimed_review_threads, attempt_repository, attempt.sequence), github_client=github_client)
                     if publication.policy_refusal is True:
                         # Nothing was transmitted (not a transport failure and not an
                         # ambiguously sent request): re-read and re-derive once while
@@ -8028,7 +8213,7 @@ def _coordinate_pr_review(
                         effective_application = replacement
                         val_result = replacement.result
                         validation_report = format_adversarial_validation_comment(val_result, head_sha)
-                        publication = _publish_effective_review(repo_name, pr_number, head_sha, val_result, _approval_authority_for(repo_name, pr_data, head_sha, effective_application, raw_val_result, claimed_review_threads, attempt_repository, attempt.sequence))
+                        publication = _publish_effective_review(repo_name, pr_number, head_sha, val_result, _approval_authority_for(repo_name, pr_data, head_sha, effective_application, raw_val_result, claimed_review_threads, attempt_repository, attempt.sequence), github_client=github_client)
                         if publication.policy_refusal is True:
                             actions.append(f"Approval for PR #{pr_number} was refused again before transmission: {publication.reason}; the outstanding work is retained for the next processing run")
                             _record_pr_stage(
@@ -8768,7 +8953,7 @@ def _coordinate_pr_review(
             pr_number,
             "pr.merge-route",
             f"pr#{pr_number} merge route",
-            Outcome.FAILED if merge_disposition.outcome is PRProcessingOutcome.FAILED else Outcome.DEFERRED,
+            Outcome.FAILED if merge_disposition.outcome is PRProcessingOutcome.FAILED else Outcome.BLOCKED if merge_disposition.outcome is PRProcessingOutcome.BLOCKED else Outcome.DEFERRED,
             {"reason": reason, "ci_failure": False},
         )
         return actions
@@ -9136,26 +9321,21 @@ def _handle_pr_merge(
                 actions.extend(stale_jules_result.actions)
                 return actions
 
-            actions.append(f"PR #{pr_number} is a Jules-created PR, evaluating CI repair admission")
-            session_id = str(pr_data.get("_jules_session_id") or _extract_session_id_from_pr_body(pr_data.get("body", "")) or "")
-
-            def send_jules_ci() -> PRRepairResult:
-                return _send_jules_error_feedback(repo_name, pr_data, failed_checks, config, github_client)
-
-            jules_feedback = _dispatch_jules_repair(repo_name, pr_data, RepairKind.CI_FAILURE, session_id, send_jules_ci)
-            actions.extend(jules_feedback.actions)
+            reason = "Jules CI repair is retired; historical sessions cannot authorize provider work"
+            refusal_action = f"Jules CI repair was not sent for PR #{pr_number}; local fixes remain disabled"
+            actions.append(refusal_action)
+            jules_feedback = PRRepairResult(
+                RepairDisposition.REFUSED,
+                (refusal_action,),
+                reason=reason,
+                attempt_started=False,
+            )
             actions.repair_result = jules_feedback
-            actions.retry_not_before = jules_feedback.retry_not_before
-            actions.repair_attempt_started = jules_feedback.attempt_started is True
-            if jules_feedback.disposition is RepairDisposition.ACCEPTED_OR_UNCERTAIN:
-                actions.append(f"Jules CI repair was attempted for PR #{pr_number}; awaiting a provider update without local fixes")
-                trace_outcome = Outcome.ACCEPTED_HANDOFF
-            else:
-                actions.append(f"Jules CI repair was not sent for PR #{pr_number}; local fixes remain disabled")
-                trace_outcome = Outcome.DEFERRED if jules_feedback.disposition is RepairDisposition.DEFERRED else Outcome.BLOCKED if jules_feedback.disposition is RepairDisposition.REFUSED else Outcome.FAILED
-                if processing_status is not None:
-                    processing_status.outcome = PRProcessingOutcome.FAILED if jules_feedback.disposition is RepairDisposition.FAILED else PRProcessingOutcome.DEFERRED
-                    processing_status.error = jules_feedback.reason if jules_feedback.disposition is RepairDisposition.FAILED else None
+            actions.repair_attempt_started = False
+            trace_outcome = Outcome.SKIPPED
+            if processing_status is not None:
+                processing_status.outcome = PRProcessingOutcome.DEFERRED
+                processing_status.error = None
             _record_pr_stage(
                 pr_number,
                 "pr.repair-delegation",
@@ -9224,7 +9404,7 @@ def _handle_pr_merge(
             prepare_branch=lambda: _checkout_pr_branch(repo_name, pr_data, config, perform_checkout=False),
             branch_context=BranchManager,
             automatic_fix_enabled=lambda: _is_automatic_test_fix_enabled(config, repo_name),
-            update_base=lambda: _update_with_base_branch(repo_name, pr_data, config),
+            update_base=lambda: _update_with_base_branch(repo_name, pr_data, config, github_client=github_client),
             summarize_checks=lambda checks: _create_github_action_log_summary(repo_name, config, list(checks), github_client=github_client),
             read_logs=lambda checks: _get_github_actions_logs(repo_name, config, list(checks), pr_data, github_client=github_client),
             correction=_local_ci_correction_ports(repo_name, pr_data, config),
@@ -9858,6 +10038,8 @@ def _resolve_pr_safety_metadata(
     github_client: Any,
     repo_name: str,
     pr_data: Dict[str, Any],
+    *,
+    refresh: bool = True,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """Return metadata sufficient for the Codex Cloud branch safety decision.
 
@@ -9868,7 +10050,7 @@ def _resolve_pr_safety_metadata(
     """
     client = github_client or GitHubClient.get_instance()
     getter = getattr(type(client), "get_pull_request_metadata_strict", None)
-    if callable(getter):
+    if refresh and callable(getter):
         try:
             refreshed = client.get_pull_request_metadata_strict(repo_name, int(pr_data["number"]))
         except Exception as exc:
@@ -10315,7 +10497,20 @@ def _link_jules_pr_to_issue(
             logger.info(f"Skipping issue lookup for Jules special PR #{pr_number} ('{pr_title}')")
             return True
 
-        issue_number = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
+        if is_jules:
+            # A persisted Jules session binding is historical ownership, not
+            # authorization to create an ordinary Issue link.  Otherwise that
+            # generated link can outlive this cycle and be mistaken for an
+            # explicit user-authored association by empty-PR recovery.
+            resolved_issues = _resolve_pr_issue_numbers(
+                repo_name,
+                pr_data,
+                github_client,
+                include_session_history=False,
+            )
+            issue_number = resolved_issues[0] if resolved_issues else None
+        else:
+            issue_number = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
 
         if not issue_number:
             logger.warning(f"No issue found for session PR #{pr_number} (checked session, branch, and title)")
@@ -10579,8 +10774,11 @@ PR Author: {pr_data.get('user', {}).get('login', 'Unknown')}
 
             logger.info(f"Sending CI failure logs to Jules session '{session_id}' for PR #{pr_number}; " f"head={expected_head} failures={authority.failure_identities}")
             jules_client = JulesClient()
-            attempt_started = True
-            with _new_pr_correction_request(repo_name, pr_number):
+            guard = _pr_automation_decision(github_client, repo_name, pr_number)
+            if not guard.allowed:
+                return unsent(RepairDisposition.REFUSED if guard.stopped else RepairDisposition.DEFERRED, guard.reason)
+            with _new_pr_correction_request(repo_name, pr_number, github_client):
+                attempt_started = True
                 response = jules_client.send_message(session_id, message)
 
         try:
@@ -10612,6 +10810,9 @@ PR Author: {pr_data.get('user', {}).get('login', 'Unknown')}
         else:
             actions.append(f"Skipped posting comment on PR #{pr_number}: no GitHub client available")
 
+    except PRAutomationRefused as exc:
+        actions.append(exc.decision.reason)
+        return unsent(RepairDisposition.REFUSED if exc.decision.stopped else RepairDisposition.DEFERRED, exc.decision.reason)
     except Exception as e:
         error_msg = f"Error sending Jules error feedback for PR #{pr_number}: {e}"
         try:
@@ -11469,15 +11670,16 @@ def _checkpoint_cloud_review_repair(repo_name: str, pr_data: Dict[str, Any], git
         details = render_prompt("pr.no_commit_checkpoint")
         message = build_existing_pr_repair_prompt(bounded_target, details)
         try:
-            accepted = _send_followup_with_quota_admission(
-                sender_origin.client,
-                repo_name,
-                origin.task_id,
-                message,
-                SUPPORTED_PROVIDERS[origin.provider].identities(logical_identity),
-                repair_target=bounded_target,
-                checkpoint=True,
-            )
+            with _pr_automation_client_scope(github_client):
+                accepted = _send_followup_with_quota_admission(
+                    sender_origin.client,
+                    repo_name,
+                    origin.task_id,
+                    message,
+                    SUPPORTED_PROVIDERS[origin.provider].identities(logical_identity),
+                    repair_target=bounded_target,
+                    checkpoint=True,
+                )
         except ClaudeFollowupUsageLimitError as exc:
             _retain_claude_quota_deferral(exc, target.pr_number, origin.task_id, "no-commit-checkpoint", logical_identity)
             raise
@@ -11942,7 +12144,8 @@ def _deliver_cloud_review_thread_feedback(
             with _cloud_review_delivery_lock:
                 _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
             return CloudReviewRepairResult([f"Review repair was not delivered for PR #{pr_number}: {attribution_error}"], deferred=_draft_pr_repair_authority.get() is not None)
-        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, tuple(sorted(pending_identities)), repair_target=target, recovery_provider=provider)
+        with _pr_automation_client_scope(github_client):
+            accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, tuple(sorted(pending_identities)), repair_target=target, recovery_provider=provider)
     except ClaudeFollowupHoldActive as exc:
         with _cloud_review_delivery_lock:
             _record_review_feedback_state(state_path, delivered, set(), remove_pending=pending_identities)
@@ -12271,7 +12474,8 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
                     if origin is None:
                         return "held_owner"
                     try:
-                        accepted = _send_followup_with_quota_admission(origin.client, repo_name, scoped.task_id, prompt, (identity,), repair_target=target, final_authority_check=final_authority_check)
+                        with _pr_automation_client_scope(github_client):
+                            accepted = _send_followup_with_quota_admission(origin.client, repo_name, scoped.task_id, prompt, (identity,), repair_target=target, final_authority_check=final_authority_check)
                     except Exception:
                         if origin.client.consume_followup_rejection(scoped.task_id, (identity,)):
                             return "remote_rejected"
@@ -12333,7 +12537,8 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
                             actions.append(f"Adjudicated repair for PR #{pr_number} was not delivered: {attribution_error}")
                             status = "pending"
                             continue
-                        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, (upheld.decision_id,) if provider == "codex-cloud" else (), repair_target=target)
+                        with _pr_automation_client_scope(github_client):
+                            accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, (upheld.decision_id,) if provider == "codex-cloud" else (), repair_target=target)
                         if accepted:
                             actions.append(f"Requested {provider} task '{task_id}' to apply an authorized bounded correction for PR #{pr_number}")
                             status = "delivered"
@@ -12348,6 +12553,10 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
         _record_adjudication_effect_stage(pr_number, "UPHOLD", upheld.context_id, upheld.decision_id, status)
 
     for overrule in plan.overrules:
+        refusal = _pr_automation_new_effect_refusal(github_client, repo_name, pr_number)
+        if refusal:
+            actions.append(refusal)
+            break
         try:
             effect_store.begin(overrule.context_id, repo_name, pr_number, overrule.decision_id, overrule.head_sha, overrule.contract_digest, "OVERRULE", gap_id=overrule.gap_id or "")
         except Exception as exc:
@@ -12355,6 +12564,11 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
             continue
         gap_note = ""
         if overrule.gap_id and not overrule.gap_still_contributed_elsewhere:
+            refusal = _pr_automation_new_effect_refusal(github_client, repo_name, pr_number)
+            if refusal:
+                actions.append(refusal)
+                effect_store.finish(overrule.context_id, "pending", gap_id=overrule.gap_id or "")
+                break
             if _mark_test_oracle_gap_invalid(repo_name, pr_number, overrule.gap_id, overrule.decision_id, overrule.rationale, overrule.head_sha):
                 gap_note = f" and retired material test-oracle gap `{overrule.gap_id}`"
         elif overrule.gap_id:
@@ -12363,6 +12577,11 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
         status = "unknown"
         try:
             explanation = format_overrule_explanation(overrule.decision_id, overrule.rationale)
+            refusal = _pr_automation_new_effect_refusal(github_client, repo_name, pr_number)
+            if refusal:
+                actions.append(refusal)
+                effect_store.finish(overrule.context_id, "pending", gap_id=overrule.gap_id or "")
+                break
             github_client.reply_to_review_thread(repo_name, pr_number, overrule.root_comment_id, explanation)
             # Re-check immediately before the resolve mutation: a concurrent
             # writer (e.g. the Dashboard write boundary) may have superseded
@@ -12373,6 +12592,11 @@ def _apply_review_adjudication_effects(repo_name: str, pr_number: int, pr_data: 
                 actions.append(f"Overruled finding on PR #{pr_number} was not resolved on GitHub: the decision is no longer current")
                 status = "pending"
             else:
+                refusal = _pr_automation_new_effect_refusal(github_client, repo_name, pr_number)
+                if refusal:
+                    actions.append(refusal)
+                    effect_store.finish(overrule.context_id, "pending", gap_id=overrule.gap_id or "")
+                    break
                 github_client.resolve_review_thread(overrule.thread_id)
                 actions.append(f"Retired an overruled finding on PR #{pr_number}{gap_note}")
                 status = "retired"
@@ -12542,7 +12766,8 @@ def _delegate_cloud_merge_conflict_repair_locked(
                 delivered.pop(fingerprint, None)
                 _record_cloud_conflict_deliveries(state_path, delivered)
             return CloudConflictDelegationResult(reason=final_origin.reason)
-        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, message, (logical_identity,) if logical_identity else (), repair_target=target)
+        with _pr_automation_client_scope(github_client):
+            accepted = _send_followup_with_quota_admission(client, repo_name, task_id, message, (logical_identity,) if logical_identity else (), repair_target=target)
     except ClaudeFollowupHoldActive as exc:
         return CloudConflictDelegationResult(reason=str(exc), deferred=True, retry_not_before=exc.retry_not_before)
     except ClaudeFollowupUsageLimitError as exc:
@@ -12684,13 +12909,19 @@ def _send_codex_cloud_error_feedback(
                 actions.append(f"Deferred Codex Cloud continuation for PR #{pr_number}: {attribution_error}")
                 return CodexCloudFeedbackResult(retryable=True, actions=tuple(actions), deferred=True)
             kwargs: dict[str, Any] = {}
+            if callable(getattr(type(client), "send_existing_pr_followup", None)):
+                kwargs["new_effect_authorizer"] = lambda: _pr_automation_decision(github_client, repo_name, pr_number).allowed
             if prompt is not None:
                 kwargs["prompt"] = prompt
                 if callable(getattr(type(client), "send_existing_pr_followup", None)):
                     kwargs["repair_target"] = target
             if force:
                 kwargs["force"] = True
-            with _new_pr_correction_request(repo_name, pr_number):
+            guard = _pr_automation_decision(github_client, repo_name, pr_number)
+            if not guard.allowed:
+                actions.append(guard.reason)
+                return CodexCloudFeedbackResult(retryable=not guard.stopped, actions=tuple(actions), deferred=True)
+            with _new_pr_correction_request(repo_name, pr_number, github_client):
                 resumed = client.continue_if_paused(task_id, **kwargs)
 
         if resumed:
@@ -12718,9 +12949,16 @@ def _send_codex_cloud_error_feedback(
             else:
                 actions.append(f"Skipped posting comment on PR #{pr_number}: no GitHub client available")
         else:
+            guard = _pr_automation_decision(github_client, repo_name, pr_number)
+            if not guard.allowed:
+                actions.append(guard.reason)
+                return CodexCloudFeedbackResult(retryable=not guard.stopped, actions=tuple(actions), deferred=True)
             actions.append(f"Codex Cloud task '{task_id}' could not be resumed for PR #{pr_number}")
             return CodexCloudFeedbackResult(retryable=True, actions=tuple(actions))
 
+    except PRAutomationRefused as exc:
+        actions.append(exc.decision.reason)
+        return CodexCloudFeedbackResult(retryable=not exc.decision.stopped, actions=tuple(actions), deferred=True)
     except Exception as e:
         error_msg = f"Error resuming Codex Cloud task for PR #{pr_number}: {e}"
         logger.error(error_msg)
@@ -13070,7 +13308,8 @@ def _deliver_adversarial_cloud_feedback(
         if attribution_error:
             _record_review_feedback_state(state_path, delivered, set(), remove_pending=set(identities))
             return [f"Adversarial feedback was not delivered for PR #{pr_number}: {attribution_error}"]
-        accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, identities, repair_target=target, recovery_provider=provider)
+        with _pr_automation_client_scope(github_client):
+            accepted = _send_followup_with_quota_admission(client, repo_name, task_id, prompt, identities, repair_target=target, recovery_provider=provider)
     except ClaudeFollowupHoldActive as exc:
         _record_review_feedback_state(state_path, delivered, set(), remove_pending=set(identities))
         deferred_actions = PRActionList([f"DEFERRED Claude adversarial feedback for PR #{pr_number} until {exc.retry_not_before}"])
@@ -13166,17 +13405,30 @@ def _describe_merge_operation_outcome(result: Any) -> str:
 def _finalize_merge_success(repo_name: str, pr_number: int, method: str, github_client: Any) -> bool:
     """Post-processing after a durably confirmed merge (REQ-009).
 
-    ``_close_linked_issues``/``_archive_jules_session`` already swallow their
-    own failures internally, so a post-processing problem is observable via
-    their own logging without ever turning a confirmed merge back into a
-    reported failure or triggering a re-merge/re-approval.
+    ``_close_linked_issues`` swallows its own failures internally, so a
+    post-processing problem is observable via its own logging without ever
+    turning a confirmed merge back into a reported failure or triggering a
+    re-merge/re-approval. Historical Jules sessions are intentionally left
+    untouched: a merged PR is not authority to mutate or replace them.
     """
     get_trace_logger().log("Merging", f"Successfully merged PR #{pr_number}", item_type="pr", item_number=pr_number, details={"method": method})
     log_action(f"Successfully merged PR #{pr_number} (method: {method})")
     _record_pr_stage(pr_number, "pr.merge-delivery", f"pr#{pr_number} merge delivery", Outcome.COMPLETED, {"method": method})
     _close_linked_issues(repo_name, pr_number, github_client)
-    _archive_jules_session(repo_name, pr_number)
     return True
+
+
+def _reconcile_guarded_merge(client: Any, repo_name: str, pr_number: int) -> None:
+    """Settle already-sent receipts without authorizing another mutation."""
+    from .merge_operation_adapter import reconcile_approval, reconcile_merge
+    from .merge_operation_state import EffectName, EffectState, MergeOperationIdentity, get_merge_operation_store
+
+    store = get_merge_operation_store()
+    identity = MergeOperationIdentity("https://api.github.com", repo_name, pr_number)
+    for effect_name, reconcile in ((EffectName.APPROVAL, reconcile_approval), (EffectName.MERGE, reconcile_merge)):
+        current = store.get(identity)
+        if current is not None and current.effect(effect_name).state is EffectState.DELIVERY_UNKNOWN:
+            reconcile(store, client.token, identity)
 
 
 def _merge_pr(
@@ -13206,7 +13458,7 @@ def _merge_pr(
 
     After a successful merge, automatically closes any issues referenced in
     the PR body using GitHub's linking keywords (closes, fixes, resolves,
-    etc.) and archives any associated Jules session.
+    etc.). Historical provider sessions remain unchanged.
     """
     from .merge_operation_adapter import AdapterOutcomeKind, AdapterResult, attempt_approval, attempt_merge, reconcile_approval, reconcile_merge
     from .merge_operation_state import EffectName, EffectState, MergeOperationIdentity, get_merge_operation_store
@@ -13216,10 +13468,16 @@ def _merge_pr(
         from auto_coder.util.gh_cache import get_ghapi_client
 
         client = github_client or GitHubClient.get_instance()
-        exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number)
-        if exhaustion_info and exhaustion_info.is_exhausted:
-            logger.warning(f"Merge aborted for PR #{pr_number}: repair allowance exhausted for open blocker(s): {', '.join(exhaustion_info.exhausted_blocker_ids)}")
-            publish_exhaustion_comment_deduped(client, repo_name, pr_number, exhaustion_info)
+        guard = _pr_automation_decision(client, repo_name, pr_number)
+        if not guard.allowed:
+            if route_disposition is not None:
+                route_disposition.outcome = PRProcessingOutcome.BLOCKED if guard.stopped else PRProcessingOutcome.DEFERRED
+                route_disposition.reason = guard.reason
+            if guard.stopped:
+                try:
+                    _reconcile_guarded_merge(client, repo_name, pr_number)
+                except Exception as exc:
+                    logger.warning("Stopped PR merge receipt remains unresolved: {}", exc)
             return False
 
         if _is_pr_review_thread_gate_enabled(config, repo_name):
@@ -13253,12 +13511,20 @@ def _merge_pr(
             logger.error(f"Could not read PR #{pr_number} before merge: {e}")
             return False
 
+        # The strict, freshly-read PR must independently reestablish non-Jules
+        # ownership before unavailable or recreated Jules history can be
+        # treated as unrelated at the final mutation boundary.
+        _record_non_jules_pr_attribution(repo_name, pr_info, client)
+
         # The ingress classification is not merge authority: selection or
         # invalidation may change while CI/review work is running.  Re-read the
         # durable competition immediately inside the final sender and fail
         # closed unless this exact PR is still the selected artifact.  Legacy
         # PRs remain governed by the ordinary merge gates.
-        speculative = get_speculative_jules_lifecycle(client)
+        speculative = get_speculative_jules_lifecycle(
+            client,
+            possible_retired_ownership=_is_jules_pr(pr_info),
+        )
         if speculative is not None:
             issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_info, client)
             issue_data: Dict[str, Any] = {}
@@ -13277,6 +13543,12 @@ def _merge_pr(
                 )
                 return False
 
+        exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number)
+        if exhaustion_info and exhaustion_info.is_exhausted:
+            logger.warning(f"Merge aborted for PR #{pr_number}: repair allowance exhausted for open blocker(s): {', '.join(exhaustion_info.exhausted_blocker_ids)}")
+            publish_exhaustion_comment_deduped(client, repo_name, pr_number, exhaustion_info)
+            return False
+
         head_sha = expected_head_sha or pr_info.get("head", {}).get("sha") or ""
         if not head_sha:
             logger.error(f"No head SHA available for PR #{pr_number}; aborting merge")
@@ -13294,14 +13566,23 @@ def _merge_pr(
                 logger.warning(f"Could not resolve reviewer identity for auto-approval of PR #{pr_number}: {e}")
             needs_approval = bool(reviewer_identity)
 
+        def _authorize_new_merge_effect() -> None:
+            guard = _pr_automation_decision(client, repo_name, pr_number)
+            if not guard.allowed:
+                raise PRAutomationRefused(guard)
+
         def _advance(effect_name: EffectName, attempt_fn, reconcile_fn) -> AdapterResult:
             current = store.get(identity)
             effect = current.effect(effect_name) if current is not None else None
             if effect is not None and effect.state is EffectState.DELIVERY_UNKNOWN:
                 return reconcile_fn(store, token, identity)
-            return attempt_fn(store, token, identity)
+            _authorize_new_merge_effect()
+            return attempt_fn(store, token, identity, new_effect_authorizer=_authorize_new_merge_effect)
 
         def _try_merge(method: str, target_head_sha: str) -> AdapterResult:
+            guard = _pr_automation_decision(client, repo_name, pr_number)
+            if not guard.allowed:
+                raise PRAutomationRefused(guard)
             store.get_or_create(
                 identity,
                 expected_head_sha=target_head_sha,
@@ -13358,6 +13639,13 @@ def _merge_pr(
             route_disposition,
         )
 
+    except PRAutomationRefused as exc:
+        guard = exc.decision
+        _record_pr_stage(pr_number, "pr.merge-delivery", f"pr#{pr_number} merge delivery", Outcome.BLOCKED if guard.stopped else Outcome.DEFERRED, {"reason": guard.reason})
+        if route_disposition is not None:
+            route_disposition.outcome = PRProcessingOutcome.BLOCKED if guard.stopped else PRProcessingOutcome.DEFERRED
+            route_disposition.reason = guard.reason
+        return False
     except Exception as e:
         logger.error(f"Error merging PR #{pr_number}: {e}")
         _record_pr_stage(pr_number, "pr.merge-delivery", f"pr#{pr_number} merge delivery", Outcome.FAILED, {"reason": str(e)})
@@ -13444,46 +13732,15 @@ def _handle_definitive_merge_rejection(
     log_action(f"PR #{pr_number} has merge conflicts, attempting resolution")
 
     if _is_jules_pr(pr_info):
-        logger.info(f"PR #{pr_number} is a Jules PR with merge conflicts. Requesting Jules to resolve it.")
-        try:
-            from auto_coder.jules_client import JulesClient
-
-            jules_client = JulesClient()
-            session_id = _extract_session_id_from_pr_body(pr_info.get("body", ""))
-            if session_id:
-                # REQ-007/REQ-009 (Issue #2147): guard + durably admit this
-                # outbound mutation to an existing Jules session before
-                # sending it.
-                request = BaseUpdateExecutionRequest(
-                    repo_name,
-                    pr_number,
-                    str(pr_info.get("head", {}).get("sha") or head_sha),
-                    str(pr_info.get("base", {}).get("ref") or config.MAIN_BRANCH),
-                    RepairOrigin.JULES.value,
-                )
-
-                def send_jules() -> PRRepairResult:
-                    if not _guard_outbound_jules_send(repo_name, config, session_id):
-                        reason = f"Blocked merge-conflict resolution request for PR #{pr_number}: session '{session_id}' belongs to a durably retired implementation slot (REQ-009)"
-                        return PRRepairResult(RepairDisposition.REFUSED, reason=reason)
-                    prompt = render_prompt("pr.jules_merge_conflict_resolution")
-                    with _new_pr_correction_request(repo_name, pr_number):
-                        jules_client.send_message(session_id, prompt)
-                    return PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, attempt_started=True)
-
-                result = BaseUpdateConflictExecutionService().execute_conflict_repair(
-                    request,
-                    lambda: _dispatch_jules_repair(repo_name, pr_info, RepairKind.MERGE_CONFLICT, session_id, send_jules),
-                )
-                if result.disposition is RepairDisposition.ACCEPTED_OR_UNCERTAIN:
-                    logger.info(f"Requested Jules to resolve merge conflict in session {session_id}")
-                    log_action(f"Requested Jules to resolve merge conflicts for PR #{pr_number}")
-                    _record_pr_stage(pr_number, "pr.repair-delegation", f"pr#{pr_number} repair delegation", Outcome.ACCEPTED_HANDOFF, {"effect": "merge-conflict", "backend": "jules"})
-                return False
-            else:
-                logger.warning(f"Jules PR #{pr_number} has merge conflicts but no session ID found. Cannot delegate.")
-        except Exception as e:
-            logger.error(f"Error requesting Jules to resolve conflict: {e}")
+        logger.info(f"PR #{pr_number} is a historical Jules PR with merge conflicts; provider repair is retired")
+        _record_pr_stage(
+            pr_number,
+            "pr.repair-delegation",
+            f"pr#{pr_number} repair delegation",
+            Outcome.SKIPPED,
+            {"effect": "merge-conflict", "backend": "jules", "reason": "historical Jules repair is retired"},
+        )
+        return False
 
     # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
     # the bot recreates the PR against the updated base branch by itself.

@@ -1,8 +1,8 @@
 """Fail-closed lifecycle fence for PRs owned by Jules competitions.
 
-The observation adapter is the authority for membership and winner identity.  This
-module turns that read-only decision into an ingress decision and keeps PR cleanup
-as a durable, independently replayable effect.
+The observation adapter is the authority for membership and winner identity. This
+module turns that read-only decision into ingress and merge decisions. Historical
+state is never refreshed from Jules and never authorizes cleanup mutations.
 """
 
 from __future__ import annotations
@@ -20,7 +20,14 @@ from .jules_candidate_observation import ArtifactClassification, ClassificationR
 class SpeculativeClassifier(Protocol):
     def classify(self, repository: str, issue_number: int, pr_repository: str, pr_number: int) -> ClassificationResult: ...
 
-    def classify_pr(self, repository: str, pr_repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> tuple[Optional[int], ClassificationResult]: ...
+    def classify_pr(
+        self,
+        repository: str,
+        pr_repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        independently_unrelated: bool = False,
+    ) -> tuple[Optional[int], ClassificationResult]: ...
 
     def selected_pr_number(self, repository: str, issue_number: int, generation_id: str) -> Optional[int]: ...
 
@@ -33,11 +40,82 @@ class SpeculativeClassifier(Protocol):
         issue_data: Mapping[str, object],
     ) -> bool: ...
 
+    def selected_ingress_authorized(
+        self,
+        repository: str,
+        issue_number: int,
+        result: ClassificationResult,
+        pr_data: Mapping[str, object],
+    ) -> bool: ...
+
 
 class CleanupGitHubClient(Protocol):
     def get_pull_request_metadata_strict(self, repository: str, pr_number: int) -> Mapping[str, object]: ...
 
     def close_pr(self, repository: str, pr_number: int, comment: str) -> None: ...
+
+
+class RetiredJulesReader:
+    """Non-transport placeholder satisfying the observation adapter contract."""
+
+    def get_session(self, session_id: str) -> Mapping[str, object]:
+        raise RuntimeError("retired Jules competitions cannot read provider sessions")
+
+
+class UnavailableSpeculativeClassifier:
+    """Retain an explicit unknown decision when history cannot be opened."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def classify(
+        self,
+        repository: str,
+        issue_number: int,
+        pr_repository: str,
+        pr_number: int,
+    ) -> ClassificationResult:
+        return ClassificationResult(
+            ArtifactClassification.UNKNOWN,
+            diagnostics=(self.reason,),
+        )
+
+    def classify_pr(
+        self,
+        repository: str,
+        pr_repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        independently_unrelated: bool = False,
+    ) -> tuple[Optional[int], ClassificationResult]:
+        if independently_unrelated:
+            return None, ClassificationResult(
+                ArtifactClassification.LEGACY,
+                mutation_allowed=True,
+            )
+        return None, self.classify(repository, 0, pr_repository, pr_number)
+
+    def selected_pr_number(self, repository: str, issue_number: int, generation_id: str) -> Optional[int]:
+        return None
+
+    def selected_merge_authorized(
+        self,
+        repository: str,
+        issue_number: int,
+        result: ClassificationResult,
+        pr_data: Mapping[str, object],
+        issue_data: Mapping[str, object],
+    ) -> bool:
+        return False
+
+    def selected_ingress_authorized(
+        self,
+        repository: str,
+        issue_number: int,
+        result: ClassificationResult,
+        pr_data: Mapping[str, object],
+    ) -> bool:
+        return False
 
 
 @dataclass(frozen=True)
@@ -62,9 +140,11 @@ class LifecycleDecision:
 class SpeculativeCleanupStore:
     """Durable close obligations; retirement is recorded before GitHub mutation."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, initialize: bool = True):
         self.path = path
         self._lock = threading.RLock()
+        if not initialize:
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS cleanup (
@@ -101,24 +181,58 @@ class SpeculativeCleanupStore:
             rows = connection.execute("SELECT repository, issue_number, generation_id, candidate_id, pr_number, selected_pr, reason FROM cleanup WHERE status='PENDING'").fetchall()
         return tuple(CleanupObligation(str(row[0]), int(row[1]), str(row[2]), str(row[3]), int(row[4]), cast(Optional[int], row[5]), str(row[6])) for row in rows)
 
+    def has_retired_pr_association(self, repository: str, pr_number: int) -> bool:
+        """Read an exact historical association without authorizing cleanup."""
+        # Read-only fallback stores deliberately use ``initialize=False``.
+        # Do not let a lookup against one create an empty SQLite database: its
+        # existence is itself startup evidence that activates the historical
+        # fence on subsequent requests.
+        if not self.path.is_file():
+            return False
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM cleanup WHERE repository=? AND pr_number=? LIMIT 1",
+                (repository, pr_number),
+            ).fetchone()
+        return row is not None
+
 
 class SpeculativeJulesLifecycle:
     def __init__(self, classifier: SpeculativeClassifier, cleanup_store: SpeculativeCleanupStore):
         self.classifier = classifier
         self.cleanup_store = cleanup_store
 
-    def evaluate_pr(self, repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> LifecycleDecision:
-        issue_number, result = self.classifier.classify_pr(repository, repository, pr_number, hinted_issue_numbers)
+    def evaluate_pr(
+        self,
+        repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        pr_data: Optional[Mapping[str, object]] = None,
+    ) -> LifecycleDecision:
+        try:
+            if self.cleanup_store.has_retired_pr_association(repository, pr_number):
+                return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
+        except (OSError, sqlite3.Error):
+            # An unreadable supplemental store is unavailable evidence.  The
+            # primary classifier still decides between verified unrelated and
+            # explicit UNKNOWN ownership below.
+            pass
+        independently_unrelated = bool(pr_data is not None and isinstance(pr_data.get("_verified_non_jules_pr_origin"), str) and pr_data.get("_verified_non_jules_pr_origin"))
+        issue_number, result = self.classifier.classify_pr(
+            repository,
+            repository,
+            pr_number,
+            hinted_issue_numbers,
+            independently_unrelated,
+        )
         if result.classification is ArtifactClassification.LEGACY:
             return LifecycleDecision()
         if result.classification is ArtifactClassification.SELECTED:
+            if issue_number is None or pr_data is None or not self.classifier.selected_ingress_authorized(repository, issue_number, result, pr_data):
+                return LifecycleDecision(ArtifactClassification.BLOCKED, False, False, "selected acceptance is stale or invalidated")
             return LifecycleDecision(result.classification, True)
         if result.classification is ArtifactClassification.RETIRED:
-            if issue_number is None or result.generation_id is None:
-                return LifecycleDecision(ArtifactClassification.BLOCKED, False, False, "retired artifact ownership is unavailable")
-            selected_pr = self.classifier.selected_pr_number(repository, issue_number, result.generation_id)
-            self.cleanup_store.retain(repository, issue_number, result, pr_number, selected_pr)
-            return LifecycleDecision(result.classification, False, True, "verified retired Jules competitor")
+            return LifecycleDecision(result.classification, False, False, "verified retired Jules competitor")
         # Active candidates use the competition evaluator; suspected/conflicting
         # artifacts must be retried after authoritative evidence becomes available.
         return LifecycleDecision(result.classification, False, False, "; ".join(result.diagnostics) or "candidate-aware evaluation required")
@@ -132,7 +246,21 @@ class SpeculativeJulesLifecycle:
         hinted_issue_numbers: tuple[int, ...] = (),
     ) -> LifecycleDecision:
         """Reestablish fresh selected-pair authority at the merge mutation boundary."""
-        issue_number, result = self.classifier.classify_pr(repository, repository, pr_number, hinted_issue_numbers)
+        try:
+            if self.cleanup_store.has_retired_pr_association(repository, pr_number):
+                return LifecycleDecision(ArtifactClassification.RETIRED, False, False, "verified retired Jules cleanup association")
+        except (OSError, sqlite3.Error):
+            # Preserve the same evidence ordering as ingress: cleanup failure
+            # cannot veto independent origin proof or erase primary ambiguity.
+            pass
+        independently_unrelated = bool(isinstance(pr_data.get("_verified_non_jules_pr_origin"), str) and pr_data.get("_verified_non_jules_pr_origin"))
+        issue_number, result = self.classifier.classify_pr(
+            repository,
+            repository,
+            pr_number,
+            hinted_issue_numbers,
+            independently_unrelated,
+        )
         if result.classification is ArtifactClassification.LEGACY:
             return LifecycleDecision()
         if issue_number is None or result.classification is not ArtifactClassification.SELECTED:
@@ -142,59 +270,103 @@ class SpeculativeJulesLifecycle:
         return LifecycleDecision(ArtifactClassification.SELECTED, True)
 
     def consume_cleanup(self, github_client: CleanupGitHubClient) -> int:
-        """Attempt every due close, rechecking authority at the outbound boundary."""
-        completed = 0
-        for obligation in self.cleanup_store.pending():
-            current = self.classifier.classify(obligation.repository, obligation.issue_number, obligation.repository, obligation.pr_number)
-            if current.classification is not ArtifactClassification.RETIRED or current.generation_id != obligation.generation_id or current.candidate_id != obligation.candidate_id:
-                continue
-            pr = github_client.get_pull_request_metadata_strict(obligation.repository, obligation.pr_number)
-            state = pr.get("state")
-            merged = bool(pr.get("merged"))
-            if state == "closed" or merged:
-                self.cleanup_store.complete(obligation.repository, obligation.generation_id, obligation.candidate_id, obligation.pr_number)
-                completed += 1
-                continue
-            # A second classification is intentionally adjacent to the mutation.
-            boundary = self.classifier.classify(obligation.repository, obligation.issue_number, obligation.repository, obligation.pr_number)
-            if boundary.classification is not ArtifactClassification.RETIRED or boundary.generation_id != obligation.generation_id or boundary.candidate_id != obligation.candidate_id:
-                continue
-            github_client.close_pr(obligation.repository, obligation.pr_number, f"Auto-Coder: Closing verified losing Jules candidate PR. {obligation.reason}.")
-            confirmed = github_client.get_pull_request_metadata_strict(obligation.repository, obligation.pr_number)
-            if confirmed.get("state") == "closed" or confirmed.get("merged"):
-                self.cleanup_store.complete(obligation.repository, obligation.generation_id, obligation.candidate_id, obligation.pr_number)
-                completed += 1
-        return completed
+        """Leave pre-retirement cleanup obligations inspectable and inert."""
+        return 0
 
 
 class RefreshingSpeculativeClassifier:
-    """Refresh candidate sessions before making an ingress authority decision."""
+    """Read the retired ledger and retained observations without Jules traffic.
+
+    The historical name remains for import compatibility.
+    """
 
     def __init__(self, adapter: object, ledger: object):
         self.adapter = adapter
         self.ledger = ledger
 
-    def classify(self, repository: str, issue_number: int, pr_repository: str, pr_number: int) -> ClassificationResult:
-        snapshot = self.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
-        for generation in snapshot.generations:
-            for candidate in generation.candidates:
-                if candidate.session_id:
-                    self.adapter.observe_candidate(repository, issue_number, generation.generation_id, candidate.candidate_id)  # type: ignore[attr-defined]
-        return self.adapter.classify(repository, issue_number, pr_repository, pr_number)  # type: ignore[no-any-return,attr-defined]
+    def classify(self, repository: str, issue_number: int, pr_repository: str, pr_number: int, independently_unrelated: bool = False) -> ClassificationResult:
+        try:
+            result = self.adapter.classify(repository, issue_number, pr_repository, pr_number)  # type: ignore[attr-defined]
+            if result.classification is ArtifactClassification.LEGACY:
+                snapshot = self.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
+                if any(binding.pr_repository.lower() == pr_repository.lower() and binding.pr_number == pr_number for generation in snapshot.generations for candidate in generation.candidates for binding in candidate.bindings):
+                    return ClassificationResult(ArtifactClassification.UNKNOWN, diagnostics=("ledger binding lacks matching observation authority",))
+                if snapshot.generations and not independently_unrelated and not self.adapter.store.has_legacy_membership(repository, pr_repository, pr_number):  # type: ignore[attr-defined]
+                    return ClassificationResult(ArtifactClassification.UNKNOWN, diagnostics=("unresolved retired Jules ownership",))
+            return result  # type: ignore[no-any-return]
+        except Exception as exc:
+            return ClassificationResult(
+                ArtifactClassification.UNKNOWN,
+                diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
+            )
 
-    def classify_pr(self, repository: str, pr_repository: str, pr_number: int, hinted_issue_numbers: tuple[int, ...] = ()) -> tuple[Optional[int], ClassificationResult]:
-        issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *self.ledger.list_issue_numbers(repository))))  # type: ignore[attr-defined]
-        if not issue_numbers:
-            return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
-        classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number)) for issue in issue_numbers)
+    def classify_pr(
+        self,
+        repository: str,
+        pr_repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        independently_unrelated: bool = False,
+    ) -> tuple[Optional[int], ClassificationResult]:
+        observations_error: Optional[Exception] = None
+        try:
+            retained_association = self.adapter.store.has_retired_pr_association(repository, pr_repository, pr_number)  # type: ignore[attr-defined]
+        except Exception as exc:
+            observations_error = exc
+            retained_association = False
+        try:
+            ledger_issues = self.ledger.list_issue_numbers(repository)  # type: ignore[attr-defined]
+        except Exception as exc:
+            if independently_unrelated and observations_error is None and not retained_association:
+                return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
+            return None, ClassificationResult(
+                ArtifactClassification.UNKNOWN,
+                diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
+            )
+        if observations_error is not None:
+            try:
+                ledger_association = any(
+                    binding.pr_repository.lower() == pr_repository.lower() and binding.pr_number == pr_number
+                    for issue_number in ledger_issues
+                    for generation in self.ledger.get_namespace_snapshot(repository, issue_number).generations  # type: ignore[attr-defined]
+                    for candidate in generation.candidates
+                    for binding in candidate.bindings
+                )
+            except Exception as exc:
+                return None, ClassificationResult(
+                    ArtifactClassification.UNKNOWN,
+                    diagnostics=(f"retired Jules ledger unavailable: {type(exc).__name__}",),
+                )
+            if ledger_association:
+                return None, ClassificationResult(
+                    ArtifactClassification.UNKNOWN,
+                    diagnostics=("ledger binding lacks readable observation authority",),
+                )
+            if independently_unrelated:
+                return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
+            return None, ClassificationResult(
+                ArtifactClassification.UNKNOWN,
+                diagnostics=(f"retired Jules observations unavailable: {type(observations_error).__name__}",),
+            )
+        if not ledger_issues:
+            if independently_unrelated and not retained_association:
+                return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
+            return None, ClassificationResult(
+                ArtifactClassification.UNKNOWN,
+                diagnostics=("retired Jules ownership cannot be reconciled from empty history",),
+            )
+        issue_numbers = tuple(dict.fromkeys((*hinted_issue_numbers, *ledger_issues)))
+        classified = tuple((issue, self.classify(repository, issue, pr_repository, pr_number, independently_unrelated)) for issue in issue_numbers)
         relevant = tuple(item for item in classified if item[1].classification is not ArtifactClassification.LEGACY)
         if not relevant:
+            if retained_association:
+                return None, ClassificationResult(ArtifactClassification.UNKNOWN, diagnostics=("retained association lacks readable ledger authority",))
             return None, ClassificationResult(ArtifactClassification.LEGACY, mutation_allowed=True)
         definitive = tuple(item for item in relevant if item[1].classification in (ArtifactClassification.ACTIVE_UNSELECTED, ArtifactClassification.SELECTED, ArtifactClassification.RETIRED))
-        if len(definitive) == 1:
+        if len(definitive) == 1 and len(relevant) == 1:
             return definitive[0]
         if len(definitive) > 1 or len(relevant) > 1:
-            return None, ClassificationResult(ArtifactClassification.BLOCKED, diagnostics=("PR has multiple speculative Issue associations",))
+            return None, ClassificationResult(ArtifactClassification.UNKNOWN, diagnostics=("PR has multiple speculative Issue associations",))
         return relevant[0]
 
     def selected_pr_number(self, repository: str, issue_number: int, generation_id: str) -> Optional[int]:
@@ -237,6 +409,31 @@ class RefreshingSpeculativeClassifier:
         invalidation_revision = self.adapter.store.current_invalidation_revision(repository, issue_number, result.generation_id, result.candidate_id)  # type: ignore[attr-defined]
         return selected_pair_authorized(self.ledger, target, current_invalidation_revision=invalidation_revision)  # type: ignore[arg-type]
 
+    def selected_ingress_authorized(
+        self,
+        repository: str,
+        issue_number: int,
+        result: ClassificationResult,
+        pr_data: Mapping[str, object],
+    ) -> bool:
+        """Validate the durable selected pair before ordinary PR effects run."""
+        if result.generation_id is None:
+            return False
+        try:
+            issue = self.adapter.github.get_issue(repository, issue_number)  # type: ignore[attr-defined]
+            if issue is None:
+                return False
+            issue_data = issue if isinstance(issue, Mapping) else {"state": getattr(issue, "state", None), "body": getattr(issue, "body", None)}
+            return self.selected_merge_authorized(
+                repository,
+                issue_number,
+                result,
+                pr_data,
+                issue_data,
+            )
+        except Exception:
+            return False
+
 
 _lifecycle: Optional[SpeculativeJulesLifecycle] = None
 
@@ -247,25 +444,64 @@ def configure_speculative_jules_lifecycle(lifecycle: Optional[SpeculativeJulesLi
     _lifecycle = lifecycle
 
 
-def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> Optional[SpeculativeJulesLifecycle]:
+def get_speculative_jules_lifecycle(
+    github_client: Optional[object] = None,
+    *,
+    possible_retired_ownership: bool = False,
+) -> Optional[SpeculativeJulesLifecycle]:
     """Return configured authority, lazily creating the production adapter."""
     global _lifecycle
     if _lifecycle is None and github_client is not None:
         from .jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
-        from .jules_client import JulesClient
-        from .jules_competition_ledger import JulesCompetitionLedger
+        from .jules_competition_ledger import JulesCompetitionLedger, default_jules_competition_db_path, retired_jules_history_marker_path
 
         root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder")) / "state"
-        ledger = JulesCompetitionLedger()
-        adapter = JulesCandidateObservationAdapter(
-            ledger,
-            CandidateObservationStore(root / "jules_candidate_observations.db"),
-            JulesClient(),
-            github_client,  # type: ignore[arg-type]
-        )
+        ledger_path = default_jules_competition_db_path()
+        observation_path = root / "jules_candidate_observations.db"
+        history_marker = retired_jules_history_marker_path(ledger_path)
+        cleanup_path = default_cleanup_path()
+        # Migrate pre-marker installations while at least one historical store
+        # is still observable.  The marker then keeps the fence active if both
+        # SQLite files are lost later.  Conversely, inspecting an installation
+        # that has never had either store must not manufacture empty history.
+        if ledger_path.exists() or observation_path.exists():
+            history_marker.parent.mkdir(parents=True, exist_ok=True)
+            history_marker.touch(exist_ok=True)
+        elif not history_marker.exists() and not cleanup_path.exists():
+            # A fresh worker can process an existing repository with retired
+            # candidates. Installation identity is therefore never PR-origin
+            # evidence. Retain UNKNOWN until this PR has independent provenance.
+            return SpeculativeJulesLifecycle(
+                UnavailableSpeculativeClassifier("retired Jules history is unavailable before migration"),
+                SpeculativeCleanupStore(cleanup_path, initialize=False),
+            )
+        try:
+            cleanup_store = SpeculativeCleanupStore(cleanup_path)
+        except (OSError, sqlite3.Error):
+            cleanup_store = SpeculativeCleanupStore(cleanup_path, initialize=False)
+        try:
+            ledger = JulesCompetitionLedger(ledger_path)
+            try:
+                observations = CandidateObservationStore(observation_path)
+            except (OSError, sqlite3.Error):
+                if not ledger_path.is_file():
+                    raise
+                observations = CandidateObservationStore(
+                    observation_path,
+                    initialize=False,
+                )
+            adapter = JulesCandidateObservationAdapter(
+                ledger,
+                observations,
+                RetiredJulesReader(),
+                github_client,  # type: ignore[arg-type]
+            )
+            classifier: SpeculativeClassifier = RefreshingSpeculativeClassifier(adapter, ledger)
+        except (OSError, sqlite3.Error) as exc:
+            classifier = UnavailableSpeculativeClassifier(f"retired Jules history unavailable: {type(exc).__name__}")
         _lifecycle = SpeculativeJulesLifecycle(
-            RefreshingSpeculativeClassifier(adapter, ledger),
-            SpeculativeCleanupStore(default_cleanup_path()),
+            classifier,
+            cleanup_store,
         )
     return _lifecycle
 
@@ -289,30 +525,5 @@ def consume_due_speculative_work(
     enqueue_issue: Optional[Callable[[int], None]] = None,
     enqueue_pr: Optional[Callable[[int], None]] = None,
 ) -> tuple[int, int]:
-    """Refresh sessions and deliver durable adoption/failure obligations."""
-    from .jules_competition_ledger import ObligationKind
-
-    lifecycle = get_speculative_jules_lifecycle(github_client)
-    if lifecycle is None or not isinstance(lifecycle.classifier, RefreshingSpeculativeClassifier):
-        return (0, 0)
-    classifier = lifecycle.classifier
-    refreshed = 0
-    for issue_number in classifier.ledger.list_issue_numbers(repository):  # type: ignore[attr-defined]
-        snapshot = classifier.ledger.get_namespace_snapshot(repository, issue_number)  # type: ignore[attr-defined]
-        for generation in snapshot.generations:
-            for candidate in generation.candidates:
-                if candidate.session_id:
-                    classifier.adapter.observe_candidate(repository, issue_number, generation.generation_id, candidate.candidate_id)  # type: ignore[attr-defined]
-                    refreshed += 1
-        for obligation in classifier.ledger.list_pending_obligations(repository, issue_number):  # type: ignore[attr-defined]
-            delivered = False
-            if obligation.kind is ObligationKind.ADOPTION and enqueue_pr is not None:
-                enqueue_pr(obligation.adoption_payload().pr_number)
-                delivered = True
-            elif obligation.kind is ObligationKind.AGGREGATE_FAILURE and enqueue_issue is not None:
-                enqueue_issue(issue_number)
-                delivered = True
-            if delivered:
-                classifier.ledger.mark_obligation_delivered(obligation.obligation_id, f"production-deliver:{obligation.obligation_id}")  # type: ignore[attr-defined]
-                classifier.ledger.acknowledge_obligation(obligation.obligation_id, f"production-ack:{obligation.obligation_id}")  # type: ignore[attr-defined]
-    return refreshed, lifecycle.consume_cleanup(github_client)  # type: ignore[arg-type]
+    """Retired compatibility entry point; competition effects remain inert."""
+    return (0, 0)

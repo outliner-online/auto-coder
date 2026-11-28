@@ -44,6 +44,7 @@ from auto_coder.pr_processor import (
 from auto_coder.util.gh_cache import GitHubClient
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 
 def _controller_client():
@@ -235,6 +236,7 @@ class TestAS001LocalTestFailureWithRepairDisabled:
         head_sha = "a" * 40
         pr_data = _pr_data(100, head_sha, ref="issue-42")
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         # CI check fails
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[1])
@@ -310,6 +312,7 @@ class TestAS002GitHubActionsFailureWithRepairDisabled:
         head_sha = "b" * 40
         pr_data = _pr_data(101, head_sha, ref="issue-43")
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         # CI check fails
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[2])
@@ -370,6 +373,7 @@ class TestAS003RepeatedDisabledProcessingBudget:
         head_sha = "c" * 40
         pr_data = _pr_data(102, head_sha, ref="issue-44")
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[3])
         mock_detailed = MagicMock()
@@ -430,6 +434,7 @@ class TestAS004TestsMayStillRun:
         head_sha = "d" * 40
         pr_data = _pr_data(103, head_sha, ref="issue-45")
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[4])
         mock_detailed = MagicMock()
@@ -486,6 +491,7 @@ class TestAS005WorkspaceNotDestructivelyCleaned:
         head_sha = "e" * 40
         pr_data = _pr_data(104, head_sha, ref="issue-46")
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[5])
         mock_detailed = MagicMock()
@@ -528,6 +534,7 @@ class TestAS005WorkspaceNotDestructivelyCleaned:
         head_sha = "e" * 40
         pr_data = _pr_data(105, head_sha, ref="issue-47")
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[6])
         mock_detailed = MagicMock()
@@ -579,6 +586,7 @@ class TestAS006OtherPRAutomationRemainsIndependent:
         head_sha = "f" * 40
         pr_data = _pr_data(106, head_sha, mergeable=False)
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         config = AutomationConfig(automatic_test_fix=False)
         object.__setattr__(config, "ENABLE_MERGEABILITY_REMEDIATION", True)
@@ -605,6 +613,7 @@ class TestAS006OtherPRAutomationRemainsIndependent:
         head_sha = "0" * 40
         pr_data = _pr_data(107, head_sha)
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         mock_checks.side_effect = authoritative_ci_status(success=True, ids=[7])
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -629,6 +638,7 @@ class TestAS006OtherPRAutomationRemainsIndependent:
         head_sha = "1" * 40
         pr_data = _pr_data(108, head_sha)
         mock_client = MagicMock(spec=GitHubClient)
+        install_pr_history(mock_client, lambda _repo, _pr: pr_data["head"]["sha"])
         mock_client.get_open_prs_json.return_value = [pr_data]
         mock_client.get_open_issues_json.return_value = []
         mock_client.has_linked_pr.return_value = False
@@ -680,6 +690,7 @@ class TestAS007ReEnableAfterDisabledFailures:
         head_sha = "2" * 40
         pr_data = _pr_data(109, head_sha, ref="issue-49")
         client = _controller_client()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[9])
         mock_detailed = MagicMock()

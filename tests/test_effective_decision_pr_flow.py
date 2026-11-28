@@ -58,6 +58,7 @@ from auto_coder.util.gh_cache import PullRequestRoutingMetadata, ReviewThread, R
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from auto_coder.utils import CommandResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_accepted_finding_bridge import (  # noqa: F401  (env is a shared fixture)
     CONTRACT,
     POLICY,
@@ -146,7 +147,7 @@ class Flow:
     monkeypatch: pytest.MonkeyPatch
     pr: int
     origin: str = "cloud"
-    provider_name: str = "jules"
+    provider_name: str = "claude-routine"
     requirement_text: Optional[str] = None
     auto_status: bool = False
     saved_status: Optional[str] = "PASS"
@@ -181,6 +182,21 @@ class Flow:
         self.head = self.head or self.env.head
         self.current_base = self.current_base or self.env.base
         self.router = RouterClient(self.head)
+        install_pr_history(self.client, lambda _repo, _pr: self.live_head or self.head)
+        # Retain the same production publication proof used at public ingress.
+        if self.origin == "cloud":
+            if self.provider_name == "codex-cloud":
+                from auto_coder.cloud_run import CloudRun, CloudRunRepository
+
+                CloudRunRepository(REPO).save(CloudRun(REPO, 2401, 0, "codex-cloud", task_id=self.task_id, backend_name="codex-cloud", submission_outcome="accepted", launch_identity=f"flow-{self.pr}", publication_head_repository=REPO, publication_head_ref="feature-branch"))
+            else:
+                from auto_coder.cloud_manager import CloudManager
+
+                assert CloudManager(REPO).add_session(2401, self.task_id, provider="claude-routine", backend_name="claude-routine")
+
+    @property
+    def task_id(self) -> str:
+        return f"task_e_flow{self.pr}" if self.provider_name == "codex-cloud" else f"session_flow{self.pr}"
 
     # -- arrangement ---------------------------------------------------
 
@@ -194,7 +210,7 @@ class Flow:
         reviewer = reviewer_for(self.env.tmp, self.monkeypatch, self.router)
         config = ReviewerAppConfig("4765828", "client", self.env.tmp / "reviewer.pem")
         with patch("auto_coder.pr_processor.load_reviewer_app_config", return_value=config), patch("auto_coder.pr_processor.GitHubAppReviewer", return_value=reviewer):
-            published, reason = _consume_pending_two_tier_publication(REPO, self.pr, inputs)
+            published, reason = _consume_pending_two_tier_publication(REPO, self.pr, inputs, github_client=self.client)
         assert published, reason
         observation = reviewer.observe_authenticated_review_roots(REPO, self.pr, strong.head_sha)
         assert observation.complete and len(observation.roots) == 1
@@ -225,8 +241,13 @@ class Flow:
         return self.extra_threads + published + (ReviewThread(id=self.thread_id, is_resolved=resolved, comments=comments),)
 
     def pr_data(self) -> dict[str, Any]:
-        body = "<!-- auto-coder:local-llm -->\nFixes #2401" if self.origin == "local" else "Fixes #2401"
-        return {"number": self.pr, "body": body, "labels": [], "head": {"ref": "feature-branch", "sha": self.head}, "base": {"ref": "main", "sha": self.env.base}}
+        if self.origin == "local":
+            body = "<!-- auto-coder:local-llm -->\nFixes #2401"
+        elif self.provider_name == "codex-cloud":
+            body = f"Fixes #2401\nhttps://chatgpt.com/codex/tasks/{self.task_id}"
+        else:
+            body = f"Fixes #2401\nhttps://claude.ai/code/{self.task_id}"
+        return {"number": self.pr, "body": body, "labels": [], "head": {"repo": {"full_name": REPO}, "ref": "feature-branch", "sha": self.head}, "base": {"ref": "main", "sha": self.env.base}}
 
     # -- execution -----------------------------------------------------
 
@@ -371,7 +392,7 @@ class Flow:
             patch("auto_coder.pr_processor._observe_codex_cloud_remediation_activity", side_effect=lambda *_a, **_k: self.activity if self.provider_name == "codex-cloud" else None),  # production: only Codex Cloud has a completed-turn observer
             patch("auto_coder.pr_processor._select_review_repair_route", return_value=route),
             patch("auto_coder.pr_processor._revalidate_local_review_repair_route", return_value=route),
-            patch("auto_coder.pr_processor._resolve_cloud_task_origin", return_value=CloudTaskOriginResolution(origin=CloudTaskOrigin(self.provider_name, "task-1", self.provider)) if self.origin_available else CloudTaskOriginResolution(reason="the configured origin has no route")),
+            patch("auto_coder.pr_processor._resolve_cloud_task_origin", return_value=CloudTaskOriginResolution(origin=CloudTaskOrigin(self.provider_name, self.task_id, self.provider)) if self.origin_available else CloudTaskOriginResolution(reason="the configured origin has no route")),
             patch("auto_coder.pr_processor._revalidate_cloud_origin", return_value=None),
             patch("auto_coder.pr_processor._merge_pr", self.merge),
             patch("auto_coder.pr_processor.get_linked_issues_context", side_effect=lambda *_a, **_k: current_validation_context(REPO, self.pr_data()).issue_context),
@@ -1240,7 +1261,7 @@ def test_completed_no_change_at_the_same_head_converges_or_retains_the_same_bloc
     first_blockers = [b.blocker_id for b in flow_env.ledger.get_snapshot("https://api.github.com", REPO, flow.pr).blockers]
 
     flow.saved_status = "NEEDS_TESTS"
-    request_identity = _review_feedback_identity(f"{REPO}#{flow.pr}:{flow.provider_name}:task-1:", flow.threads()[0], 0)
+    request_identity = _review_feedback_identity(f"{REPO}#{flow.pr}:{flow.provider_name}:{flow.task_id}:", flow.threads()[0], 0)
     flow.activity = {request_identity: "completed-turn-no-commit"}  # the provider reports the request completed; the head is unchanged
     flow.provider.completed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     flow.model_responses = [ordinary_response(flow.thread_id, status="ADDRESSED", evidence="tests/test_state.py asserts the invariant")]
@@ -2015,7 +2036,7 @@ def test_transient_target_outage_retains_the_assessment_and_resumes_without_a_mo
     flow.accept_finding()
     flow.model_responses = [ordinary_response(flow.thread_id)]
     flow.run()
-    request_identity = _review_feedback_identity(f"{REPO}#{flow.pr}:{flow.provider_name}:task-1:", flow.threads()[0], 0)
+    request_identity = _review_feedback_identity(f"{REPO}#{flow.pr}:{flow.provider_name}:{flow.task_id}:", flow.threads()[0], 0)
     flow.activity = {request_identity: "completed-turn"}
     flow.provider.completed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     flow.saved_status = "NEEDS_TESTS"
@@ -2043,8 +2064,8 @@ def test_transient_target_outage_retains_the_assessment_and_resumes_without_a_mo
     assert snapshot.accepted_closure.head_sha == flow.head
 
 
-def test_jules_origin_completion_without_a_commit_reaches_reassessment_through_the_task_record(flow_env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
-    flow = make_flow(flow_env, monkeypatch, 9304, "cloud")  # provider "jules": no Codex completed-turn observer exists
+def test_claude_origin_completion_without_a_commit_reaches_reassessment_through_the_task_record(flow_env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    flow = make_flow(flow_env, monkeypatch, 9304, "cloud")  # Claude uses the task record rather than the Codex completed-turn observer.
     flow.accept_finding()
     flow.model_responses = [ordinary_response(flow.thread_id)]
     flow.run()

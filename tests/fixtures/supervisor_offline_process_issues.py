@@ -51,7 +51,6 @@ def main() -> None:
         os.environ["AUTO_CODER_REPOSITORY"],
         "--github-token",
         token,
-        "--skip-codex-auth-secret-sync",
         "--disable-webhook",
         "--log-file",
         os.path.join(os.environ["AUTO_CODER_RUNTIME_ROOT"], "logs", "auto-coder.log"),

@@ -266,7 +266,7 @@ def test_production_acceptance_covers_real_ready_and_offline_production_cli() ->
     assert "supervisor_offline_pid1.py" in acceptance
     assert '"process-issues"' in offline
     assert '"--github-token"' in offline
-    assert '"--skip-codex-auth-secret-sync"' in offline
+    assert '"--skip-codex-auth-secret-sync"' not in offline
     assert "os.execv(sys.executable, command)" in offline
     assert "WorkerVersionPreparer(" in preparer
     assert ".prepare(PrepareIntent(" in preparer

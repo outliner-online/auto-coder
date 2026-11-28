@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -18,9 +19,10 @@ from auto_coder.codex_work_fence import CodexWorkFence
 from auto_coder.codex_work_reconstruction import production_codex_reconstructor, reconstruct_active_codex_work
 from auto_coder.implementation_reclamation_scheduler import ReclamationObligationStore, run_due_reclamation_checks, schedule_reevaluation
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
-from auto_coder.pr_processor import _send_followup_with_quota_admission
+from auto_coder.pr_processor import _pr_automation_client_scope, _send_followup_with_quota_admission
 from auto_coder.pr_repair import ExistingPrRepairTarget, build_existing_pr_repair_prompt
 from auto_coder.public_api import project_slots
+from tests.pr_automation_fakes import install_pr_history
 
 REPOSITORY = "owner/repo"
 TASK = "task_e_1234567890abcdef1234567890abcdef"
@@ -116,12 +118,16 @@ def actual_followup(tmp_path, monkeypatch, *, handoff=True, bounded_repair=True,
     client.wham_client = wham
     client.active_tasks = {}
 
+    github = SimpleNamespace()
+    install_pr_history(github, "a" * 40)
+
     def send():
         if not bounded_repair:
             return client.send_followup(TASK, "Publish a replacement PR for the previous output.", ("logical-followup-2725",))
         target = ExistingPrRepairTarget(REPOSITORY, target_pr, "fix/2725", "main", "a" * 40)
         prompt = build_existing_pr_repair_prompt(target, "Apply the bounded correction to this PR.")
-        return _send_followup_with_quota_admission(client, REPOSITORY, TASK, prompt, ("logical-followup-2725",), repair_target=None if native_only_contract else target)
+        with _pr_automation_client_scope(github):
+            return _send_followup_with_quota_admission(client, REPOSITORY, TASK, prompt, ("logical-followup-2725",), repair_target=None if native_only_contract else target)
 
     if crash_after_delivery:
 

@@ -209,7 +209,6 @@ def production_command(args: argparse.Namespace, result_file: Path) -> list[str]
         "--no-jules-mode",
         "--result-file",
         str(result_file),
-        "--skip-codex-auth-secret-sync",
     ]
     if args.scenario == "conflict":
         command.append("--no-skip-main-update")

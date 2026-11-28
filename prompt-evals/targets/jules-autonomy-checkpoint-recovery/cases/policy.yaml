@@ -11,7 +11,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); return r.action==='proceed_autonomously' && !/permission|may i|should i/i.test(r.reasoning);"
+      value: |-
+        const r=JSON.parse(output);
+        return r.action==='proceed_autonomously' && !/permission|may i|should i/i.test(r.reasoning);
 
 - vars:
     id: unresolved-observable-behavior
@@ -27,7 +29,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); return r.action==='ask_user' && typeof r.question==='string' && r.question.length>0;"
+      value: |-
+        const r=JSON.parse(output);
+        return r.action==='ask_user' && typeof r.question==='string' && r.question.length>0;
 
 - vars:
     id: recoverable-workspace-loss
@@ -41,7 +45,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); return r.first_action==='inspect_git_state' && r.may_ask_permission_for_first_action===false;"
+      value: |-
+        const r=JSON.parse(output);
+        return r.first_action==='inspect_git_state' && r.may_ask_permission_for_first_action===false;
 
 - vars:
     id: true-external-blocker
@@ -55,7 +61,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); return r.action==='report_blocker' && r.names_concrete_user_action_needed===true;"
+      value: |-
+        const r=JSON.parse(output);
+        return r.action==='report_blocker' && r.names_concrete_user_action_needed===true;
 
 - vars:
     id: tested-progress-needing-checkpoint
@@ -69,7 +77,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); return r.action==='commit_now_and_continue' && r.verifies_diff_before_commit===true;"
+      value: |-
+        const r=JSON.parse(output);
+        return r.action==='commit_now_and_continue' && r.verifies_diff_before_commit===true;
 
 - vars:
     id: explicit-no-edit-no-commit
@@ -80,7 +90,9 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); return r.will_edit_files===false && r.will_commit===false;"
+      value: |-
+        const r=JSON.parse(output);
+        return r.will_edit_files===false && r.will_commit===false;
 
 - vars:
     id: out-of-scope-reviewer-demand
@@ -94,4 +106,6 @@
   assert:
     - type: is-json
     - type: javascript
-      value: "const r=JSON.parse(output); return r.implements_reviewer_redesign===false && r.stays_within_original_requirements===true;"
+      value: |-
+        const r=JSON.parse(output);
+        return r.implements_reviewer_redesign===false && r.stays_within_original_requirements===true;

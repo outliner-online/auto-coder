@@ -30,7 +30,7 @@ import re
 import threading
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Sequence, Set
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Set
 
 from .adversarial_validator import CHANGE_PROVENANCE_CLARIFICATION_MARKER, ReviewThreadDisposition
 from .canonical_pr_blocker_ledger import BlockerLedgerSnapshot
@@ -935,6 +935,7 @@ def resolve_addressed_review_threads(
     review_attempt_id: str = "",
     expected_ledger_revision: Optional[int] = None,
     known_absent_apis: tuple[str, ...] = (),
+    new_effect_authorizer: Optional[Callable[[], str]] = None,
 ) -> Any:
     """Resolve every thread the validator confirmed ADDRESSED, fail-closed.
 
@@ -1000,6 +1001,7 @@ def resolve_addressed_review_threads(
             stale_registry=stale_registry,
             expected_ledger_revision=expected_ledger_revision,
             claimed_threads=closure_claims,
+            new_effect_authorizer=new_effect_authorizer,
         )
     else:
         exec_result = ClosureExecutionResult(

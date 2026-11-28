@@ -426,6 +426,12 @@ def default_jules_competition_db_path() -> Path:
     return Path.home() / ".auto-coder" / "jules_competition.db"
 
 
+def retired_jules_history_marker_path(db_path: Optional[Path] = None) -> Path:
+    """Return the durable marker that distinguishes lost history from no history."""
+    path = Path(db_path) if db_path is not None else default_jules_competition_db_path()
+    return path.with_name(f"{path.name}.history-present")
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -923,6 +929,15 @@ class JulesCompetitionLedger:
             raise ValueError("A speculative generation requires a non-empty, fixed candidate set")
         if len(set(bundle.candidate_ids)) != len(bundle.candidate_ids):
             raise ValueError("Candidate identities within one generation must be distinct")
+
+        # This marker deliberately lives outside SQLite.  Retirement-time
+        # classification must distinguish a genuinely fresh installation from
+        # one whose historical databases were removed or lost.  Record that a
+        # generation has existed before opening/mutating the ledger so a later
+        # database loss cannot silently turn its PRs into ordinary artifacts.
+        marker = retired_jules_history_marker_path(self._db_path)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(exist_ok=True)
 
         self._check_db_integrity()
         key = _make_namespace_key(repository, issue_number)

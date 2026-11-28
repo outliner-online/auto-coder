@@ -15,7 +15,9 @@ from pathlib import Path
 
 import yaml
 
-PROMPTFOO_VERSION = "0.122.2"
+PROMPTFOO_PACKAGE = "promptfoo@latest"
+EVALUATOR_TIMEOUT_SECONDS = 600
+PROMPTFOO_FAILURE_EXIT_CODE = 100
 INFRASTRUCTURE_PATHS = {
     ".github/workflows/prompt-regression.yml",
     ".github/workflows/prompt-regression-report.yml",
@@ -37,6 +39,8 @@ class TargetRecord:
     expected_cases: int = 0
     executed_cases: int = 0
     failures: list[dict[str, object]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    promptfoo_version: str = ""
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -93,7 +97,7 @@ def _revision_yaml(repo: Path, revision: str, path: str) -> object:
 def load_registry(repo: Path) -> list[dict[str, object]]:
     try:
         registry = json.loads((repo / "prompt-evals/registry.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SelectionError(f"cannot load target registry: {exc}") from exc
     if registry.get("schema_version") != 1 or not isinstance(registry.get("targets"), list):
         raise SelectionError("registry must contain schema_version 1 and a targets list")
@@ -138,40 +142,115 @@ def _case_count(files: list[str]) -> int:
     for filename in files:
         try:
             value = yaml.safe_load(Path(filename).read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
             raise SelectionError(f"cannot parse corpus {filename}: {exc}") from exc
-        tests = value.get("tests", []) if isinstance(value, dict) else []
-        if not isinstance(tests, list):
-            raise SelectionError(f"corpus {filename} must contain a tests list")
+        tests = value if isinstance(value, list) else value.get("tests") if isinstance(value, dict) else None
+        if not isinstance(tests, list) or not all(isinstance(case, dict) for case in tests):
+            raise SelectionError(f"corpus {filename} must be a case list or contain a tests list")
         count += len(tests)
     return count
 
 
-def _parse_results(path: Path, expected: int) -> tuple[int, list[dict[str, object]]]:
+@dataclass
+class ParsedResults:
+    executed_cases: int = 0
+    failures: list[dict[str, object]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    promptfoo_version: str = ""
+
+
+def _assertion_results(grading: dict[str, object]) -> list[dict[str, object]]:
+    """Flatten assertion groups while rejecting incomplete grading evidence."""
+    components = grading.get("componentResults")
+    if not isinstance(components, list) or not components:
+        raise SelectionError("assertion component results are missing")
+    results = []
+    for component in components:
+        if not isinstance(component, dict) or not isinstance(component.get("pass"), bool):
+            raise SelectionError("an assertion component result is malformed")
+        if component.get("componentResults"):
+            results.extend(_assertion_results(component))
+        else:
+            assertion = component.get("assertion")
+            if not isinstance(assertion, dict) or not isinstance(assertion.get("type"), str):
+                raise SelectionError("an assertion component has no assertion identity")
+            results.append(component)
+    return results
+
+
+def _parse_results(path: Path, expected: int) -> ParsedResults:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SelectionError(f"result parsing failed: {exc}") from exc
-    rows = document.get("results", {}).get("results") if isinstance(document, dict) else None
+    summary = document.get("results") if isinstance(document, dict) else None
+    rows = summary.get("results") if isinstance(summary, dict) else None
     if not isinstance(rows, list):
         raise SelectionError("result parsing failed: results.results is missing")
-    failures = []
+    parsed = ParsedResults(executed_cases=len(rows))
+    metadata = document.get("metadata")
+    version = metadata.get("promptfooVersion") if isinstance(metadata, dict) else None
+    if isinstance(version, str) and version.strip():
+        parsed.promptfoo_version = version
+    else:
+        parsed.errors.append("result metadata is missing the executed Promptfoo version")
     for index, row in enumerate(rows):
         if not isinstance(row, dict) or not isinstance(row.get("success"), bool):
-            raise SelectionError(f"result parsing failed at case {index + 1}")
-        if not row["success"]:
-            assertion = row.get("gradingResult", {})
-            failures.append(
+            parsed.errors.append(f"result parsing failed at case {index + 1}")
+            continue
+        case = row.get("testCase")
+        variables = case.get("vars") if isinstance(case, dict) else None
+        case_id = str(variables.get("id", index + 1)) if isinstance(variables, dict) else str(index + 1)
+        response = row.get("response")
+        failure_reason = row.get("failureReason")
+        # Promptfoo also puts ordinary assertion failures in row.error.
+        if failure_reason == 2 or (isinstance(response, dict) and response.get("error")):
+            error = response.get("error") if isinstance(response, dict) else None
+            parsed.errors.append(f"case {case_id}: {error or row.get('error') or 'provider or evaluator error'}")
+            continue
+        if type(failure_reason) is not int or failure_reason not in (0, 1):
+            parsed.errors.append(f"case {case_id}: missing or invalid evaluator failure reason")
+            continue
+        if not isinstance(response, dict) or response.get("output") in (None, ""):
+            parsed.errors.append(f"case {case_id}: provider produced no output")
+            continue
+        raw = response.get("raw")
+        if not isinstance(raw, dict) or raw.get("status") != "completed":
+            status = raw.get("status") if isinstance(raw, dict) else None
+            detail = raw.get("incomplete_details") if isinstance(raw, dict) else None
+            parsed.errors.append(f"case {case_id}: Responses API output is not completed (status={status}, details={detail})")
+        grading = row.get("gradingResult")
+        if not isinstance(grading, dict) or not isinstance(grading.get("pass"), bool):
+            parsed.errors.append(f"case {case_id}: completed assertion grading is missing")
+            continue
+        try:
+            components = _assertion_results(grading)
+        except SelectionError as exc:
+            parsed.errors.append(f"case {case_id}: {exc}")
+            continue
+        failed_components = [component for component in components if not component["pass"]]
+        if row["success"] != grading["pass"] or row["success"] != (failure_reason == 0) or grading["pass"] != (not failed_components):
+            parsed.errors.append(f"case {case_id}: inconsistent evaluator and assertion outcomes")
+        for component in failed_components:
+            reason = str(component.get("reason", ""))
+            # The JavaScript assertion handler reports thrown exceptions as ASSERT.
+            if reason.startswith("Custom function threw error:"):
+                parsed.errors.append(f"case {case_id}: assertion execution error: {reason}")
+                continue
+            assertion = component["assertion"]
+            parsed.failures.append(
                 {
-                    "case_id": str(row.get("testCase", {}).get("vars", {}).get("id", index + 1)),
-                    "assertion_id": str(assertion.get("componentResults", [{}])[0].get("assertion", {}).get("type", "unknown")) if isinstance(assertion, dict) else "unknown",
-                    "expected": assertion.get("componentResults", [{}])[0].get("assertion", {}).get("value") if isinstance(assertion, dict) else None,
-                    "actual": row.get("response", {}).get("output"),
+                    "case_id": case_id,
+                    "assertion_id": assertion["type"],
+                    "expected": assertion.get("value"),
+                    "actual": response.get("output"),
                 }
             )
     if len(rows) != expected:
-        raise SelectionError(f"partial evaluation: executed {len(rows)} of {expected} cases")
-    return len(rows), failures
+        parsed.errors.append(f"partial evaluation: executed {len(rows)} of {expected} cases")
+    if not rows and expected == 0:
+        parsed.errors.append("evaluation produced no executable cases")
+    return parsed
 
 
 def write_report(path: Path, report: dict[str, object]) -> None:
@@ -180,7 +259,7 @@ def write_report(path: Path, report: dict[str, object]) -> None:
 
 
 def run(repo: Path, base: str, head: str, npx: str, report_path: Path | None = None, trusted: bool = True, require_credentials: bool = False, identity: dict[str, object] | None = None) -> int:
-    report: dict[str, object] = {"schema_version": 1, "base_sha": "", "head_sha": "", "selected_targets": [], "targets": [], "identity": identity or {}}
+    report: dict[str, object] = {"schema_version": 1, "base_sha": "", "head_sha": "", "selected_targets": [], "targets": [], "identity": identity or {}, "promptfoo_package": PROMPTFOO_PACKAGE}
     records: list[TargetRecord] = []
     exit_code = 0
     try:
@@ -196,43 +275,57 @@ def run(repo: Path, base: str, head: str, npx: str, report_path: Path | None = N
         for target in selected:
             record = TargetRecord(str(target["id"]))
             records.append(record)
-            files = sorted({path for pattern in target["cases"] for path in glob.glob(str(repo / str(pattern)), recursive=True) if Path(path).is_file()})
-            record.expected_cases = _case_count(files)
-            if not files or record.expected_cases == 0:
-                record.reason = "Selected corpus has no executable cases; no provider was invoked."
-                print(f"Selected {record.id}, but its corpus is empty; skipping Promptfoo.")
-                continue
-            if not trusted:
-                record.reason = "Credentialed evaluation is not authorized for an untrusted fork pull request."
-                continue
-            if require_credentials and not os.environ.get("CODEX_AUTH_JSON"):
-                record.outcome, record.reason, exit_code = "ERROR", "Provider credentials are missing for selected work.", 2
-                continue
-            if require_credentials:
-                auth = Path.home() / ".codex/auth.json"
-                auth.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                auth.write_text(os.environ["CODEX_AUTH_JSON"], encoding="utf-8")
-                auth.chmod(0o600)
-            config = repo / str(target["config"])
-            if not config.is_file():
-                raise SelectionError(f"selected target {record.id} has no config: {target['config']}")
-            output = (report_path.parent if report_path else repo) / f"promptfoo-{record.id}.json"
-            print(f"Evaluating affected target: {record.id}", flush=True)
-            result = subprocess.run([npx, "--yes", f"promptfoo@{PROMPTFOO_VERSION}", "eval", "--config", str(config), "--output", str(output)], cwd=repo)
+            returncode = 0
             try:
-                record.executed_cases, record.failures = _parse_results(output, record.expected_cases)
-                record.outcome = "MISMATCH" if record.failures else "PASS"
-                record.reason = "Semantic assertions failed." if record.failures else "All semantic assertions passed."
-            except SelectionError as exc:
-                record.outcome, record.reason = "ERROR", str(exc)
-            if result.returncode and record.outcome != "MISMATCH":
+                files = sorted({path for pattern in target["cases"] for path in glob.glob(str(repo / str(pattern)), recursive=True) if Path(path).is_file()})
+                record.expected_cases = _case_count(files)
+                if not files or record.expected_cases == 0:
+                    record.reason = "Selected corpus has no executable cases; no provider was invoked."
+                    print(f"Selected {record.id}, but its corpus is empty; skipping Promptfoo.")
+                    continue
+                if not trusted:
+                    record.reason = "Credentialed evaluation is not authorized for an untrusted fork pull request."
+                    continue
+                if require_credentials and not os.environ.get("OPENAI_API_KEY", "").strip():
+                    raise SelectionError("OPENAI_API_KEY is missing for selected work.")
+                config = repo / str(target["config"])
+                if not config.is_file():
+                    raise SelectionError(f"selected target {record.id} has no config: {target['config']}")
+                output = (report_path.parent if report_path else repo) / f"promptfoo-{record.id}.json"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                # A failed launch must not reuse evidence from an earlier attempt.
+                output.unlink(missing_ok=True)
+                print(f"Evaluating affected target: {record.id}", flush=True)
+                result = subprocess.run(
+                    [npx, "--yes", PROMPTFOO_PACKAGE, "eval", "--config", str(config), "--no-cache", "--max-concurrency", "2", "--output", str(output)],
+                    cwd=repo,
+                    timeout=EVALUATOR_TIMEOUT_SECONDS,
+                )
+                returncode = result.returncode
+                parsed = _parse_results(output, record.expected_cases)
+                record.executed_cases = parsed.executed_cases
+                record.failures = parsed.failures
+                record.errors = parsed.errors
+                record.promptfoo_version = parsed.promptfoo_version
+                if returncode not in (0, PROMPTFOO_FAILURE_EXIT_CODE):
+                    record.errors.append(f"Evaluator exited {returncode}.")
+                elif returncode and not record.failures and not record.errors:
+                    record.errors.append(f"Evaluator exited {returncode} without complete semantic failure evidence.")
+            except (SelectionError, OSError, subprocess.TimeoutExpired) as exc:
+                record.errors.append(str(exc))
+            if record.errors:
                 record.outcome = "ERROR"
-                record.reason = f"Evaluator exited {result.returncode}; {record.reason}"
-            if record.outcome == "ERROR":
-                exit_code = result.returncode or 2
-            elif record.outcome == "MISMATCH":
-                exit_code = result.returncode or 1
-    except SelectionError as exc:
+                record.reason = record.errors[0]
+                if len(record.errors) > 1:
+                    record.reason += f" ({len(record.errors)} execution errors; see the structured report.)"
+                exit_code = returncode if returncode > 0 else 2
+            elif record.failures:
+                record.outcome, record.reason = "MISMATCH", "Semantic assertions failed."
+                if not exit_code:
+                    exit_code = returncode or 1
+            else:
+                record.outcome, record.reason = "PASS", "All semantic assertions passed."
+    except (SelectionError, OSError, UnicodeError) as exc:
         report["error"] = str(exc)
         print(f"Prompt evaluation selection failed closed: {exc}", file=sys.stderr)
         exit_code = 2
@@ -240,8 +333,6 @@ def run(repo: Path, base: str, head: str, npx: str, report_path: Path | None = N
         report["targets"] = [record.__dict__ for record in records]
         if report_path:
             write_report(report_path, report)
-        if require_credentials:
-            (Path.home() / ".codex/auth.json").unlink(missing_ok=True)
     return exit_code
 
 

@@ -729,7 +729,6 @@ def test_producer_returns_at_update_check_drain_checkpoint(monkeypatch, tmp_path
     update_checks = 0
 
     monkeypatch.setattr(engine, "_check_and_handle_closed_branch", lambda *_: True)
-    monkeypatch.setattr(engine, "_claim_jules_session_list_refresh", lambda: False)
 
     def blocking_update_check():
         nonlocal update_checks
@@ -1046,40 +1045,6 @@ def test_jules_ci_feedback_rechecks_drain_after_log_acquisition(monkeypatch, tmp
 
     asyncio.run(scenario())
     client.send_message.assert_not_called()
-
-
-def test_recurrent_provider_scan_is_owned_and_cannot_launch_during_drain(monkeypatch, tmp_path):
-    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
-    prompt = tmp_path / "recurrent.md"
-    prompt.write_text("---\ntags: [jules, recurrent]\nname: [maintenance]\n---\nMaintain it.\n", encoding="utf-8")
-    engine = AutomationEngine(MagicMock(), AutomationConfig())
-    entered = threading.Event()
-    release = threading.Event()
-    client = MagicMock()
-
-    def list_sessions(**_kwargs):
-        entered.set()
-        assert release.wait(5)
-        return []
-
-    client.list_sessions.side_effect = list_sessions
-    monkeypatch.setattr("auto_coder.jules_engine.os.path.isdir", lambda *_: True)
-    monkeypatch.setattr("auto_coder.jules_engine.glob.glob", lambda *_: [str(prompt)])
-    monkeypatch.setattr("auto_coder.jules_engine.JulesClient", lambda: client)
-
-    async def scenario():
-        scanner = asyncio.create_task(engine.check_and_start_recurrent_jules_tasks_async("owner/repo"))
-        assert await asyncio.to_thread(entered.wait, 2)
-        engine.request_graceful_shutdown("SIGTERM")
-        scanner.cancel()
-        await asyncio.sleep(0.05)
-        assert not scanner.done()
-        assert list(engine._critical_operations.values()) == ["recurrent provider scan"]
-        release.set()
-        await scanner
-
-    asyncio.run(scenario())
-    client.start_session.assert_not_called()
 
 
 def test_sigint_and_sigterm_share_drain_transition_and_second_sigint_forces(tmp_path, monkeypatch):

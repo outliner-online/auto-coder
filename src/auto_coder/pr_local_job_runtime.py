@@ -9,6 +9,7 @@ from typing import Any, Callable
 from .local_conflict_repair_job import EditorFactory, LocalConflictRepairJobAdapter, build_conflict_editor
 from .local_job_handoff import LocalJobKind, LocalJobStore
 from .local_job_runner import LocalJobDomainAdapter
+from .pr_automation_guard import assess_pr_automation
 from .pr_correction_job import PRCorrectionJobAdapter, build_captured_executor
 from .pr_repair_workspace import PRRepairSource, PRRepairWorkspaceProducer
 
@@ -43,7 +44,7 @@ def build_pr_repair_finalizer(
     finish_execution = None
     if implementation_slots is not None:
         finish_execution = lambda record: implementation_slots.finish_execution_by_id(record.implementation_execution_id)
-    return PRRepairJobFinalizer(store, observe, wake, finish_execution=finish_execution)
+    return PRRepairJobFinalizer(store, observe, wake, finish_execution=finish_execution, new_effect_authorizer=lambda repository, number: assess_pr_automation(github_client, repository, number))
 
 
 def build_pr_local_job_adapters(
@@ -82,6 +83,8 @@ def build_pr_local_job_adapters(
     def conflict_authority(job: Any, _metadata: dict[str, Any]) -> bool:
         """Refresh every revocable execution-time conflict authority."""
         try:
+            if not assess_pr_automation(github_client, job.repository, job.target_number).allowed:
+                return False
             if not bool(config.ENABLE_MERGEABILITY_REMEDIATION):
                 return False
             exhaustion = check_pr_repair_exhaustion(job.repository, job.target_number, require_authoritative_snapshot=True)
@@ -110,7 +113,7 @@ def build_pr_local_job_adapters(
         source=lambda _job: PRRepairSource(repository_path or Path.cwd()),
         github_client=lambda _job: github_client,
         authority=lambda client, repository, number, head: current_ci_failure_authority(client, repository, number, head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())),
-        local_route=lambda job, metadata: explicit_local_checkout(job) or _is_local_llm_pr(metadata),
+        local_route=lambda job, metadata: assess_pr_automation(github_client, job.repository, job.target_number).allowed and (explicit_local_checkout(job) or _is_local_llm_pr(metadata)),
         correction=lambda job, prepared: build_durable_ci_correction(job, prepared, github_client, config),
     )
     return {

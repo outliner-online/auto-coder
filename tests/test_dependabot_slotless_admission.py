@@ -18,6 +18,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from auto_coder import merge_operation_adapter
 from auto_coder.automation_config import AutomationConfig, Candidate, ExplicitTargetOutcome, PRProcessingOutcome
 from auto_coder.automation_engine import AutomationEngine
 from auto_coder.dashboard import init_dashboard
@@ -25,7 +26,7 @@ from auto_coder.entity_invalidation import DurableInvalidationQueue, EntityIdent
 from auto_coder.execution_trace import EventKind, TraceCollector
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.merge_operation_state import EffectName, EffectState, MergeOperationIdentity, MergeOperationStore
-from auto_coder.util.gh_cache import GitHubClient
+from auto_coder.util.gh_cache import GitHubClient, get_ghapi_client
 
 REPOSITORY = "outliner-online/outliner"
 NUMBER = 6012
@@ -34,6 +35,8 @@ HEAD = "d9b77f770ec67f6aa40f6189023d58bac0ffa2a5"
 
 @pytest.fixture
 def flow(tmp_path, monkeypatch):
+    # Keep the native factory independent of lazy imports under another test's mock.
+    monkeypatch.setattr(merge_operation_adapter, "get_ghapi_client", get_ghapi_client)
     pr = {
         "number": NUMBER,
         "title": "Bump dependency",
@@ -46,6 +49,7 @@ def flow(tmp_path, monkeypatch):
         "head": {"ref": "dependabot/npm_and_yarn/dependency-2", "sha": HEAD},
         "base": {"ref": "main", "sha": "base"},
         "labels": [],
+        "commits": 1,
         "changed_files": 2,
         "additions": 2,
         "deletions": 2,
@@ -77,6 +81,8 @@ def flow(tmp_path, monkeypatch):
         if path.endswith(f"/pulls/{NUMBER}"):
             assert request.method == "GET"
             return httpx.Response(200, json=state.pr)
+        if path.endswith("/commits"):
+            return httpx.Response(200, json=[{"sha": state.pr["head"]["sha"], "commit": {"message": "Update dependency"}}])
         if path.endswith("/files"):
             return httpx.Response(200, json=[{"filename": "package.json", "status": "modified", "additions": 2, "deletions": 2}])
         raise AssertionError(f"Unexpected GitHub request: {request.method} {path}")
@@ -92,6 +98,7 @@ def flow(tmp_path, monkeypatch):
     monkeypatch.setattr(client, "get_authenticated_user_login", lambda: "controller")
     monkeypatch.setattr(GitHubClient, "get_instance", lambda *_, **__: client)
     monkeypatch.setattr("auto_coder.util.gh_cache.get_caching_client", lambda **_: httpx.Client(transport=httpx.MockTransport(response)))
+    monkeypatch.setattr("auto_coder.util.gh_cache.github_http_client", lambda **_: httpx.Client(transport=httpx.MockTransport(response)))
     monkeypatch.setattr("auto_coder.pr_processor.resolve_reviewer_app_identity", lambda *_: SimpleNamespace(login="independent-reviewer[bot]"))
     config = AutomationConfig()
     config.AUTO_MERGE = True
@@ -134,12 +141,18 @@ def test_six_feature_owners_allow_real_dependabot_merge_without_slot_writes(flow
 
 
 @pytest.mark.parametrize("author", ["human", "renovate[bot]", "some-dependabot-user", "controller[bot]"])
-def test_feature_and_other_bot_prs_remain_capacity_constrained(flow, author):
+def test_other_authors_do_not_inherit_dependabot_publication_or_slotless_authority(flow, author):
     flow.pr["user"]["login"] = author
+    if author == "human":
+        flow.pr["body"] = "<!-- auto-coder:local-llm -->"
     result = flow.run()
     assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
-    assert result.capacity_deferred is True
-    assert "logical implementation limit" in " ".join(result.actions)
+    if author == "human":
+        assert result.capacity_deferred is True
+        assert "logical implementation limit" in " ".join(result.actions)
+    else:
+        assert result.capacity_deferred is False
+        assert "unknown artifact fenced" in " ".join(result.actions)
     assert not any(request.method != "GET" for request in flow.requests)
 
 

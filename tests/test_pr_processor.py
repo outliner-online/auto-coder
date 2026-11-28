@@ -11,6 +11,7 @@ import pytest
 from src.auto_coder.automation_config import AutomationConfig
 from src.auto_coder.pr_processor import _fix_pr_issues_with_testing
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 # A focused runner result for the single reported failed file.
 _RUN = {"command": "bash scripts/test.sh tests/test_foo.py", "test_file": "tests/test_foo.py", "return_code": 1}
@@ -549,6 +550,7 @@ class TestPRProcessorMerge:
 
         client = MagicMock(token="token")
         client.get_issue.return_value = {"state": "open", "body": "requirements-v2"}
+        install_pr_history(client, "head-b")
         api = MagicMock()
         api.pulls.get.return_value = {
             "number": 123,
@@ -599,6 +601,7 @@ class TestPRProcessorMerge:
         mock_get_ghapi_client_adapter.return_value = mock_api
 
         head_sha = "a" * 40
+        install_pr_history(mock_instance, head_sha)
 
         # Mock Dependabot PR info
         mock_pr_info = {"number": 123, "user": {"login": "dependabot[bot]"}, "head": {"ref": "dependabot/npm_and_yarn/some-package-1.0.0", "sha": head_sha}}
@@ -626,7 +629,7 @@ class TestPRProcessorMerge:
             # Verify merge was called for the expected head
             mock_api.pulls.merge.assert_called_once_with("owner", "repo", 123, merge_method="squash", sha=head_sha)
             mock_close.assert_called_once_with("owner/repo", 123, mock_instance)
-            mock_archive.assert_called_once_with("owner/repo", 123)
+            mock_archive.assert_not_called()
 
     @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")
     @patch("auto_coder.util.gh_cache.get_ghapi_client")
@@ -652,9 +655,10 @@ class TestPRProcessorMerge:
         mock_get_ghapi_client_adapter.return_value = mock_api
 
         head_sha = "b" * 40
+        install_pr_history(mock_instance, head_sha)
 
         # Mock regular user PR info
-        mock_pr_info = {"number": 124, "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}}
+        mock_pr_info = {"number": 124, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}}
         mock_api.pulls.get.return_value = mock_pr_info
 
         # Mock successful merge
@@ -695,12 +699,13 @@ class TestPRProcessorMerge:
         mock_get_ghapi_client_adapter.return_value = mock_api
 
         head_sha = "c" * 40
+        install_pr_history(mock_instance, head_sha)
 
         # Mock PR info: squash is disallowed by current repo settings, so
         # 405 is a definitive, cause-specified rejection that may fall back
         # to the currently allowed --merge method (REQ-007). It remains
         # mergeable throughout (no conflict).
-        mock_pr_info = {"number": 125, "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}, "mergeable": True}
+        mock_pr_info = {"number": 125, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}, "mergeable": True}
         mock_api.pulls.get.return_value = mock_pr_info
 
         # Mock allowed merge methods: squash (the selected method) is no
@@ -758,6 +763,7 @@ class TestPRProcessorMerge:
         mock_get_ghapi_client_adapter.return_value = mock_api
 
         head_sha = "d" * 40
+        install_pr_history(mock_instance, head_sha)
 
         # Dependabot PR that cannot be merged because of conflicts (409, a
         # definitive rejection that supersedes the operation and is then
@@ -790,6 +796,75 @@ class TestPRProcessorMerge:
         assert disposition.reason == "Definitive merge rejection"
         mock_resolve.assert_not_called()
 
+    @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")
+    @patch("auto_coder.util.gh_cache.get_ghapi_client")
+    @patch("src.auto_coder.pr_processor.GitHubClient")
+    @patch("src.auto_coder.pr_processor._get_allowed_merge_methods", return_value=[])
+    def test_definitive_rejection_never_messages_historical_jules_session(
+        self,
+        _allowed_methods,
+        github_client_class,
+        get_ghapi_client,
+        get_ghapi_client_adapter,
+        tmp_path,
+    ):
+        """The production merge sender leaves a conflicted Jules session inert."""
+        from src.auto_coder.automation_config import AutomationConfig
+        from src.auto_coder.pr_processor import _merge_pr
+        from src.auto_coder.util.github_request_outcome import (
+            DeliveryCertainty,
+            GitHubApiOutcome,
+            GitHubRequestContext,
+            GitHubRequestError,
+            GitHubRequestOutcome,
+            GitHubResponseMetadata,
+            RequestProvenance,
+        )
+
+        github_client_class.get_instance.return_value.token = "token"
+        api = MagicMock()
+        get_ghapi_client.return_value = api
+        get_ghapi_client_adapter.return_value = api
+        head_sha = "e" * 40
+        install_pr_history(github_client_class.get_instance.return_value, head_sha)
+        api.pulls.get.return_value = {
+            "number": 127,
+            "user": {"login": "google-labs-jules"},
+            "body": "https://jules.google.com/session/historical-conflict",
+            "head": {"sha": head_sha},
+            "mergeable": False,
+        }
+        context = GitHubRequestContext(
+            operation_id="op",
+            attempt_id="attempt",
+            subsystem="test",
+            api_origin="https://api.github.com",
+            method="PUT",
+            kind="mutation",
+            endpoint_template="/pulls/{n}/merge",
+        )
+        outcome = GitHubRequestOutcome(
+            context=context,
+            status=405,
+            classification=GitHubApiOutcome.REMOTE_ERROR,
+            provenance=RequestProvenance.NETWORK,
+            delivery=DeliveryCertainty.HTTP_RESPONSE_RECEIVED,
+            metadata=GitHubResponseMetadata(),
+            elapsed_ms=1.0,
+            message="Method Not Allowed",
+        )
+        api.pulls.merge.side_effect = GitHubRequestError(outcome)
+
+        with (
+            self._patch_merge_operation_store(tmp_path),
+            patch("src.auto_coder.pr_processor.get_speculative_jules_lifecycle", return_value=None),
+            patch("src.auto_coder.jules_client.JulesClient", side_effect=AssertionError("historical Jules session accessed")),
+            patch("src.auto_coder.pr_processor._extract_session_id_from_pr_body", side_effect=AssertionError("historical session binding read")),
+        ):
+            assert _merge_pr("owner/repo", 127, {}, AutomationConfig()) is False
+
+        api.pulls.merge.assert_called_once()
+
 
 class TestUpdateWithBaseBranchDependabot:
     """Dependency-bot PRs must never have their merge conflicts resolved."""
@@ -815,8 +890,10 @@ class TestUpdateWithBaseBranchDependabot:
             "author": {"login": "dependabot[bot]"},
         }
 
+        client = Mock()
+        install_pr_history(client, "controlled-dependabot-head")
         with patch("src.auto_coder.conflict_resolver._perform_base_branch_merge_and_conflict_resolution") as mock_perform:
-            actions = _update_with_base_branch("owner/repo", pr_data, AutomationConfig())
+            actions = _update_with_base_branch("owner/repo", pr_data, AutomationConfig(), github_client=client)
 
         mock_perform.assert_not_called()
         assert any("Skipping conflict resolution" in action for action in actions)
@@ -909,6 +986,7 @@ def test_controller_branch_origin_reaches_local_conflict_repair():
     from src.auto_coder.utils import CommandResult
 
     client = Mock()
+    install_pr_history(client, "a" * 40)
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
     pr_data = {
         "number": 4243,

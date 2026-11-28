@@ -26,6 +26,7 @@ from auto_coder.review_thread_validation import ClaimedReviewThread
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_mock_pr_history
 from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
@@ -45,6 +46,7 @@ def _github_client(head_sha: str = "head-1", head_ref: str = "codex/review-5262"
     client.get_pr_comments_strict = client.get_pr_comments
     client.get_authenticated_user_login.return_value = "controller"
     client.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata(head_ref=head_ref, head_sha=head_sha, base_ref="main")
+    install_mock_pr_history(client, head_sha)
     return client
 
 

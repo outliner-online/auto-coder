@@ -13,6 +13,7 @@ from auto_coder.issue_processor import _process_issue_codex_cloud_mode
 from auto_coder.issue_stage_routing import ImplementationRetryRequest
 from auto_coder.pr_processor import process_pull_request
 from auto_coder.retry_dispatch import RetryDispatchRepository
+from tests.pr_automation_fakes import install_pr_history
 
 
 def accepted_run(issue: int, attempt: int, task: str, ref: str) -> CloudRun:
@@ -245,6 +246,7 @@ def test_real_pr_processing_verifies_url_free_intent_without_retargeting_jules(t
             return ProjectionRepository(self)
 
     github = FreshMetadataClient()
+    install_pr_history(github, lambda _repo, _pr: github.live["head"]["sha"])
     closed = MagicMock(closed=True, actions=[], issue_numbers=())
     with patch("auto_coder.pr_processor._close_empty_pr", return_value=closed):
         process_pull_request(github, AutomationConfig(), repository, {"number": 2237})

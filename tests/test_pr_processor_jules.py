@@ -17,6 +17,7 @@ from auto_coder.pr_processor import (
     _update_jules_pr_body,
 )
 from auto_coder.pr_repair_dispatch import RepairDisposition
+from tests.pr_automation_fakes import install_pr_history
 
 
 @pytest.fixture(autouse=True)
@@ -370,12 +371,12 @@ class TestProcessJulesPr:
 
             # Assert
             assert result is False
-            mock_cloud_manager.get_issue_by_session.assert_called_once_with("nonexistent123")
+            mock_cloud_manager_class.assert_not_called()
 
     @patch("auto_coder.pr_processor._update_jules_pr_body")
     @patch("auto_coder.pr_processor.CloudManager")
-    def test_process_jules_pr_success(self, mock_cloud_manager_class, mock_update_body):
-        """Test successful Jules PR processing."""
+    def test_process_jules_pr_session_binding_is_inert(self, mock_cloud_manager_class, mock_update_body):
+        """A recorded historical Jules binding cannot create a body link."""
         # Setup
         pr_data = {
             "number": 123,
@@ -396,9 +397,9 @@ class TestProcessJulesPr:
         result = _process_jules_pr(repo_name, pr_data, github_client)
 
         # Assert
-        assert result is True
-        mock_cloud_manager.get_issue_by_session.assert_called_once_with("sessionABC123")
-        mock_update_body.assert_called_once_with(repo_name, 123, "Session ID: sessionABC123", 456, github_client)
+        assert result is False
+        mock_cloud_manager_class.assert_not_called()
+        mock_update_body.assert_not_called()
 
     @patch("auto_coder.pr_processor._update_jules_pr_body")
     @patch("auto_coder.pr_processor.CloudManager")
@@ -425,8 +426,8 @@ class TestProcessJulesPr:
 
         # Assert
         assert result is False
-        mock_cloud_manager.get_issue_by_session.assert_called_once_with("sessionXYZ789")
-        mock_update_body.assert_called_once_with(repo_name, 123, "Session ID: sessionXYZ789", 789, github_client)
+        mock_cloud_manager_class.assert_not_called()
+        mock_update_body.assert_not_called()
 
     @patch("auto_coder.pr_processor.CloudManager")
     def test_process_jules_pr_exception_handling(self, mock_cloud_manager_class):
@@ -478,10 +479,10 @@ class TestProcessJulesPr:
         result = _process_jules_pr(repo_name, pr_data, github_client)
 
         # Assert
-        assert result is True
-        mock_extract_session.assert_called_once_with("https://example.com/session=urlSession123")
-        mock_cloud_manager.get_issue_by_session.assert_called_once_with("urlSession123")
-        mock_update_body.assert_called_once_with(repo_name, 123, "https://example.com/session=urlSession123", 999, github_client)
+        assert result is False
+        mock_extract_session.assert_not_called()
+        mock_cloud_manager_class.assert_not_called()
+        mock_update_body.assert_not_called()
 
     @patch("auto_coder.pr_processor.CloudManager")
     def test_process_jules_pr_empty_body(self, mock_cloud_manager_class):
@@ -556,9 +557,9 @@ class TestProcessJulesPr:
             result = _process_jules_pr(repo_name, pr_data, github_client)
 
             # Assert
-            assert result is True
-            # CloudManager is instantiated with the correct repo_name
-            mock_cloud_manager_class.assert_called_with(repo_name)
+            assert result is False
+            mock_cloud_manager_class.assert_not_called()
+            mock_update_body.assert_not_called()
 
     @patch("auto_coder.pr_processor._update_jules_pr_body")
     @patch("auto_coder.pr_processor.CloudManager")
@@ -585,8 +586,9 @@ class TestProcessJulesPr:
         result = _process_jules_pr(repo_name, pr_data, github_client)
 
         # Assert
-        assert result is True
-        mock_cloud_manager.get_issue_by_session.assert_called_once_with(long_session_id)
+        assert result is False
+        mock_cloud_manager_class.assert_not_called()
+        mock_update_body.assert_not_called()
 
 
 class TestIsJulesPr:
@@ -699,6 +701,7 @@ class TestSendJulesErrorFeedback:
         config = Mock()
         config.MAX_CONCURRENT_IMPLEMENTATIONS = 2
         github_client = Mock()
+        install_pr_history(github_client, "test-head")
 
         # Execute
         result = _send_jules_error_feedback(repo_name, pr_data, failed_checks, config, github_client)
@@ -783,6 +786,7 @@ class TestSendJulesErrorFeedback:
         config = Mock()
         config.MAX_CONCURRENT_IMPLEMENTATIONS = 2
         github_client = Mock()
+        install_pr_history(github_client, "test-head")
 
         # Execute
         result = _send_jules_error_feedback(repo_name, pr_data, failed_checks, config, github_client)
@@ -818,6 +822,7 @@ class TestSendJulesErrorFeedback:
         config = Mock()
         config.MAX_CONCURRENT_IMPLEMENTATIONS = 2
         github_client = Mock()
+        install_pr_history(github_client, "test-head")
 
         # Execute
         result = _send_jules_error_feedback(repo_name, pr_data, failed_checks, config, github_client)
@@ -844,10 +849,11 @@ class TestSendJulesErrorFeedback:
         # Check that comment was posted on PR
         github_client.add_comment_to_pr.assert_called_once_with(repo_name, 456, "🤖 Auto-Coder: CI checks failed. I've sent the error logs to the Jules session and requested a fix. Please wait for the updates.")
 
+    @patch("auto_coder.pr_processor._add_unique_pr_comment")
     @patch("auto_coder.pr_processor._get_github_actions_logs")
     @patch("auto_coder.jules_client.JulesClient")
-    def test_send_jules_error_feedback_no_github_client(self, mock_jules_client_class, mock_get_logs):
-        """Test that PR comment is skipped when no GitHub client is provided."""
+    def test_send_jules_error_feedback_without_history_defers_before_provider_send(self, mock_jules_client_class, mock_get_logs, mock_add_comment):
+        """Missing authoritative history defers before provider or comment effects."""
         # Setup
         mock_jules_client = Mock()
         mock_jules_client.send_message.return_value = "Acknowledged"
@@ -873,10 +879,13 @@ class TestSendJulesErrorFeedback:
         actions = result.actions
 
         # Assert
-        assert len(actions) == 2
-        assert "Sent CI failure logs to Jules session 'sessionNoClient' for PR #789" in actions[0]
-        assert "Skipped posting comment on PR #789: no GitHub client available" in actions[1]
-        mock_jules_client.send_message.assert_called_once()
+        assert result.disposition is RepairDisposition.DEFERRED
+        assert result.attempt_started is False
+        assert "PR automation history unavailable" in result.reason
+        assert "strict PR history reader" in result.reason
+        assert actions == ()
+        mock_jules_client.send_message.assert_not_called()
+        mock_add_comment.assert_not_called()
 
     @patch("auto_coder.pr_processor._get_github_actions_logs")
     @patch("auto_coder.jules_client.JulesClient")
@@ -901,6 +910,7 @@ class TestSendJulesErrorFeedback:
         config = Mock()
         config.MAX_CONCURRENT_IMPLEMENTATIONS = 2
         github_client = Mock()
+        install_pr_history(github_client, "test-head")
         # Make add_comment_to_pr raise an exception
         github_client.add_comment_to_pr.side_effect = Exception("GitHub API error")
 

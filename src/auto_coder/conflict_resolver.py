@@ -676,47 +676,10 @@ def _perform_base_branch_merge_and_conflict_resolution(
                 pr_author_login = get_pr_author_login(pr_data) or ""
                 is_jules_pr = "google-labs-jules" in pr_author_login.lower()
 
-                # Check for linked issues (logging only, not used for decision anymore)
-                pr_body = pr_data.get("body", "")
-                linked_issues = extract_linked_issues_from_pr_body(pr_body)
-
                 if is_jules_pr:
-                    logger.info(f"PR #{pr_number} is a Jules PR with degrade risk. Closing PR and archiving session.")
+                    logger.info(f"PR #{pr_number} is a historical Jules PR with degrade risk. Closing PR without mutating its provider session.")
                     if repo_name:
                         _close_pr(repo_name, pr_number)
-                        _archive_jules_session(repo_name, pr_number, pr_body)
-                        # Recreate Jules session
-                        try:
-                            session_id = _extract_session_id_from_pr_body(pr_body)
-                            if session_id:
-                                from .cloud_manager import CloudManager
-
-                                cloud_manager = CloudManager(repo_name)
-                                issue_number = cloud_manager.get_issue_by_session(session_id)
-                                if not issue_number:
-                                    from .pr_processor import _find_issue_by_session_id_in_comments
-
-                                    github_client = GitHubClient.get_instance()
-                                    issue_number = _find_issue_by_session_id_in_comments(repo_name, session_id, github_client)
-
-                                if issue_number:
-                                    logger.info(f"Found issue #{issue_number} for closed Jules PR #{pr_number}. Re-creating session.")
-                                    github_client = GitHubClient.get_instance()
-                                    # Re-enter through the engine's shared Issue admission
-                                    # boundary. In particular, do not increment the attempt
-                                    # or start Jules until current readiness has been checked.
-                                    from .automation_engine import AutomationEngine
-
-                                    engine = AutomationEngine(github_client, config=config)
-                                    actions = engine._process_unlocked_issue(repo_name, issue_number, config, jules_mode=True, advance_attempt=True)
-                                    for action in actions:
-                                        logger.info(f"Issue #{issue_number}: {action}")
-                                else:
-                                    logger.warning(f"No issue found associated with session ID '{session_id}' to recreate Jules session")
-                            else:
-                                logger.warning(f"Could not extract session ID from Jules PR #{pr_number} body to recreate session")
-                        except Exception as jerr:
-                            logger.error(f"Error while attempting to recreate Jules session for PR #{pr_number}: {jerr}")
                     return False
 
                 # Trigger fallback and signal to proceed to fixing

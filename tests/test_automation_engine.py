@@ -21,6 +21,7 @@ from auto_coder.util.gh_cache import GitHubClient
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from auto_coder.util.github_request_outcome import GitHubRequestContext
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 """Tests for automation engine functionality."""
 
@@ -73,13 +74,14 @@ class TestAutomationEngine:
         slots.finish_execution(parent, parent_execution)
         github.child_reads = 0
         restarted = ImplementationSlotRepository("owner/repo", 3, tmp_path / "slots.json")
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         engine.implementation_slots = restarted
         downstream = Mock()
         engine._process_single_candidate_reserved = downstream
         candidate = Candidate(
             type="pr",
-            data={"number": 50, "title": "Child implementation", "body": "Fixes #2", "labels": []},
+            data={"number": 50, "title": "Child implementation", "body": "Fixes #2\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-50", "sha": "a" * 40}},
             priority=0,
         )
 
@@ -156,11 +158,12 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
 
         github = StrictGitHub()
         restarted = ImplementationSlotRepository("owner/repo", 3, storage_path)
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         engine.implementation_slots = restarted
         downstream = Mock()
         engine._process_single_candidate_reserved = downstream
-        candidate = Candidate(type="pr", data={"number": 51, "title": "Child", "body": "Fixes #2", "labels": []}, priority=0)
+        candidate = Candidate(type="pr", data={"number": 51, "title": "Child", "body": "Fixes #2\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-51", "sha": "a" * 40}}, priority=0)
 
         result = engine._process_single_candidate_unified("owner/repo", candidate, engine.config)
 
@@ -207,11 +210,12 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         restarted = ImplementationSlotRepository("owner/repo", 3, storage_path)
         before = json.loads(storage_path.read_text(encoding="utf-8"))[child.key]
         github.fail_children = True
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         engine.implementation_slots = restarted
         downstream = Mock()
         engine._process_single_candidate_reserved = downstream
-        candidate = Candidate(type="pr", data={"number": 20, "title": "Retry", "body": "Fixes #2", "labels": []}, priority=0)
+        candidate = Candidate(type="pr", data={"number": 20, "title": "Retry", "body": "Fixes #2\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-20", "sha": "a" * 40}}, priority=0)
 
         result = engine._process_single_candidate_unified(
             "owner/repo",
@@ -258,6 +262,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         github = StrictGitHub()
         storage_path = tmp_path / "live-unmarked-owner.json"
         first_slots = ImplementationSlotRepository("owner/repo", 3, storage_path)
+        install_pr_history(github, "a" * 40)
         first_engine = AutomationEngine(github, config=AutomationConfig())
         first_engine.implementation_slots = first_slots
         entered = Event()
@@ -269,7 +274,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
             return CandidateProcessingResult(type="pr", number=20, title="First", success=True, actions=["dispatched"])
 
         first_engine._process_single_candidate_reserved = hold_downstream
-        candidate = Candidate(type="pr", data={"number": 20, "title": "First", "body": "Fixes #2", "labels": []}, priority=0)
+        candidate = Candidate(type="pr", data={"number": 20, "title": "First", "body": "Fixes #2\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-20", "sha": "a" * 40}}, priority=0)
         with ThreadPoolExecutor(max_workers=1) as executor:
             first = executor.submit(first_engine._process_single_candidate_unified, "owner/repo", candidate, first_engine.config)
             assert entered.wait(10)
@@ -297,17 +302,6 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
                 retry_slots.start_execution(ImplementationOwner("issue", 1), github_client=github)
             release.set()
             assert first.result(timeout=10).actions == ["dispatched"]
-
-    @patch("auto_coder.automation_engine.check_and_start_recurrent_jules_tasks")
-    def test_recurrent_jules_step_receives_instance_slot_repository(self, start_recurrent, tmp_path):
-        engine = AutomationEngine(Mock(), config=AutomationConfig())
-        slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
-        engine.implementation_slots = slots
-
-        asyncio.run(engine.check_and_start_recurrent_jules_tasks_async("owner/repo"))
-
-        start_recurrent.assert_called_once_with("owner/repo", slots)
-        assert engine.config.REPORTS_DIR == "reports"
 
     # Note: Tests for deprecated process_issues and related functions have been removed
     # as those functions are no longer supported. The modern API uses process_single
@@ -450,6 +444,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         github = MagicMock()
         github.try_add_labels.return_value = False
         config = AutomationConfig()
+        install_pr_history(github, "head-a")
         engine = AutomationEngine(github, config=config)
         slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         owner = ImplementationOwner("pr", 100)
@@ -458,7 +453,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         engine.implementation_slots = slots
         candidate = Candidate(
             type="pr",
-            data={"number": 100, "title": "Recovery", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.", "labels": [{"name": "@auto-coder"}]},
+            data={"number": 100, "title": "Recovery", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->", "labels": [{"name": "@auto-coder"}], "head": {"ref": "feature-100", "sha": "a" * 40}},
             priority=1,
         )
         attempts = AdversarialValidationAttemptRepository("owner/repo", tmp_path / "attempts.json")
@@ -1045,6 +1040,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
                 return pull_request
 
         github = GitHubStub()
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         issue_owner = ImplementationOwner("issue", 100)
@@ -1055,7 +1051,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
             data={
                 "number": 108,
                 "title": "Implementation",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "issue-100-work", "sha": "a" * 40},
             },
             priority=0,
@@ -1075,8 +1071,9 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         assert json.loads((tmp_path / "slots.json").read_text(encoding="utf-8"))["issue:100"]["implementation_prs"] == [108]
         assert slots.reserve(ImplementationOwner("issue", 200)) is False
 
-    def test_source_less_recurrent_pr_continues_under_provider_owner(self, tmp_path):
+    def test_source_less_recurrent_jules_pr_is_fenced_with_provider_owner_retained(self, tmp_path):
         github = MagicMock()
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         recurrent_owner = ImplementationOwner("recurrent", 12345)
@@ -1102,9 +1099,15 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
 
         result = engine._process_single_candidate_unified("owner/repo", candidate, engine.config)
 
-        assert result.success is True
+        # Continuation ownership does not prove that this Jules PR was unrelated
+        # to retired competitions whose original publication history is missing.
+        assert result.success is False
+        assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
+        assert "Speculative Jules unknown artifact fenced" in result.actions[0]
+        engine._process_single_candidate_reserved.assert_not_called()
         assert slots.resolve_owner("pr", candidate.data, github) == recurrent_owner
         assert slots.active_owners() == (recurrent_owner,)
+        assert slots.active_execution_ids(recurrent_owner) == ()
 
     def test_startup_discovers_branch_linked_pr_before_reconciliation(self, tmp_path):
         """Restart discovery must protect an unrecorded branch-linked PR."""
@@ -1138,6 +1141,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
                 return pull_request
 
         github = GitHubStub()
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         issue_owner = ImplementationOwner("issue", 100)
@@ -1361,7 +1365,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
 
     def test_process_single_reports_local_verification_reason_instead_of_green_ci(self, mock_github_client):
         engine = AutomationEngine(mock_github_client, config=AutomationConfig())
-        candidate = Candidate(type="pr", data={"number": 5467, "title": "PR"}, priority=1)
+        candidate = Candidate(type="pr", data={"number": 5467, "title": "PR", "body": "<!-- auto-coder:local -->", "head": {"ref": "feature-5467", "sha": "a" * 40}}, priority=1)
         reason = "Reviewer omitted the required disposition; this target was not verified."
         engine._check_and_handle_closed_branch = Mock(return_value=True)
         engine._create_candidate_from_single = Mock(return_value=candidate)
@@ -1381,7 +1385,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
     def test_process_single_propagates_remote_head_verification_failure(self, mock_github_client):
         """A nested caught merge-stage exception must reach top-level errors."""
         engine = AutomationEngine(mock_github_client, config=AutomationConfig())
-        candidate = Candidate(type="pr", data={"number": 5266, "title": "PR", "head": {"ref": "feature-5266", "sha": "a" * 40}}, priority=1)
+        candidate = Candidate(type="pr", data={"number": 5266, "title": "PR", "head": {"ref": "feature-5266", "sha": "a" * 40}, "body": "<!-- auto-coder:local -->"}, priority=1)
         diagnostic = "Failed to verify remote head SHA for PR #5266: GitHub API rate limited; merge aborted."
         engine._check_and_handle_closed_branch = Mock(return_value=True)
         engine._create_candidate_from_single = Mock(return_value=candidate)
@@ -1404,7 +1408,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         """The real PR-processing chain must classify a status API error as failed."""
         config = AutomationConfig()
         engine = AutomationEngine(mock_github_client, config=config)
-        pr_data = {"number": 77, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
+        pr_data = {"number": 77, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         open_result = Mock(closed=False)
         label_context = MagicMock()
@@ -1438,7 +1442,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         config = AutomationConfig()
         config.AUTO_MERGE = True
         engine = AutomationEngine(mock_github_client, config=config)
-        pr_data = {"number": 78, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
+        pr_data = {"number": 78, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         open_result = Mock(closed=False)
         label_context = MagicMock()
@@ -1482,7 +1486,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         config = AutomationConfig()
         config.AUTO_MERGE = True
         engine = AutomationEngine(mock_github_client, config=config)
-        pr_data = {"number": 79, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
+        pr_data = {"number": 79, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         open_result = Mock(closed=False)
         label_context = MagicMock()
@@ -1528,8 +1532,9 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         github_client.get_pr_review_threads_strict = MagicMock(side_effect=RuntimeError("detailed GraphQL lookup failed"))
         config = AutomationConfig()
         config.AUTO_MERGE = True
+        install_pr_history(github_client, lambda _repository, _number: pr_data["head"]["sha"])
         engine = AutomationEngine(github_client, config=config)
-        pr_data = {"number": 80, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
+        pr_data = {"number": 80, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
         pr_data.update({"user": {"login": "developer"}, "state": "open"})
         github_client.get_pull_request_metadata_strict = MagicMock(return_value=pr_data)
         candidate = Candidate(type="pr", data=pr_data, priority=1)
@@ -1573,7 +1578,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         config.AUTO_MERGE = True
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         engine = AutomationEngine(mock_github_client, config=config)
-        pr_data = {"number": 90, "title": "PR", "body": "Fixes #99", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
+        pr_data = {"number": 90, "title": "PR", "body": "Fixes #99\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         open_result = Mock(closed=False)
         label_context = MagicMock()
@@ -1616,7 +1621,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         config.AUTO_MERGE = True
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         engine = AutomationEngine(mock_github_client, config=config)
-        pr_data = {"number": 91, "title": "PR", "body": "Fixes #99", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
+        pr_data = {"number": 91, "title": "PR", "body": "Fixes #99\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         open_result = Mock(closed=False)
         label_context = MagicMock()
@@ -1668,7 +1673,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         config.AUTO_MERGE = True
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         engine = AutomationEngine(mock_github_client, config=config)
-        pr_data = {"number": 92, "title": "PR", "body": "Fixes #99", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
+        pr_data = {"number": 92, "title": "PR", "body": "Fixes #99\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         open_result = Mock(closed=False)
         label_context = MagicMock()
@@ -1735,7 +1740,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         config.MAX_ADVERSARIAL_VALIDATIONS = review_cap
         engine = AutomationEngine(mock_github_client, config=config)
         head_sha = "abc123456789" + "0" * 28
-        pr_data = {"number": 93, "title": "PR", "body": "Fixes #99", "labels": [], "head": {"ref": "feature-test", "sha": head_sha}, "mergeable": True, "state": "open"}
+        pr_data = {"number": 93, "title": "PR", "body": "Fixes #99\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": head_sha}, "mergeable": True, "state": "open"}
         attempts = AdversarialValidationAttemptRepository("owner/repo")
         saved_attempt = attempts.start(93, head_sha)
         attempts.finish(saved_attempt.attempt_id, "ERROR")
@@ -1847,7 +1852,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         config.AUTO_MERGE = True
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         head_sha = "e" * 40
-        pr_data = {"number": 94, "title": "PR", "body": "Fixes #99", "labels": [], "head": {"ref": "feature-test", "sha": head_sha}, "mergeable": True, "state": "open", "user": {"login": "developer", "id": 2}}
+        pr_data = {"number": 94, "title": "PR", "body": "Fixes #99\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": head_sha}, "mergeable": True, "state": "open", "user": {"login": "developer", "id": 2}}
         issue = {"number": 99, "title": "Contract", "body": "## Requirements\nREQ-001: Preserve the gate.", "state": "open", "labels": []}
         thread = ReviewThread(
             id="pending-provenance",
@@ -1890,6 +1895,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         elif failure_kind in {"legacy-comment", "native-precedence"}:
             github._get_issue_comments.side_effect = OSError(diagnostic)
             native_comments.side_effect = OSError(diagnostic)
+        install_pr_history(github, lambda _repository, _number: pr_data["head"]["sha"])
         engine = AutomationEngine(github, config=config)
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         engine._check_and_handle_closed_branch = Mock(return_value=True)
@@ -2019,7 +2025,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         mock_pr_data = {
             "number": 123,
             "title": "Test PR",
-            "body": "Test description",
+            "body": "Test description\n<!-- auto-coder:local -->",
             "head": {"ref": "test-branch", "sha": "a" * 40},
             "base": {"ref": "main"},
             "mergeable": True,
@@ -2062,7 +2068,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         mock_pr_data = {
             "number": 123,
             "title": "Test PR",
-            "body": "Test description",
+            "body": "Test description\n<!-- auto-coder:local -->",
             "head": {"ref": "test-branch", "sha": "a" * 40},
             "base": {"ref": "main"},
             "mergeable": True,
@@ -2107,7 +2113,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         mock_pr_data = {
             "number": 123,
             "title": "Test PR with conflicts",
-            "body": "Test description",
+            "body": "Test description\n<!-- auto-coder:local -->",
             "head": {"ref": "test-branch", "sha": "a" * 40},
             "base": {"ref": "main"},
             "mergeable": False,  # Simulate merge conflicts
@@ -3296,7 +3302,7 @@ class TestGetCandidates:
             1: {
                 "number": 1,
                 "title": "PR needing fix",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,  # Mergeable but failing checks
@@ -3305,7 +3311,7 @@ class TestGetCandidates:
             2: {
                 "number": 2,
                 "title": "PR ready for merge",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
@@ -3314,7 +3320,7 @@ class TestGetCandidates:
             3: {
                 "number": 3,
                 "title": "Urgent unmergeable PR",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-3", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": False,  # Not mergeable
@@ -3402,7 +3408,7 @@ class TestGetCandidates:
             1: {
                 "number": 1,
                 "title": "Unmergeable PR (older)",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,  # Not mergeable (has conflicts)
@@ -3411,7 +3417,7 @@ class TestGetCandidates:
             2: {
                 "number": 2,
                 "title": "Failing checks but mergeable PR",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,  # Mergeable but failing checks
@@ -3420,7 +3426,7 @@ class TestGetCandidates:
             3: {
                 "number": 3,
                 "title": "Unmergeable PR (younger)",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-3", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,  # Not mergeable (has conflicts)
@@ -3496,7 +3502,7 @@ class TestGetCandidates:
             1: {
                 "number": 1,
                 "title": "Urgent unmergeable PR",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": False,
@@ -3505,7 +3511,7 @@ class TestGetCandidates:
             2: {
                 "number": 2,
                 "title": "Urgent mergeable PR",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": True,
@@ -3514,7 +3520,7 @@ class TestGetCandidates:
             3: {
                 "number": 3,
                 "title": "Regular unmergeable PR",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-3", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
@@ -3523,7 +3529,7 @@ class TestGetCandidates:
             4: {
                 "number": 4,
                 "title": "Regular mergeable PR",
-                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+                "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
                 "head": {"ref": "pr-4", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
@@ -3601,7 +3607,7 @@ class TestGetCandidates:
                 "number": 1,
                 "title": "Dependabot green PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-1", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
                 "created_at": "2024-01-01T00:00:00Z",
@@ -3612,7 +3618,7 @@ class TestGetCandidates:
                 "number": 2,
                 "title": "Dependabot non-ready PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-2", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-2", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
                 "created_at": "2024-01-02T00:00:00Z",
@@ -3654,7 +3660,7 @@ class TestGetCandidates:
 
     @patch("auto_coder.util.github_action._check_github_actions_status")
     @patch("auto_coder.issue_context.extract_linked_issues_from_pr_body")
-    def test_get_candidates_treats_dependency_bot_prs_like_normal_when_ignore_disabled(
+    def test_get_candidates_keeps_unattributed_dependency_bots_fenced_when_ignore_disabled(
         self,
         mock_extract_issues,
         mock_check_actions,
@@ -3662,7 +3668,7 @@ class TestGetCandidates:
         mock_gemini_client,
         test_repo_name,
     ):
-        """Dependency-bot PRs behave like normal PRs when both flags are False."""
+        """Unknown publication origin remains fenced when dependency filters are off."""
         config = AutomationConfig()
         config.IGNORE_DEPENDABOT_PRS = False
         config.AUTO_MERGE_DEPENDABOT_PRS = False
@@ -3727,11 +3733,10 @@ class TestGetCandidates:
 
             candidates = engine._get_candidates(test_repo_name, max_items=10)
 
-        numbers = sorted([c.data["number"] for c in candidates])
-        assert numbers == [1, 2]
-        priorities = {c.data["number"]: c.priority for c in candidates}
-        assert priorities[1] == 2  # Mergeable with successful checks
-        assert priorities[2] == 2  # Unmergeable PR gets priority 2
+        # Disabling dependency policy filters cannot establish publication
+        # provenance for an otherwise unattributed bot artifact.
+        assert candidates == []
+        mock_check_actions.assert_not_called()
 
     @patch("auto_coder.util.github_action._check_github_actions_status")
     @patch("auto_coder.issue_context.extract_linked_issues_from_pr_body")
@@ -3761,7 +3766,7 @@ class TestGetCandidates:
                 "number": 1,
                 "title": "Dependabot green PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-1", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
                 "created_at": "2024-01-01T00:00:00Z",
@@ -3771,7 +3776,7 @@ class TestGetCandidates:
                 "number": 2,
                 "title": "Dependabot non-ready PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-2", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-2", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
                 "created_at": "2024-01-02T00:00:00Z",
@@ -3839,7 +3844,7 @@ class TestGetCandidates:
                 "number": 1,
                 "title": "Dependabot passing PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-1", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
                 "created_at": "2024-01-01T00:00:00Z",
@@ -3902,7 +3907,7 @@ class TestGetCandidates:
                 "number": 1,
                 "title": "Dependabot failing PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-1", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
                 "created_at": "2024-01-01T00:00:00Z",
@@ -3964,7 +3969,7 @@ class TestGetCandidates:
                 "number": 1,
                 "title": "Dependabot failing PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-1", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
                 "created_at": "2024-01-01T00:00:00Z",
@@ -4028,7 +4033,7 @@ class TestGetCandidates:
                 "number": 1,
                 "title": "Dependabot green PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-1", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
                 "created_at": "2024-01-01T00:00:00Z",
@@ -4038,7 +4043,7 @@ class TestGetCandidates:
                 "number": 2,
                 "title": "Dependabot failing PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-2", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-2", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
                 "created_at": "2024-01-02T00:00:00Z",
@@ -4048,7 +4053,7 @@ class TestGetCandidates:
                 "number": 3,
                 "title": "Dependabot unmergeable PR",
                 "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
-                "head": {"ref": "bot-pr-3", "sha": "a" * 40},
+                "head": {"ref": "dependabot/bot-pr-3", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
                 "created_at": "2024-01-03T00:00:00Z",
@@ -4135,7 +4140,7 @@ class TestGetCandidates:
         pr_details = {
             "number": 1,
             "title": "PR",
-            "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.",
+            "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->",
             "head": {"ref": "pr-1", "sha": "a" * 40},
             "labels": ["@auto-coder"],  # Has @auto-coder label - should skip
             "mergeable": True,
@@ -4274,7 +4279,7 @@ class TestGetCandidates:
         pr_details = {
             "number": 1,
             "title": "PR",
-            "body": "This PR fixes #10 and #20",
+            "body": "This PR fixes #10 and #20\n<!-- auto-coder:local -->",
             "head": {"ref": "pr-1", "sha": "a" * 40},
             "labels": [],
             "mergeable": True,
@@ -4302,7 +4307,7 @@ class TestGetCandidates:
         assert candidates[0].branch_name == "pr-1"
 
         assert mock_extract_issues.call_count == 2
-        assert all(call.args == ("This PR fixes #10 and #20",) for call in mock_extract_issues.call_args_list)
+        assert all(call.args == (pr_details["body"],) for call in mock_extract_issues.call_args_list)
 
     @patch("auto_coder.util.github_action._check_github_actions_status")
     @patch("auto_coder.issue_context.extract_linked_issues_from_pr_body")

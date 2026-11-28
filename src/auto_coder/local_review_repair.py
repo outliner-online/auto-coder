@@ -27,6 +27,7 @@ from .git_commit import git_push
 from .git_info import parse_github_repo_from_url
 from .llm_backend_config import TASK_ONLY_BACKEND_TYPES, active_repo_context, get_llm_config
 from .logger_config import get_logger
+from .pr_automation_guard import assess_local_pr_automation
 from .process_identity import ProcessIdentity, process_is_dead, read_process_identity
 from .review_correction_policy import validate_review_correction_basis_json
 from .utils import bind_command_execution_cwd, reset_command_execution_cwd
@@ -858,7 +859,7 @@ def _resume_publication(
             return LocalReviewRepairOutcome("publication_pending", f"publication authority is unavailable: {exc}", executed=True)
         if not authorized:
             return LocalReviewRepairOutcome("publication_pending", "publication authority changed; retained output was not pushed", executed=True)
-    return _send_pending_publication(request, store, record, root)
+    return _send_pending_publication(request, store, record, root, publication_authorizer=publication_authorizer)
 
 
 def _send_pending_publication(
@@ -866,13 +867,24 @@ def _send_pending_publication(
     store: LocalReviewRepairStore,
     record: LocalReviewRepairRecord,
     root: Path,
+    *,
+    publication_authorizer: Optional[Callable[[], bool]] = None,
 ) -> LocalReviewRepairOutcome:
     """Enter one send, retaining ambiguity independently of candidate creation."""
+    if publication_authorizer is not None:
+        try:
+            if not publication_authorizer():
+                return LocalReviewRepairOutcome("publication_pending", "PR automation is stopped or its authority is unavailable; retained output was not pushed", executed=True)
+        except Exception as exc:
+            return LocalReviewRepairOutcome("publication_pending", f"publication authority unavailable: {exc}", executed=True)
     if record.publication_send_state != "not_entered":
         return LocalReviewRepairOutcome("publication_pending", f"publication send disposition is {record.publication_send_state}; awaiting authoritative candidate readback without another push", executed=True)
     basis_refusal = review_correction_basis_refusal(record)
     if basis_refusal:
         return LocalReviewRepairOutcome("publication_pending", f"reviewer correction publication refused: {basis_refusal}", executed=True)
+    local_guard = assess_local_pr_automation(request.repository, request.pr_number, root, record.head_sha, record.result_sha)
+    if local_guard is not None:
+        return LocalReviewRepairOutcome("publication_pending", local_guard.reason, executed=True)
     if not store.mark_publication_send_entered(request, record):
         return LocalReviewRepairOutcome("publication_pending", "publication send checkpoint lost attempt ownership; no push was started", executed=True)
     claim = LocalReviewRepairClaim(False, record.phase, record.attempt_id, record.incarnation)
@@ -1002,6 +1014,12 @@ def execute_local_review_repair(
             preserve_worktree = True
             return LocalReviewRepairOutcome("indeterminate", f"local backend outcome is indeterminate: {exc}", executed=True)
 
+        local_guard = assess_local_pr_automation(request.repository, request.pr_number, Path(worktree), request.head_sha)
+        if local_guard is not None:
+            store.transition(request, claim, "indeterminate", reason=local_guard.reason, workspace_path=worktree)
+            preserve_worktree = True
+            return LocalReviewRepairOutcome("indeterminate", local_guard.reason, executed=True)
+
         status = subprocess.run(["git", "status", "--porcelain"], cwd=worktree, capture_output=True, text=True)
         if status.returncode != 0:
             store.transition(request, claim, "indeterminate", reason=status.stderr.strip(), workspace_path=worktree)
@@ -1103,7 +1121,7 @@ def execute_local_review_repair(
         pending = store.get(request)
         if pending is None:
             return LocalReviewRepairOutcome("publication_pending", "candidate checkpoint is unavailable; no push was started", executed=True)
-        outcome = _send_pending_publication(request, store, pending, Path(worktree))
+        outcome = _send_pending_publication(request, store, pending, Path(worktree), publication_authorizer=publication_authorizer)
         if outcome.published and allowance_authority is not None:
             allowance_authority.mark_completion(code_changed=True, evidence=f"local correction published as {result_sha}")
         return outcome
@@ -1122,14 +1140,24 @@ def recover_confirmed_local_review_repair(
     *,
     store: LocalReviewRepairStore,
     allowance_authority: LocalRepairAllowanceAuthority,
+    publication_authorizer: Optional[Callable[[], bool]] = None,
 ) -> LocalReviewRepairOutcome:
     """Finish an entered correction from its settled Muse result and worktree."""
+    if publication_authorizer is not None:
+        try:
+            if not publication_authorizer():
+                return LocalReviewRepairOutcome("publication_pending", "PR automation is stopped or its authority is unavailable; retained output was not committed", executed=True)
+        except Exception as exc:
+            return LocalReviewRepairOutcome("publication_pending", f"publication authority unavailable: {exc}", executed=True)
     record = store.get(request)
     if record is None or record.phase != "executing" or not record.invocation_entered or not record.workspace_path:
         return LocalReviewRepairOutcome("indeterminate", "retained correction execution is unavailable")
     worktree = Path(record.workspace_path)
     if not worktree.is_dir():
         return LocalReviewRepairOutcome("indeterminate", "retained correction workspace is unavailable")
+    local_guard = assess_local_pr_automation(request.repository, request.pr_number, worktree, record.head_sha)
+    if local_guard is not None:
+        return LocalReviewRepairOutcome("publication_pending", local_guard.reason, executed=True)
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=str(worktree),
@@ -1172,7 +1200,7 @@ def recover_confirmed_local_review_repair(
     pending = store.get(request)
     if pending is None:
         return LocalReviewRepairOutcome("publication_pending", "candidate checkpoint is unavailable; no push was started", executed=True)
-    outcome = _send_pending_publication(request, store, pending, worktree)
+    outcome = _send_pending_publication(request, store, pending, worktree, publication_authorizer=publication_authorizer)
     if outcome.published:
         allowance_authority.mark_completion(code_changed=True, evidence=f"local correction published as {result_sha}")
     return outcome

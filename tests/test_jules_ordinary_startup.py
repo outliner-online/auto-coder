@@ -224,6 +224,11 @@ def test_cli_startup_reaches_supported_cloud_dispatch_without_jules(
         f'[backend]\norder = ["{alias}"]\n\n[backends.{alias}]\nbackend_type = "{backend_type}"\nenabled = true\n',
         monkeypatch,
     )
+    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from auto_coder.cloud_manager import CloudManager
+
+    history = CloudManager("owner/repo")
+    assert history.add_session(2890, "legacy-unknown", provider="jules")
     github = _ordinary_issue_github(2891)
 
     with (
@@ -240,6 +245,7 @@ def test_cli_startup_reaches_supported_cloud_dispatch_without_jules(
     assert result.exit_code == 0, result.output
     provider_send.assert_called_once()
     jules_send.assert_not_called()
+    assert CloudManager("owner/repo").get_binding(2890).task_id == "legacy-unknown"
 
 
 # ---------------------------------------------------------------------------

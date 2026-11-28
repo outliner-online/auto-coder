@@ -354,6 +354,7 @@ class TestCommonAdmissionBoundaryRefusesDependencyBotPR:
         engine = AutomationEngine(mock_github_client, config=config)
         pr_data = dict(_mergeable_open_pr(author="a-human-contributor"), mergeable=False)
         pr_data["user"] = {"login": "a-human-contributor"}
+        pr_data["body"] = "<!-- auto-coder:local-llm -->"
         candidate = Candidate(type="pr", data=pr_data, priority=0)
 
         with (

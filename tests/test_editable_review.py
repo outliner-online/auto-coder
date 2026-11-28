@@ -158,7 +158,8 @@ def test_source_delta_publishes_through_existing_correction_without_artifacts(re
     checks = []
     result = _publish(snapshot, store, authority_check=lambda sha, ref: checks.append((sha, ref)) or True)
     assert (result.phase, result.published, result.executed) == ("awaiting_validation", True, True)
-    assert checks == [(head, "review-head")] * 3
+    # Entry, commit, candidate publication, and final send each revalidate authority.
+    assert checks == [(head, "review-head")] * 4
     published = _git(remote, "rev-parse", "refs/heads/review-head")
     assert published != head
     assert _git(remote, "show", f"{published}:source.py") == "value = 2"
@@ -224,7 +225,8 @@ def test_pre_send_deferral_recovers_original_ref_and_commit_without_repeating_re
     checks = []
     result = resume_pending_review_publication(repository="owner/repo", pr_number=42, root=str(root), store=store, authority_check=lambda sha, ref: checks.append((sha, ref)) or True)
     assert result.published is True
-    assert checks == [(head, "review-head")]
+    # Recovery and the final send independently revalidate the retained target.
+    assert checks == [(head, "review-head")] * 2
     assert _git(remote, "rev-parse", "refs/heads/review-head") == retained
     assert _git(remote, "show", f"{retained}:source.py") == "value = 2"
 

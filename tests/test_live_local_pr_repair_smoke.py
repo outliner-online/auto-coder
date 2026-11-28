@@ -72,22 +72,17 @@ def make_args(tmp_path, scenario="ci"):
 
 
 def test_harness_command_is_accepted_by_real_process_issues_parser(tmp_path):
-    from auto_coder.cli_commands_main import _synchronize_codex_auth_secret_unless_skipped, process_issues
+    from auto_coder.cli_commands_main import process_issues
 
     args = make_args(tmp_path)
     command = smoke.production_command(args, tmp_path / "result.json")
 
     assert "--backend" not in command
-    assert "--skip-codex-auth-secret-sync" in command
+    assert "--skip-codex-auth-secret-sync" not in command
     with process_issues.make_context("process-issues", command[2:]) as context:
         assert context.params["repo"] == args.repository
         assert context.params["only_target"] == "42"
         assert context.params["result_file"] == tmp_path / "result.json"
-        assert context.params["skip_codex_auth_secret_sync"] is True
-
-    with patch("auto_coder.github_secrets.synchronize_codex_auth_secret") as publisher:
-        _synchronize_codex_auth_secret_unless_skipped(context.params["skip_codex_auth_secret_sync"])
-    publisher.assert_not_called()
 
 
 class BackendConfig:

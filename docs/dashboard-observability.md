@@ -625,22 +625,23 @@ requested, accepted, unknown, and exhausted counts; the action is dispatch
 status and never reports session submission as completed Issue implementation.
 Candidate quarantine, selection, cleanup, and merge-authority events retain the
 existing production-to-view boundaries described below.
-The daemon's targeted speculative maintenance consumer runs at startup and on
-the 60-second maintenance cadence, while account-wide Jules discovery remains
-hourly. It refreshes retained candidate identities and routes durable adoption
-or aggregate-failure deliveries back through the existing PR/Issue invalidation
-stages; cleanup continues to require confirmed GitHub state.
+Retired speculative maintenance keeps historical records inspectable without
+provider refresh, adoption, failure delivery, or cleanup sends.
 
-Issue #2073 adds a fail-closed `pr.speculative-jules-authority` admission event
-before ordinary PR lifecycle effects. Deferred events carry only the authoritative
-classification and whether durable cleanup is pending; they do not claim remote
-cancellation, released provider capacity, or cleanup success. The dashboard needs
-no new projection because this uses the existing PR stage/result event schema.
-`tests/test_speculative_jules_lifecycle.py` covers durable cleanup and the
-mutation-boundary authority recheck.
-The startup/hourly Jules maintenance loop now drives pending cleanup without
-introducing a new event shape; completion still requires a confirmed closed or
-merged GitHub state, and denied or ambiguous cleanup emits no false success.
+Issue #2073 adds the fail-closed `pr.speculative-jules-authority` admission event.
+The retired-provider fence now emits the same classification at candidate
+collection, common PR dispatch, resumed reserved dispatch, and direct PR ingress,
+before draft readiness, closure, retry, or ordinary repair effects. `UNKNOWN`
+identifies missing/conflicting ownership evidence; `BLOCKED` distinguishes a known
+selected candidate whose acceptance is stale. Deferred events carry the
+classification and cleanup-pending flag and claim no remote cancellation or
+cleanup success. No dashboard projection/schema change is needed.
+The runnable production-origin tests are
+`tests/test_speculative_jules_lifecycle.py::test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundaries`
+and
+`tests/test_speculative_jules_lifecycle.py::test_fresh_runtime_receipt_does_not_authorize_existing_repository_prs`.
+They exercise collection, dispatch, and final merge while observing zero forbidden
+GitHub mutations and a separately proven ordinary positive control.
 
 Issues #2101 and #2210 add the read-only `STRONG_AUDIT` and `ORDINARY_CLOSURE`
 reviewer execution boundary consumed by the existing two-tier lifecycle. Production
@@ -4402,3 +4403,15 @@ restart observe the durable marker and do not resend. Later exact-candidate
 readback emits corrective handoff, still requiring independent CI and review.
 `test_unresolved_push_restart_waits_without_resend_until_candidate_readback`
 exercises this production PR-processing and trace path with one send throughout.
+
+## PR automation intervention stop
+
+The production history guard emits `pr.automation-stop` with `blocked` when a
+Revert/commit budget stop is latched, and `deferred` when authoritative history
+or durable state is unavailable. Facts include `reason`, `head_sha`,
+`observed_commits`, `commit_limit` and `revert_sha`. The durable worker logs
+`outcome=blocked` and `requires_external_intervention=true`; it acknowledges that
+evaluation without a repair or failure-backoff timer. The existing generic detail
+renderer displays these facts. `tests/test_pr_automation_guard.py::test_worker_acknowledges_stop_without_retry_and_dashboard_shows_intervention`
+drives the actual worker/history guard through the log projection. Related
+behavior is documented in [PR automation intervention stops](client-features/pr-automation-intervention-stop.md).

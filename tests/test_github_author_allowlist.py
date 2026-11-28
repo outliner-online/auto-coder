@@ -13,6 +13,7 @@ from auto_coder.automation_engine import AutomationEngine
 from auto_coder.llm_backend_config import get_issue_allowlist_from_config, get_pr_allowlist_from_config
 from auto_coder.util.gh_cache import GitHubClient
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_mock_pr_history
 
 
 class TestGetAuthorId:
@@ -179,6 +180,7 @@ class TestAutomationEngineAllowlistFiltering:
     @pytest.fixture
     def mock_github(self):
         gh = MagicMock()
+        install_mock_pr_history(gh, "a" * 40)
         gh.clear_sub_issue_cache = MagicMock()
         return gh
 
@@ -197,6 +199,7 @@ class TestAutomationEngineAllowlistFiltering:
             {
                 "number": 1,
                 "title": "Trusted PR",
+                "body": "<!-- auto-coder:local-llm -->",
                 "author": "trusted_pr_user",
                 "author_id": 222,
                 "created_at": "2026-01-01T00:00:00Z",
@@ -207,6 +210,7 @@ class TestAutomationEngineAllowlistFiltering:
             {
                 "number": 2,
                 "title": "Untrusted PR",
+                "body": "<!-- auto-coder:local-llm -->",
                 "author": "untrusted_user",
                 "author_id": 999,
                 "created_at": "2026-01-01T00:00:00Z",
@@ -286,7 +290,7 @@ class TestAutomationEngineAllowlistFiltering:
 
         untrusted_candidate = Candidate(
             type="pr",
-            data={"number": 84, "title": "Malicious PR", "author_id": 999},
+            data={"number": 84, "title": "Malicious PR", "body": "<!-- auto-coder:local-llm -->", "author_id": 999},
             priority=0,
         )
 
