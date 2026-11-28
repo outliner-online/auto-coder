@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from auto_coder.cloud_manager import CloudTaskBinding
 from auto_coder.pr_processor import _link_supported_provider_pr_to_issue
 
 
@@ -11,7 +12,7 @@ def test_claude_binding_adds_issue_reference():
     pr = {"number": 17, "body": "https://claude.ai/code/session_supported", "user": {"login": "claude[bot]"}}
     with patch("auto_coder.pr_processor.CloudManager") as manager:
         manager.return_value.get_issues_by_session.return_value = [2898]
-        manager.return_value.get_issue_by_session.return_value = 2898
+        manager.return_value.get_binding.return_value = CloudTaskBinding(provider="claude-routine", task_id="session_supported")
         assert _link_supported_provider_pr_to_issue("owner/repo", pr, github)
     assert "close #2898" in pr["body"]
 
