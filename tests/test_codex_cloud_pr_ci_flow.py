@@ -251,13 +251,14 @@ class TestCodexCloudPRCIFlow:
         """End-to-end test: process_pull_request intercepts failing Codex PR and delegates to Codex Cloud continuation."""
         from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsStatusResult
 
+        CloudRunRepository("owner/repo").save(CloudRun("owner/repo", 15, 0, "codex-cloud", task_id="task_e_pr200", backend_name="codex-cloud", submission_outcome="accepted", launch_identity="launch-task_e_pr200"))
         pr_data = {
             "number": 200,
             "title": "Implement feature",
             "body": "Closes #15\n\nhttps://chatgpt.com/codex/tasks/task_e_pr200",
             "state": "open",
             "user": {"login": "octocat"},
-            "head": {"ref": "feature-branch", "sha": "abcdef123456"},
+            "head": {"ref": "feature-branch", "sha": "abcdef123456", "repo": {"full_name": "owner/repo"}},
             "base": {"ref": "main"},
             "mergeable": True,
             "draft": False,
@@ -326,13 +327,14 @@ class TestCodexCloudPRCIFlow:
         from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsStatusResult
 
         config.CHECK_LABELS = check_labels
+        CloudRunRepository("owner/repo").save(CloudRun("owner/repo", 15, 0, "codex-cloud", task_id="task_e_pr201", backend_name="codex-cloud", submission_outcome="accepted", launch_identity="launch-task_e_pr201"))
         pr_data = {
             "number": 201,
             "title": "Implement cloud feature",
-            "body": "https://chatgpt.com/codex/tasks/task_e_pr201",
+            "body": "Closes #15\n\nhttps://chatgpt.com/codex/tasks/task_e_pr201",
             "state": "open",
             "user": {"login": "octocat"},
-            "head": {"ref": "feature-branch", "sha": "abcdef123456"},
+            "head": {"ref": "feature-branch", "sha": "abcdef123456", "repo": {"full_name": "owner/repo"}},
             "base": {"ref": "main"},
             "mergeable": True,
             "draft": False,

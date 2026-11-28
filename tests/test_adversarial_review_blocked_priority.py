@@ -36,7 +36,7 @@ def _pr_data(number: int, head_sha: str, mergeable: bool = True, labels=None, li
     return {
         "number": number,
         "title": "Some PR",
-        "body": f"Fixes #{linked_issue}" if linked_issue else "",
+        "body": "<!-- auto-coder:local-llm -->\n" + (f"Fixes #{linked_issue}" if linked_issue else ""),
         "head": {"ref": f"pr-{number}", "sha": head_sha},
         "labels": labels or [],
         "mergeable": mergeable,
@@ -189,12 +189,15 @@ class TestAdversarialReviewBlockedPriorityIntegration:
             mock_github_client.get_pr_reviews_strict.return_value = [_adversarial_review(head_sha, "NEEDS_FIX")]
 
             candidates = AutomationEngine(mock_github_client)._get_candidates(test_repo_name, max_items=10)
-            priorities[login] = candidates[0].priority
+            if login == "unrelated[bot]":
+                # An unrelated bot has no verified local publication identity.
+                assert candidates == []
+            else:
+                priorities[login] = candidates[0].priority
 
         assert priorities == {
             "auto-coder[bot]": 1,
             "former-controller": 1,
-            "unrelated[bot]": 2,
         }
 
     @patch("auto_coder.util.github_action._check_github_actions_status")

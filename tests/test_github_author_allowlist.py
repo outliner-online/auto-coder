@@ -197,6 +197,7 @@ class TestAutomationEngineAllowlistFiltering:
             {
                 "number": 1,
                 "title": "Trusted PR",
+                "body": "<!-- auto-coder:local-llm -->",
                 "author": "trusted_pr_user",
                 "author_id": 222,
                 "created_at": "2026-01-01T00:00:00Z",
@@ -207,6 +208,7 @@ class TestAutomationEngineAllowlistFiltering:
             {
                 "number": 2,
                 "title": "Untrusted PR",
+                "body": "<!-- auto-coder:local-llm -->",
                 "author": "untrusted_user",
                 "author_id": 999,
                 "created_at": "2026-01-01T00:00:00Z",
@@ -286,7 +288,7 @@ class TestAutomationEngineAllowlistFiltering:
 
         untrusted_candidate = Candidate(
             type="pr",
-            data={"number": 84, "title": "Malicious PR", "author_id": 999},
+            data={"number": 84, "title": "Malicious PR", "body": "<!-- auto-coder:local-llm -->", "author_id": 999},
             priority=0,
         )
 

@@ -333,7 +333,7 @@ class TestMergePRWithIssueClosing:
         mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         head_sha = "f" * 40
-        mock_api.pulls.get.return_value = {"number": 123, "user": {"login": "some-developer"}, "head": {"sha": head_sha}}
+        mock_api.pulls.get.return_value = {"number": 123, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "some-developer"}, "head": {"sha": head_sha}}
         # Mock successful merge (API handles it same as direct now)
         mock_api.pulls.merge.return_value = {"merged": True, "sha": "mergedsha"}
 

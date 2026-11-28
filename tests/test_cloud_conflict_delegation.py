@@ -324,6 +324,7 @@ def test_production_conflict_path_reports_confirmed_followup_in_actions_and_pr(t
 
 def test_direct_merge_path_propagates_confirmed_followup_to_action_sink(tmp_path) -> None:
     """A failed API merge must expose acceptance before deferring cloud repair."""
+    from src.auto_coder.cloud_run import CloudRunRepository
     from src.auto_coder.merge_operation_state import MergeOperationStore
     from src.auto_coder.util.github_request_outcome import DeliveryCertainty, GitHubApiOutcome, GitHubRequestContext, GitHubRequestError, GitHubRequestOutcome, GitHubResponseMetadata, RequestProvenance
 
@@ -338,6 +339,9 @@ def test_direct_merge_path_propagates_confirmed_followup_to_action_sink(tmp_path
     outcome = GitHubRequestOutcome(context=context, status=405, classification=GitHubApiOutcome.REMOTE_ERROR, provenance=RequestProvenance.NETWORK, delivery=DeliveryCertainty.HTTP_RESPONSE_RECEIVED, metadata=GitHubResponseMetadata(), elapsed_ms=1.0, message="Pull Request is not mergeable")
     api.pulls.merge.side_effect = GitHubRequestError(outcome)
     conflicting_pr = pr_data()
+    conflicting_pr["body"] = "Closes #1588\n\nhttps://chatgpt.com/remote/task_e_direct"
+    conflicting_pr["head"]["repo"] = {"full_name": "owner/repo"}
+    CloudRunRepository("owner/repo").save(CloudRun("owner/repo", 1588, 0, "codex-cloud", task_id="task_e_direct", backend_name="codex-cloud", submission_outcome="accepted", launch_identity="launch-direct"))
     conflicting_pr["mergeable"] = False
     api.pulls.get.return_value = conflicting_pr
 

@@ -134,12 +134,18 @@ def test_six_feature_owners_allow_real_dependabot_merge_without_slot_writes(flow
 
 
 @pytest.mark.parametrize("author", ["human", "renovate[bot]", "some-dependabot-user", "controller[bot]"])
-def test_feature_and_other_bot_prs_remain_capacity_constrained(flow, author):
+def test_other_authors_do_not_inherit_dependabot_publication_or_slotless_authority(flow, author):
     flow.pr["user"]["login"] = author
+    if author == "human":
+        flow.pr["body"] = "<!-- auto-coder:local-llm -->"
     result = flow.run()
     assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
-    assert result.capacity_deferred is True
-    assert "logical implementation limit" in " ".join(result.actions)
+    if author == "human":
+        assert result.capacity_deferred is True
+        assert "logical implementation limit" in " ".join(result.actions)
+    else:
+        assert result.capacity_deferred is False
+        assert "unknown artifact fenced" in " ".join(result.actions)
     assert not any(request.method != "GET" for request in flow.requests)
 
 

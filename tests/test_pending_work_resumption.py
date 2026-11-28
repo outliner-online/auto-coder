@@ -276,7 +276,7 @@ def test_pr_processing_resumes_automatically_without_new_webhook(tmp_path):
     through the real _process_single_candidate entrypoint, with no operator
     action or new webhook."""
     store = PendingWorkStore(tmp_path / "pending.db")
-    fresh_pr = {"number": 42, "head": {"ref": "work", "sha": "headsha1"}, "body": "", "title": "t", "user": {"id": 999}}
+    fresh_pr = {"number": 42, "head": {"ref": "work", "sha": "headsha1"}, "body": "<!-- auto-coder:local-llm -->", "title": "t", "user": {"id": 999}}
     github = _FakePrGithub({42: [fresh_pr]})
     engine = AutomationEngine(github, _skip_all_prs_config())
     engine.pending_work_scheduler = PendingWorkScheduler(store, repository="owner/repo", poll_interval=0.02)

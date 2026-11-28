@@ -654,7 +654,7 @@ class TestPRProcessorMerge:
         head_sha = "b" * 40
 
         # Mock regular user PR info
-        mock_pr_info = {"number": 124, "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}}
+        mock_pr_info = {"number": 124, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}}
         mock_api.pulls.get.return_value = mock_pr_info
 
         # Mock successful merge
@@ -700,7 +700,7 @@ class TestPRProcessorMerge:
         # 405 is a definitive, cause-specified rejection that may fall back
         # to the currently allowed --merge method (REQ-007). It remains
         # mergeable throughout (no conflict).
-        mock_pr_info = {"number": 125, "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}, "mergeable": True}
+        mock_pr_info = {"number": 125, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}, "mergeable": True}
         mock_api.pulls.get.return_value = mock_pr_info
 
         # Mock allowed merge methods: squash (the selected method) is no

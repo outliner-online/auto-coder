@@ -318,13 +318,14 @@ def test_snapshot_failure_preserves_rendered_view_and_recovers(_use_real_sleep, 
 
             def flaky_get_snapshot(*args, **kwargs):
                 if should_fail["value"]:
-                    should_fail["value"] = False
                     raise RuntimeError("simulated snapshot read failure")
                 return real_get_snapshot(*args, **kwargs)
 
             collector.get_snapshot = flaky_get_snapshot
             try:
-                time.sleep(1.3)  # the failing tick
+                # Keep the fault active until the browser observes it. A
+                # fixed delay can span both a failed tick and its recovery.
+                page.locator("text=Snapshot read failed").wait_for(state="visible", timeout=10000)
 
                 assert page.locator("text=Snapshot read failed").count() > 0
                 exec_label_during = page.locator("text=Execution:").first.inner_text()
@@ -332,7 +333,8 @@ def test_snapshot_failure_preserves_rendered_view_and_recovers(_use_real_sleep, 
                 scroll_during = page.evaluate("window.scrollY")
                 assert scroll_during == scroll_before, "a failed refresh must not disturb the viewport"
 
-                time.sleep(1.3)  # the recovering tick
+                should_fail["value"] = False
+                page.locator("text=Snapshot read failed").wait_for(state="detached", timeout=10000)
 
                 assert page.locator("text=Snapshot read failed").count() == 0, "status must recover on the next successful refresh"
                 scroll_after = page.evaluate("window.scrollY")

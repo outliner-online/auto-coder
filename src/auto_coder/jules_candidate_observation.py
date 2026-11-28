@@ -50,6 +50,7 @@ class ArtifactClassification(str, Enum):
     RETIRED = "RETIRED"
     SUSPECTED = "SUSPECTED"
     LEGACY = "LEGACY"
+    UNKNOWN = "UNKNOWN"
     BLOCKED = "BLOCKED"
 
 
@@ -189,9 +190,11 @@ def normalize_pull_request_outputs(outputs: object) -> tuple[tuple[PullRequestId
 class CandidateObservationStore:
     """Small durable store for current evidence and retained membership."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, initialize: bool = True):
         self.path = Path(path)
         self._lock = threading.RLock()
+        if not initialize:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript("""
@@ -365,6 +368,20 @@ class CandidateObservationStore:
                 (repository.lower(), pr_repository.lower(), pr_number),
             ).fetchone()
         return row is not None
+
+    def has_retired_pr_association(self, repository: str, pr_repository: str, pr_number: int) -> bool:
+        """Return whether retained provider evidence associates this exact PR."""
+        key = (repository.lower(), pr_repository.lower(), pr_number)
+        with self._connect() as connection:
+            candidate = connection.execute(
+                "SELECT 1 FROM memberships WHERE repository=? AND pr_repository=? AND pr_number=? LIMIT 1",
+                key,
+            ).fetchone()
+            legacy = connection.execute(
+                "SELECT 1 FROM legacy_memberships WHERE repository=? AND pr_repository=? AND pr_number=? LIMIT 1",
+                key,
+            ).fetchone()
+        return candidate is not None or legacy is not None
 
 
 class JulesCandidateObservationAdapter:

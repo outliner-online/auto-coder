@@ -38,7 +38,7 @@ class TestUnmergeablePRPriority:
             1: {
                 "number": 1,
                 "title": "Unmergeable PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
@@ -47,7 +47,7 @@ class TestUnmergeablePRPriority:
             2: {
                 "number": 2,
                 "title": "Mergeable PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
@@ -122,7 +122,7 @@ class TestUnmergeablePRPriority:
             1: {
                 "number": 1,
                 "title": "Urgent unmergeable PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": False,
@@ -131,7 +131,7 @@ class TestUnmergeablePRPriority:
             2: {
                 "number": 2,
                 "title": "Urgent mergeable PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": True,
@@ -140,7 +140,7 @@ class TestUnmergeablePRPriority:
             3: {
                 "number": 3,
                 "title": "Regular unmergeable PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-3", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
@@ -239,7 +239,7 @@ class TestUnmergeablePRPriority:
             1: {
                 "number": 1,
                 "title": "Urgent unmergeable",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": False,
@@ -248,7 +248,7 @@ class TestUnmergeablePRPriority:
             2: {
                 "number": 2,
                 "title": "Urgent mergeable",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": True,
@@ -257,7 +257,7 @@ class TestUnmergeablePRPriority:
             3: {
                 "number": 3,
                 "title": "Regular unmergeable",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-3", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
@@ -351,7 +351,7 @@ class TestPriorityBackwardCompatibility:
             1: {
                 "number": 1,
                 "title": "Urgent PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": True,
@@ -360,7 +360,7 @@ class TestPriorityBackwardCompatibility:
             2: {
                 "number": 2,
                 "title": "Unmergeable PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
@@ -428,7 +428,7 @@ class TestPriorityBackwardCompatibility:
             1: {
                 "number": 1,
                 "title": "Breaking change PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": ["breaking-change"],
                 "mergeable": True,
@@ -437,7 +437,7 @@ class TestPriorityBackwardCompatibility:
             2: {
                 "number": 2,
                 "title": "Urgent unmergeable PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": ["urgent"],
                 "mergeable": False,
@@ -506,7 +506,7 @@ class TestPriorityEdgeCases:
         pr_data = {
             "number": 1,
             "title": "Unmergeable PR",
-            "body": "",
+            "body": "<!-- auto-coder:local-llm -->",
             "head": {"ref": "pr-1", "sha": "a" * 40},
             "labels": [],
             "mergeable": False,
@@ -557,7 +557,7 @@ class TestPriorityEdgeCases:
         pr_data = {
             "number": 1,
             "title": "Unmergeable PR with failures",
-            "body": "",
+            "body": "<!-- auto-coder:local-llm -->",
             "head": {"ref": "pr-1", "sha": "a" * 40},
             "labels": [],
             "mergeable": False,
@@ -608,7 +608,7 @@ class TestPriorityEdgeCases:
         pr_data = {
             "number": 1,
             "title": "Mergeable PR with failures",
-            "body": "",
+            "body": "<!-- auto-coder:local-llm -->",
             "head": {"ref": "pr-1", "sha": "a" * 40},
             "labels": [],
             "mergeable": True,
@@ -659,7 +659,7 @@ class TestPriorityEdgeCases:
         pr_data = {
             "number": 1,
             "title": "Ready PR",
-            "body": "",
+            "body": "<!-- auto-coder:local-llm -->",
             "head": {"ref": "pr-1", "sha": "a" * 40},
             "labels": [],
             "mergeable": True,
@@ -720,7 +720,7 @@ class TestPriorityIntegration:
             1: {
                 "number": 1,
                 "title": "Failing mergeable",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-1", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": True,
@@ -729,7 +729,7 @@ class TestPriorityIntegration:
             2: {
                 "number": 2,
                 "title": "Unmergeable PR",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": "pr-2", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": False,
@@ -806,7 +806,7 @@ class TestPriorityIntegration:
             pr_data_map[i] = {
                 "number": i,
                 "title": f"PR {i}",
-                "body": "",
+                "body": "<!-- auto-coder:local-llm -->",
                 "head": {"ref": f"pr-{i}", "sha": "a" * 40},
                 "labels": [],
                 "mergeable": i % 2 == 0,  # Half unmergeable
