@@ -2,7 +2,7 @@
 
 The dedicated `OpenCode Live Tests` check runs the complete `opencode_live`
 marker selection through `bash scripts/test.sh --ci-tests-only`. Its existing
-two pytest workers share one production image prepared from the exact checkout.
+three pytest workers share one production image prepared from the exact checkout.
 The load scheduler uses `--maxschedchunk 1` to reduce reserved work behind long
 tests. Xdist still retains its required current/next item lookahead; the option
 does not guarantee that only one item is assigned to a worker.
@@ -10,7 +10,8 @@ does not guarantee that only one item is assigned to a worker.
 Marker discovery, parameterized profiles, the fail-closed container-scenario
 validator, native pytest exit codes, existing host retry/skip policy, pinned
 Python/uv/Node/OpenCode/Codex prerequisites, and job/step timeouts are preserved.
-There are no additional jobs or image builds. The explicit test-only script mode
+There are no additional jobs or image builds, so the third worker does not
+duplicate dependency installation or runtime-image preparation. The explicit test-only script mode
 matches the previous workflow's direct pytest invocation, which also did not run
 the script's quality provisioning stage. Ordinary local script calls retain their
 complete gate.
@@ -26,6 +27,31 @@ an actual assertion failure outside the mandatory container scenarios returns 1
 even when completeness validation succeeds.
 
 ## Evidence and remaining measurement
+
+Issue #2911's qualifying run `45330611896`, job `138230761660`, used one runner
+and two workers: workflow 717 seconds, queue 2 seconds, job 696 seconds, image preparation 63 seconds,
+test step 607 seconds, and native pytest 602.92 seconds (18 passed, 9 skipped).
+The native duration report identifies a 236.62-second longest indivisible test.
+One worker remained occupied by that test and its following 85.66-second case,
+while the other processed the remaining independent cases; both workers were
+active until the end of the session. The independent call durations total much
+more than the longest indivisible test, so adding one in-job worker can
+redistribute measured work while retaining the single prepared image. It does
+not alter queueing, setup, retry, selection, or failure semantics.
+
+The changed pull-request run `45906998276`, job `140206007459`, measured workflow
+679 seconds, queue 3 seconds, job 675 seconds, image preparation 71 seconds, test step 577 seconds,
+and native pytest 572.97 seconds with three workers. It passed all 32 selected
+cases. Compared with the qualifying run, the job was 21 seconds shorter and the
+test step was 30 seconds shorter despite the intervening checkout having five
+additional selected cases and producing passes rather than nine upstream-related
+skips. Both measurements used one `ubuntu-latest` job, Python 3.12, pinned uv
+0.7.22, pinned OpenCode 1.18.31, one prepared image, and the load scheduler with
+unit-sized maximum chunks. Queue, checkout contents, selection size/outcomes,
+image-preparation time, and worker count are therefore material differences; the
+result is a measured run of this change, not a universal latency guarantee.
+Workflow elapsed time is measured from the Actions run start to its updated
+completion timestamp; it includes scheduling and is distinct from job duration.
 
 Issue #2871's cited run `44867758076`, job `136735160868`, used one runner and two
 workers: queue 2 seconds, job 750 seconds, image preparation 79 seconds, test step
@@ -53,10 +79,8 @@ with exactly the same node IDs as the cited CI log (no missing or added nodes).
 The local unchanged production-image preparation failed after 15.449 seconds
 because the Docker build could not reach Debian package repositories. The pinned
 host OpenCode install also failed with an incompatible platform-package selection.
-No live baseline or after run is therefore available. Representative before/after
-job and step timings, native phase/retry attribution, and a passing complete live
-run remain required before claiming the Issue's latency acceptance criterion.
-No Actions run was dispatched for this investigation.
+That earlier investigation had no live baseline or after run and dispatched no
+Actions run; the subsequent measured runs are reported above.
 
 This changes test orchestration only. Production processing origins, admission
 gates, provider routing, structured trace events, and dashboard projections are
