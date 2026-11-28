@@ -609,7 +609,11 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
         pr = {
             "number": 64,
             "state": "open",
-            "body": "<!-- auto-coder:local -->",
+            # A genuinely fresh ordinary PR must not need a synthetic
+            # publication marker merely to avoid activating the retired-Jules
+            # fence. This keeps the production regression sensitive to a
+            # global no-history UNKNOWN fallback.
+            "body": "",
             "changed_files": 0,
             "user": {"login": "octocat", "type": "User"},
             "head": {
