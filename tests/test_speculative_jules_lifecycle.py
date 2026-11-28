@@ -361,11 +361,11 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from auto_coder.automation_config import EmptyPRResult
     from auto_coder.jules_candidate_observation import CandidateObservationStore
     from auto_coder.jules_competition_ledger import CandidateBindingObservation, JulesCompetitionLedger, SpeculativeGenerationBundle
     from auto_coder.merge_operation_state import MergeOperationStore
     from auto_coder.pr_processor import _merge_pr
-    from auto_coder.speculative_jules_lifecycle import get_speculative_jules_lifecycle
 
     monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -379,13 +379,11 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     accepted = ledger.record_candidate_accepted("owner/repo", 7, generation_id, "candidate", "accept", claimed.snapshot.epoch, "jules", "session")
     ledger.record_candidate_binding("owner/repo", 7, generation_id, "candidate", "bind", accepted.snapshot.epoch, CandidateBindingObservation("owner/repo", 59, "head", "base"))
     CandidateObservationStore(observation_path)
-    assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
-    # Generations created before retirement did not create the new marker.
-    (tmp_path / ".auto-coder" / "jules_competition.db.history-present").unlink()
-    configure_speculative_jules_lifecycle(None)
-    assert get_speculative_jules_lifecycle(Mock()) is not None
-    assert (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
-    configure_speculative_jules_lifecycle(None)
+    marker_path = tmp_path / ".auto-coder" / "jules_competition.db.history-present"
+    assert marker_path.exists()
+    # Model a pre-marker installation that loses every local history source
+    # before this revision has its first opportunity to migrate the marker.
+    marker_path.unlink()
     ledger_path.unlink()
     observation_path.unlink()
     github = Mock(token="token")
@@ -397,18 +395,68 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     try:
         ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
         assert ingress.outcome is PRProcessingOutcome.DEFERRED
-        assert ingress.actions_taken == ["Speculative Jules unknown artifact fenced: retired Jules ownership cannot be reconciled from empty history"]
+        assert ingress.actions_taken == ["Speculative Jules unknown artifact fenced: retired Jules history is unavailable before migration"]
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
             patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
             patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "merge.db")),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
-            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[7]),
             patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
         ):
             assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
         outbound_api.pulls.merge.assert_not_called()
         assert record_stage.call_args.args[4]["classification"] == "UNKNOWN"
+
+        unrelated = {
+            **pr,
+            "number": 60,
+            "body": "<!-- auto-coder:local -->",
+            "changed_files": 0,
+            "head": {**pr["head"], "ref": "local-feature", "sha": "local-head"},
+        }
+        with patch(
+            "auto_coder.pr_processor._close_empty_pr",
+            return_value=EmptyPRResult(closed=True, actions=["ordinary"]),
+        ) as ordinary:
+            assert process_pull_request(
+                github,
+                AutomationConfig(),
+                "owner/repo",
+                dict(unrelated),
+            ).actions_taken == ["ordinary"]
+        ordinary.assert_called_once()
+        metadata_api.pulls.get.return_value = dict(unrelated)
+        outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged"}
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch(
+                "auto_coder.merge_operation_adapter.get_ghapi_client",
+                return_value=outbound_api,
+            ),
+            patch(
+                "auto_coder.merge_operation_state.get_merge_operation_store",
+                return_value=MergeOperationStore(db_path=tmp_path / "merge-control.db"),
+            ),
+            patch(
+                "auto_coder.pr_processor._is_pr_review_thread_gate_enabled",
+                return_value=False,
+            ),
+            patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[7]),
+            patch("auto_coder.pr_processor._close_linked_issues"),
+            patch("auto_coder.pr_processor._archive_jules_session"),
+        ):
+            assert _merge_pr(
+                "owner/repo",
+                60,
+                {},
+                AutomationConfig(),
+                github_client=github,
+            )
+        outbound_api.pulls.merge.assert_called_once()
+        assert not marker_path.exists()
+        assert not ledger_path.exists()
+        assert not observation_path.exists()
     finally:
         configure_speculative_jules_lifecycle(None)
 
@@ -493,7 +541,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert get_speculative_jules_lifecycle(Mock()) is not None
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
@@ -523,7 +571,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
             ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
         assert ingress.actions_taken == ["ordinary"]
         ordinary_effect.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is None
+        assert get_speculative_jules_lifecycle(github) is not None
 
         metadata_api = Mock()
         metadata_api.pulls.get.return_value = dict(pr)
@@ -552,7 +600,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
         ):
             assert _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
         outbound_api.pulls.merge.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is None
+        assert get_speculative_jules_lifecycle(github) is not None
 
         # Both production boundaries must preserve the fresh-install distinction.
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()

@@ -65,8 +65,9 @@ class RetiredJulesReader:
 class UnavailableSpeculativeClassifier:
     """Retain an explicit unknown decision when history cannot be opened."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, *, require_issue_provenance: bool = False):
         self.reason = reason
+        self.require_issue_provenance = require_issue_provenance
 
     def classify(
         self,
@@ -89,6 +90,11 @@ class UnavailableSpeculativeClassifier:
         independently_unrelated: bool = False,
     ) -> tuple[Optional[int], ClassificationResult]:
         if independently_unrelated:
+            return None, ClassificationResult(
+                ArtifactClassification.LEGACY,
+                mutation_allowed=True,
+            )
+        if self.require_issue_provenance and not hinted_issue_numbers:
             return None, ClassificationResult(
                 ArtifactClassification.LEGACY,
                 mutation_allowed=True,
@@ -458,7 +464,20 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
         elif not history_marker.exists() and not cleanup_path.exists():
-            return None
+            # A pre-marker installation can lose every local history file before
+            # its first upgraded startup.  Keep a non-persisting ownership gate
+            # for PRs that still carry Issue provenance; independently verified
+            # non-Jules PRs retain their ordinary gates.  PRs without either
+            # signal remain outside this historical scope so a fresh installation
+            # does not manufacture global ambiguity from absence alone.
+            _lifecycle = SpeculativeJulesLifecycle(
+                UnavailableSpeculativeClassifier(
+                    "retired Jules history is unavailable before migration",
+                    require_issue_provenance=True,
+                ),
+                SpeculativeCleanupStore(cleanup_path, initialize=False),
+            )
+            return _lifecycle
         try:
             cleanup_store = SpeculativeCleanupStore(cleanup_path)
         except (OSError, sqlite3.Error):
