@@ -208,4 +208,4 @@ def test_historical_jules_author_cannot_admit_local_repair(tmp_path: Path, repai
     authority = CIRepairAuthority(True, "complete terminal failure", "H1", snapshot())
     with pr_processor.local_pr_repair_context(pr_processor.LocalPRRepairContext(jobs, "execution-17")):
         pr_processor._offer_selected_local_pr_repair("owner/repo", metadata, kind, github, ci_authority=authority, conflict_eligible=True)
-    assert jobs.discover_unsettled() == []
+    assert jobs.discover_unsettled() == ()

@@ -430,6 +430,52 @@ def test_normal_mergeability_remediation_admits_and_runs_in_private_workspace(tm
     assert git(root, "rev-parse", "origin/feature").stdout.strip() == remote_head
 
 
+def test_retired_provider_conflict_is_refused_at_ingress_and_durable_entry(tmp_path: Path, _use_real_commands) -> None:
+    """A historical bot cannot reach either local conflict execution boundary."""
+    root, head_sha, base_sha = history(tmp_path)
+    editor_calls = 0
+
+    def edit(_prompt: str, _root: Path) -> str:
+        nonlocal editor_calls
+        editor_calls += 1
+        return "ACTION_SUMMARY: unexpected"
+
+    store, claim, metadata, _instance = adapter(tmp_path, root, head_sha, base_sha, edit)
+    metadata["user"] = {"login": "google-labs-jules[bot]"}
+    github = Mock(token="token")
+    github.get_pull_request_metadata_strict.return_value = metadata
+    github.get_authenticated_controller_identity.return_value = None
+    api = Mock()
+    api.pulls.get.return_value = metadata
+
+    with (
+        pr_processor.local_pr_repair_context(pr_processor.LocalPRRepairContext(LocalJobStore(tmp_path / "ingress.sqlite3"), "execution-7")),
+        patch("auto_coder.pr_processor.get_ghapi_client", return_value=api),
+        patch("auto_coder.pr_processor._checkout_pr_branch") as checkout,
+    ):
+        actions = _start_mergeability_remediation(7, "DIRTY", "owner/repo", github)
+
+    assert actions == [
+        "Starting mergeability remediation for PR #7 (state: DIRTY)",
+        "Skipped local mergeability remediation for retired-provider PR #7",
+    ]
+    assert actions.repair_result is None
+    checkout.assert_not_called()
+
+    production = build_pr_local_job_adapters(
+        github,
+        Mock(ENABLE_MERGEABILITY_REMEDIATION=True),
+        store,
+        repository_path=root,
+        conflict_editor_factory=lambda _backend, _job: edit,
+        conflict_workspace_producer=PRRepairWorkspaceProducer(store, tmp_path / "production-workspaces"),
+    )[LocalJobKind.PR_MERGE_CONFLICT]
+    assert production.authorize_provider_entry(claim.record) is False
+    with pytest.raises(LocalJobProviderEntryRefused):
+        production.invoke_at_provider_entry(claim.record, lambda: True)
+    assert editor_calls == 0
+
+
 @pytest.mark.parametrize("authority", ["disabled", "exhausted", "unavailable", "cloud", "codex"])
 def test_production_adapter_refreshes_revocable_authority_before_preparation(tmp_path: Path, _use_real_commands, authority: str) -> None:
     root, head_sha, base_sha = history(tmp_path)

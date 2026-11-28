@@ -4726,7 +4726,8 @@ def _start_mergeability_remediation(
             base = pr_details.get("base") or {}
             durable_snapshot = bool(head.get("sha") and head.get("ref") and (head.get("repo") or {}).get("full_name") and base.get("sha") and base.get("ref") and (base.get("repo") or {}).get("full_name"))
             controller_identity = client.get_authenticated_controller_identity(repo_name)
-            selected_local = not (_has_retired_provider_bot_origin(pr_details) or _is_codex_or_claude_pr(pr_details) or _is_dependabot_pr(pr_details, controller_identity))
+            retired_provider_origin = _has_retired_provider_bot_origin(pr_details)
+            selected_local = not (retired_provider_origin or _is_codex_or_claude_pr(pr_details) or _is_dependabot_pr(pr_details, controller_identity))
             if durable_snapshot and selected_local:
                 admission = _offer_selected_local_pr_repair(
                     repo_name,
@@ -4739,6 +4740,9 @@ def _start_mergeability_remediation(
                     actions.repair_result = admission
                     actions.append(admission.reason)
                     return actions
+            if retired_provider_origin:
+                actions.append(f"Skipped local mergeability remediation for retired-provider PR #{pr_number}")
+                return actions
 
         except Exception as e:
             error_msg = f"Failed to get PR #{pr_number} details via GhApi: {e}"
