@@ -9219,7 +9219,7 @@ def _handle_pr_merge(
                     actions.append(f"Blocked triggering {workflow_id} for PR #{pr_number}: durable CI watch unavailable")
                     _record_pr_stage(pr_number, "pr.manual-ci-dispatch", f"pr#{pr_number} manual CI dispatch", Outcome.DEFERRED, {"workflow": workflow_id, "reason": "invalid CI watch identity"})
                     return actions
-                dispatch_result = trigger_workflow_dispatch(repo_name, workflow_id, head_branch)
+                dispatch_result = trigger_workflow_dispatch(repo_name, workflow_id, head_branch, github_client)
                 recorded = claim_store.record_outcome(dispatch_identity, dispatch_result.outcome, holder_id=claim.holder_id)
                 if not recorded:
                     logger.error(f"Failed to durably record dispatch outcome {dispatch_result.outcome.value} for {dispatch_identity.key()}; claim remains suppressing")
@@ -9252,7 +9252,7 @@ def _handle_pr_merge(
 
         # Step 4: GitHub Actions failed - handle Jules PR feedback loop
         # Fetch detailed checks only when needed to save API calls
-        detailed_checks = get_detailed_checks_from_history(github_checks, repo_name)
+        detailed_checks = get_detailed_checks_from_history(github_checks, repo_name, github_client=github_client)
         failed_checks = detailed_checks.failed_checks
         actions.append(f"GitHub Actions checks failed for PR #{pr_number}: {len(failed_checks)} failed")
 
@@ -9405,8 +9405,8 @@ def _handle_pr_merge(
             branch_context=BranchManager,
             automatic_fix_enabled=lambda: _is_automatic_test_fix_enabled(config, repo_name),
             update_base=lambda: _update_with_base_branch(repo_name, pr_data, config, github_client=github_client),
-            summarize_checks=lambda checks: _create_github_action_log_summary(repo_name, config, list(checks)),
-            read_logs=lambda checks: _get_github_actions_logs(repo_name, config, list(checks), pr_data),
+            summarize_checks=lambda checks: _create_github_action_log_summary(repo_name, config, list(checks), github_client=github_client),
+            read_logs=lambda checks: _get_github_actions_logs(repo_name, config, list(checks), pr_data, github_client=github_client),
             correction=_local_ci_correction_ports(repo_name, pr_data, config),
             extract_failed_tests=extract_all_failed_tests,
             trace_base_update=trace_base_update,
@@ -10742,7 +10742,7 @@ def _send_jules_error_feedback(
             return unsent(RepairDisposition.REFUSED, "Jules session ID is unavailable")
 
         # Get GitHub Actions error logs
-        github_logs = _get_github_actions_logs(repo_name, config, failed_checks, pr_data)
+        github_logs = _get_github_actions_logs(repo_name, config, failed_checks, pr_data, github_client=github_client)
 
         # Format the message to send to Jules
         message = f"""CI checks failed for PR #{pr_number} in {repo_name}.
@@ -14003,7 +14003,7 @@ def build_durable_ci_correction(job: Any, prepared: Any, github_client: Any, con
                 models={job.backend_name: backend_config.get_model_for_backend(job.backend_name) or job.backend_name},
                 automatic_session_resume=False,
             )
-        diagnostics = _get_github_actions_logs(job.repository, config, failed_checks, pr_data)
+        diagnostics = _get_github_actions_logs(job.repository, config, failed_checks, pr_data, github_client=github_client)
         failed_tests = extract_all_failed_tests(diagnostics)
     except Exception:
         return None

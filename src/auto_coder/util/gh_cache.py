@@ -1020,6 +1020,18 @@ class GitHubClient:
             credential_source=lambda: self._credential_for(repo_name, permissions),
         )
 
+    def authority_key_for(self, repo_name: str, *, required_permissions: Mapping[str, str] | None = None) -> str:
+        """Return the stable, non-secret authority namespace for an operation.
+
+        Installation tokens are deliberately renewable.  CI caches and
+        suppression records therefore key on the provider-issued authority,
+        repository and effective permission scope rather than token bytes.
+        """
+        credential = self._credential_for(repo_name, dict(required_permissions or {}))
+        if credential.mode == "personal":
+            return hashlib.sha256(repr((credential.mode, credential.api_origin, repo_name, credential.permissions, credential.token)).encode("utf-8")).hexdigest()
+        return credential.authority_key or hashlib.sha256(repr((credential.mode, credential.api_origin, repo_name, credential.permissions)).encode("utf-8")).hexdigest()
+
     @retry_with_backoff()
     def graphql_query(
         self,

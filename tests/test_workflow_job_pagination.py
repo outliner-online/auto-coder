@@ -1,6 +1,6 @@
 """Regression coverage for CI failures beyond the first REST jobs page."""
 
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
 
 import pytest
 
@@ -52,7 +52,10 @@ def test_run_log_lookup_fetches_failed_job_on_second_page():
     with patch("auto_coder.util.github_action.GitHubClient"), patch("auto_coder.util.github_action.get_ghapi_client", return_value=api), patch("auto_coder.util.github_action.get_github_actions_logs_from_url", return_value="AssertionError: exact width") as job_logs:
         result = get_github_actions_logs_from_url("https://github.com/owner/repo/actions/runs/5467")
     assert result == "AssertionError: exact width"
-    job_logs.assert_called_once_with("https://github.com/owner/repo/actions/runs/5467/job/101")
+    job_logs.assert_called_once_with(
+        "https://github.com/owner/repo/actions/runs/5467/job/101",
+        github_client=ANY,
+    )
 
 
 @pytest.mark.parametrize("second_page", [RuntimeError("page unavailable"), {"total_count": 101, "jobs": []}])
@@ -107,8 +110,8 @@ def test_local_pr_repair_receives_failure_beyond_first_page(tmp_path, monkeypatc
     repair_actions.resulting_head = "b" * 40
     repair_actions.synchronized = True
     with ExitStack() as stack:
-        stack.enter_context(patch("auto_coder.util.github_action.GitHubClient"))
-        stack.enter_context(patch("auto_coder.util.github_action.get_ghapi_client", return_value=api))
+        stack.enter_context(patch("auto_coder.util.github_action.GitHubClient.get_instance", side_effect=AssertionError("unexpected singleton")))
+        get_api = stack.enter_context(patch("auto_coder.util.github_action.get_ghapi_client", return_value=api))
         for name, value in {
             "_is_pr_review_thread_gate_enabled": False,
             "_apply_review_adjudication_effects": ([], False),
@@ -127,6 +130,7 @@ def test_local_pr_repair_receives_failure_beyond_first_page(tmp_path, monkeypatc
         actions = _handle_pr_merge(client, "owner/repo", pr, config, {})
 
     assert "GitHub Actions checks failed for PR #5467: 1 failed" in actions
+    get_api.assert_called_once_with(client.token)
     assert "Repair invoked" in actions
     assert not any("No specific failed checks" in action for action in actions)
     assert summary.call_args.args[2][0]["job_id"] == 101

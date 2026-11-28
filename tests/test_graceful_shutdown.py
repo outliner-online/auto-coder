@@ -1016,7 +1016,7 @@ def test_jules_ci_feedback_rechecks_drain_after_log_acquisition(monkeypatch, tmp
     release = threading.Event()
     client = MagicMock()
 
-    def load_logs(*_args):
+    def load_logs(*_args, **_kwargs):
         entered.set()
         assert release.wait(5)
         return "failed output"

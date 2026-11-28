@@ -11,12 +11,12 @@ class TestGithubActionPreload(unittest.TestCase):
         get_github_cache().clear()
 
     @patch("src.auto_coder.util.github_action.GitHubClient")
-    @patch("src.auto_coder.util.gh_cache.get_ghapi_client")
-    def test_preload_github_actions_status(self, mock_get_ghapi_client, mock_github_client):
+    @patch("src.auto_coder.util.github_action._ci_api_for")
+    def test_preload_github_actions_status(self, mock_ci_api_for, mock_github_client):
         # Setup mock API
         mock_api = MagicMock()
-        mock_get_ghapi_client.return_value = mock_api
-        mock_github_client.get_instance.return_value.token = "token"
+        mock_ci_api_for.return_value = mock_api
+        controller_client = mock_github_client.get_instance.return_value
 
         # Mock list_workflow_runs_for_repo response
         # Using snake_case keys as typical for GhApi/GitHub REST API
@@ -33,6 +33,11 @@ class TestGithubActionPreload(unittest.TestCase):
         preload_github_actions_status("owner/repo", prs)
 
         # Verify API called once
+        mock_ci_api_for.assert_called_once_with(
+            controller_client,
+            "owner/repo",
+            required_permissions={"actions": "read"},
+        )
         mock_api.actions.list_workflow_runs_for_repo.assert_called_once_with("owner", "repo", per_page=100)
 
         # Verify cache population

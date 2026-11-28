@@ -599,11 +599,19 @@ def test_summary_builder_keeps_every_failed_job_and_file_identity():
     with (
         patch.object(github_action.GitHubClient, "get_instance", return_value=SimpleNamespace(token="t")),
         patch.object(github_action, "get_ghapi_client", return_value=object()),
-        patch.object(github_action, "filter_actionable_github_checks", side_effect=lambda repo, c: c),
+        patch.object(
+            github_action,
+            "filter_actionable_github_checks",
+            side_effect=lambda repo, c, **_kwargs: c,
+        ),
         patch.object(github_action, "_get_playwright_artifact_logs", return_value=(None, [])),
         patch.object(github_action, "list_all_workflow_jobs", return_value=jobs),
         patch.object(github_action, "_sort_jobs_by_workflow", side_effect=lambda j, *a, **k: j),
-        patch.object(github_action, "get_github_actions_logs_from_url", side_effect=lambda url: by_url[url]),
+        patch.object(
+            github_action,
+            "get_github_actions_logs_from_url",
+            side_effect=lambda url, **_kwargs: by_url[url],
+        ),
     ):
         summary, files = github_action._create_github_action_log_summary("o/r", AutomationConfig(), checks)
     assert "unique-lint-failure" in summary

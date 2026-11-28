@@ -91,6 +91,67 @@ class RenewableProvider:
         return None
 
 
+def test_ci_authority_namespace_is_stable_across_token_renewal():
+    provider = RenewableProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+
+    first = client.authority_key_for("owner/repo", required_permissions={"actions": "read", "checks": "read"})
+    second = client.authority_key_for("owner/repo", required_permissions={"checks": "read", "actions": "read"})
+
+    assert first == second
+    assert "installation-one" not in first
+    assert "installation-two" not in second
+
+
+def test_uncertain_deployment_approval_is_not_repeated_after_renewal():
+    from auto_coder.util.github_action import GitHubActionsStatusResult, check_github_actions_and_exit_if_in_progress
+
+    class ApprovalProvider(RenewableProvider):
+        def credential_for(self, repo_name, required_permissions):
+            self.calls = 1 if renewed[0] else 0
+            return super().credential_for(repo_name, required_permissions)
+
+    renewed = [False]
+    provider = ApprovalProvider()
+    client = GitHubClient(auth_provider=provider, repository="owner/repo")
+    requests = []
+
+    def send(method, url, **kwargs):
+        method = method.upper()
+        requests.append((method, url, kwargs["headers"]["Authorization"]))
+        request = httpx.Request(method, url)
+        if method == "POST":
+            renewed[0] = True
+            raise httpx.ReadError("approval response lost", request=request)
+        if url.endswith("/pending_deployments"):
+            return httpx.Response(200, json=[{"environment": {"id": 3}}], request=request)
+        return httpx.Response(200, json={"id": 987654, "run_attempt": 2, "head_sha": "head", "status": "waiting"}, request=request)
+
+    transport = Mock()
+    transport.request.side_effect = send
+    checks = GitHubActionsStatusResult(in_progress=True, waiting_runs=[(987654, 2, "head")])
+    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport):
+        for _ in range(2):
+            assert not check_github_actions_and_exit_if_in_progress(
+                "owner/repo",
+                {"number": 7},
+                AutomationConfig(),
+                github_client=client,
+                switch_branch_on_in_progress=False,
+                github_checks=checks,
+            )
+
+    assert len([request for request in requests if request[0] == "POST"]) == 1
+    assert {request[2] for request in requests} == {"Bearer installation-one", "Bearer installation-two"}
+
+
+def test_ci_authority_namespace_separates_personal_credentials():
+    first = GitHubClient(token="personal-one")
+    second = GitHubClient(token="personal-two")
+    permissions = {"actions": "read", "checks": "read"}
+    assert first.authority_key_for("owner/repo", required_permissions=permissions) != second.authority_key_for("owner/repo", required_permissions=permissions)
+
+
 def test_linked_pr_reconciliation_uses_installation_for_both_reads(monkeypatch):
     provider = RenewableProvider()
     client = GitHubClient(auth_provider=provider, repository="owner/repo")

@@ -6358,7 +6358,7 @@ class AutomationEngine:
 
                         pr_head_sha = str(pr_data.get("head", {}).get("sha") or "")
                         for comment in comments:
-                            if is_verified_prompt_regression_advisory_comment(repo_name, pr_number, pr_head_sha, comment):
+                            if is_verified_prompt_regression_advisory_comment(repo_name, pr_number, pr_head_sha, comment, github_client=self.github):
                                 continue
                             user = comment.get("user")
                             if user and user.get("login") != "jules":
@@ -10073,8 +10073,10 @@ class AutomationEngine:
                 # Check if this commit has associated GitHub Actions runs
                 try:
                     # Use GhApi to list workflow runs for this commit
-                    token = self.github.token
-                    api = get_ghapi_client(token)
+                    if callable(getattr(type(self.github), "api_for", None)):
+                        api = self.github.api_for(repo_name, required_permissions={"actions": "read"})
+                    else:
+                        api = get_ghapi_client(self.github.token)
                     owner, repo = repo_name.split("/")
 
                     runs_resp = api.actions.list_workflow_runs_for_repo(owner, repo, head_sha=commit_hash, per_page=1)
