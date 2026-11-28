@@ -358,8 +358,15 @@ def test_conflicting_codex_attribution_does_not_authorize_degraded_history(tmp_p
     assert not service.evaluate_merge_authority("owner/repo", 50, pr, {}).allow_ordinary_processing
 
 
-@pytest.mark.parametrize("author,head_ref", [("google-labs-jules[bot]", "issue-7"), ("octocat", "unknown")])
-@pytest.mark.parametrize("provenance_state", [None, "conflicting", "confirmed-fresh"])
+@pytest.mark.parametrize(
+    "author,head_ref,provenance_state",
+    [
+        ("google-labs-jules[bot]", "issue-7", None),
+        ("google-labs-jules[bot]", "issue-7", "conflicting"),
+        ("google-labs-jules[bot]", "issue-7", "confirmed-fresh"),
+        ("octocat", "unknown", "confirmed-fresh"),
+    ],
+)
 def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundaries(
     tmp_path: Path,
     monkeypatch,
@@ -564,9 +571,11 @@ def test_observation_open_failure_preserves_ledger_binding_at_both_boundaries(tm
         configure_speculative_jules_lifecycle(None)
 
 
+@pytest.mark.parametrize("confirmed_fresh_provenance", [False, True])
 def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     tmp_path: Path,
     monkeypatch,
+    confirmed_fresh_provenance: bool,
 ) -> None:
     from auto_coder.automation_config import EmptyPRResult
     from auto_coder.merge_operation_state import MergeOperationStore
@@ -575,19 +584,20 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
 
     monkeypatch.setattr("auto_coder.jules_competition_ledger.Path.home", lambda: tmp_path)
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setenv("AUTO_CODER_INSTALLATION_ID", "test-fresh-installation")
     provenance = tmp_path / "runtime" / "state" / "retired_jules_installation_provenance.json"
-    provenance.parent.mkdir(parents=True)
-    provenance.write_text(
-        json.dumps(
-            {
-                "schema": "retired-jules-installation-provenance-v1",
-                "state": "confirmed-fresh",
-                "installation_id": "test-fresh-installation",
-            }
-        ),
-        encoding="utf-8",
-    )
+    if confirmed_fresh_provenance:
+        monkeypatch.setenv("AUTO_CODER_INSTALLATION_ID", "test-fresh-installation")
+        provenance.parent.mkdir(parents=True)
+        provenance.write_text(
+            json.dumps(
+                {
+                    "schema": "retired-jules-installation-provenance-v1",
+                    "state": "confirmed-fresh",
+                    "installation_id": "test-fresh-installation",
+                }
+            ),
+            encoding="utf-8",
+        )
     configure_speculative_jules_lifecycle(None)
     try:
         assert get_speculative_jules_lifecycle(Mock()) is None

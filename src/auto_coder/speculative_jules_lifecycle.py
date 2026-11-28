@@ -492,10 +492,13 @@ def get_speculative_jules_lifecycle(
         elif not history_marker.exists() and not cleanup_path.exists():
             if _has_confirmed_fresh_installation_provenance():
                 return None
+            if not retired_jules_installation_provenance_path().exists() and not possible_retired_ownership:
+                return None
             # No surviving history cannot distinguish a fresh installation from
-            # lost pre-migration history.  Missing, malformed, or conflicting
-            # deployment provenance therefore remains UNKNOWN; only an explicit
-            # confirmed-fresh receipt can bypass this request-scoped fence.
+            # lost pre-migration history for a PR carrying retired-Jules evidence.
+            # A present but malformed, foreign, or conflicting deployment receipt
+            # is itself contradictory evidence and also remains UNKNOWN.  Only a
+            # matching confirmed-fresh receipt bypasses this request-scoped fence.
             return SpeculativeJulesLifecycle(
                 UnavailableSpeculativeClassifier("retired Jules history is unavailable before migration"),
                 SpeculativeCleanupStore(cleanup_path, initialize=False),

@@ -34,12 +34,13 @@ establishes unrelated ownership. A deployment-owned
 fresh installation only with schema `retired-jules-installation-provenance-v1`, state
 `confirmed-fresh`, and an installation identity that exactly matches the independently
 provided `AUTO_CODER_INSTALLATION_ID` for the current deployment. Missing, malformed,
-historical, foreign, or conflicting provenance is not fresh evidence and remains fenced. Deployments must
-create this receipt as part of independently verified fresh installation and provide the
-same identity to the runtime; the lifecycle
-never creates or upgrades it, so rollout to an unrecorded installation remains
-fail-closed and requires operator reconciliation.
-This fallback is read-only and does not create empty history on a confirmed fresh installation. If an established
+historical, foreign, or conflicting provenance is not fresh evidence and remains
+fenced. When no receipt exists, strict GitHub Jules identity evidence still activates
+the request-scoped UNKNOWN fence without globally blocking unrelated ordinary PRs.
+Deployments must create the receipt as part of independently verified fresh installation
+and provide the same identity to the runtime; the lifecycle never creates or upgrades
+it. This fallback is read-only and does not create empty history on a confirmed fresh
+installation. If an established
 observation store cannot be opened, startup retains the readable ledger as
 authority: exact bindings remain fenced while independently attributed unrelated
 PRs keep their ordinary gates.
