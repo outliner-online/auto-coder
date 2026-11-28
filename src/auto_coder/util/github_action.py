@@ -2471,7 +2471,7 @@ def _get_playwright_artifact_logs(repo_name: str, run_id: int, github_client: Op
                             if "suites" in content and "errors" in content:
                                 all_raw_artifacts.append(content)
                         except Exception as e:
-                            logger.warning(f"Failed to parse JSON {jf}: {e}")
+                            logger.warning(f"Failed to parse JSON artifact report: category={type(e).__name__}")
 
             if not all_raw_artifacts:
                 logger.info("No valid Playwright JSON reports found in downloaded artifacts.")

@@ -1,4 +1,5 @@
 import io
+import zipfile
 from contextlib import contextmanager
 from unittest.mock import MagicMock, call, patch
 
@@ -51,6 +52,31 @@ def _controller_client() -> MagicMock:
     client = MagicMock()
     client._credential_for.return_value = ControllerCredential("controller-secret", "app", repository="owner/repo")
     return client
+
+
+def test_invalid_artifact_report_does_not_log_archive_filename(tmp_path):
+    marker = "private-archive-payload-marker"
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(f"{marker}.json", "invalid json")
+    console = io.StringIO()
+    log_file = tmp_path / "github.log"
+    setup_logger(stream=console, log_file=str(log_file))
+
+    @contextmanager
+    def controlled_http_client(**kwargs):
+        transport = MagicMock()
+        if kwargs.get("follow_redirects") is False:
+            transport.get.return_value = httpx.Response(200, content=archive.getvalue())
+        else:
+            transport.get.return_value = httpx.Response(200, json={"artifacts": [{"id": 9, "name": "e2e-artifacts-basic", "expired": False}]})
+        yield transport
+
+    with patch("auto_coder.util.github_action.github_http_client", controlled_http_client):
+        assert _get_playwright_artifact_logs("owner/repo", 7, github_client=_controller_client()) == (None, None)
+    rendered = console.getvalue() + log_file.read_text()
+    assert "Failed to parse JSON" in rendered
+    assert marker not in rendered
 
 
 def test_artifact_listing_failure_does_not_log_response_payload():
