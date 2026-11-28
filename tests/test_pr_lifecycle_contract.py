@@ -1150,15 +1150,6 @@ def test_public_processing_preserves_cloud_ci_executor_result(
     github = MagicMock(token="controlled-token")
 
     with ExitStack() as stack:
-        stack.enter_context(
-            patch(
-                "auto_coder.pr_processor._record_non_jules_pr_attribution",
-                side_effect=lambda _repo, data: data.__setitem__(
-                    "_verified_non_jules_pr_origin",
-                    "codex-cloud:task_result_owner",
-                ),
-            )
-        )
         unsafe = stack.enter_context(patch("auto_coder.pr_processor._reject_unsafe_codex_cloud_pr"))
         stack.enter_context(patch("auto_coder.pr_processor._close_empty_pr", return_value=SimpleNamespace(closed=False)))
         stack.enter_context(patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=SimpleNamespace(closed=False)))

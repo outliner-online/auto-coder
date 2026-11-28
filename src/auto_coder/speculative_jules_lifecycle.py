@@ -7,7 +7,6 @@ state is never refreshed from Jules and never authorizes cleanup mutations.
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import threading
@@ -438,24 +437,6 @@ class RefreshingSpeculativeClassifier:
 
 _lifecycle: Optional[SpeculativeJulesLifecycle] = None
 
-_INSTALLATION_PROVENANCE_SCHEMA = "retired-jules-installation-provenance-v1"
-
-
-def retired_jules_installation_provenance_path() -> Path:
-    """Return the deployment-owned provenance receipt path."""
-    root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder"))
-    return root / "state" / "retired_jules_installation_provenance.json"
-
-
-def _has_confirmed_fresh_installation_provenance() -> bool:
-    """Accept only a complete deployment receipt created after Jules retirement."""
-    path = retired_jules_installation_provenance_path()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return False
-    return isinstance(payload, dict) and payload.get("schema") == _INSTALLATION_PROVENANCE_SCHEMA and payload.get("state") == "confirmed-fresh" and isinstance(payload.get("installation_id"), str) and bool(payload["installation_id"].strip())
-
 
 def configure_speculative_jules_lifecycle(lifecycle: Optional[SpeculativeJulesLifecycle]) -> None:
     """Install the process lifecycle authority (also used by isolated tests)."""
@@ -487,12 +468,16 @@ def get_speculative_jules_lifecycle(
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
         elif not history_marker.exists() and not cleanup_path.exists():
-            if _has_confirmed_fresh_installation_provenance():
+            if not possible_retired_ownership:
                 return None
-            # No surviving history cannot distinguish a fresh installation from
-            # lost pre-migration history.  Missing, malformed, or conflicting
-            # deployment provenance therefore remains UNKNOWN; only an explicit
-            # confirmed-fresh receipt can bypass this request-scoped fence.
+            # Strict GitHub identity can outlive every pre-marker local store.
+            # Preserve an UNKNOWN decision for that possible retired artifact
+            # without manufacturing replacement history or globally fencing a
+            # genuinely fresh installation.
+            # This fallback is evidence about this PR, not evidence about the
+            # installation.  Do not cache it: otherwise one recognizable Jules
+            # PR would make every later PR in this process inherit an UNKNOWN
+            # history decision even though no durable history was discovered.
             return SpeculativeJulesLifecycle(
                 UnavailableSpeculativeClassifier("retired Jules history is unavailable before migration"),
                 SpeculativeCleanupStore(cleanup_path, initialize=False),
