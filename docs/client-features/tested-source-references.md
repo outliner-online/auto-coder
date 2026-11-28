@@ -111,7 +111,7 @@ The complete `not opencode_live` selection is collected on the actual source
 checkout by `scripts/plan_ci_shards.py`, producing one immutable
 `ci-shard-plan-v1` with ordered inventory, fingerprint, semantic digest,
 disjoint contiguous assignments, a 420-second estimated work budget and at
-most twelve nonempty shards. There is no workflow-level `max-parallel` cap;
+most sixteen nonempty shards. There is no workflow-level `max-parallel` cap;
 GitHub schedules all planned shards subject to available runner capacity and
 account limits. The planner's partition bound is not a scheduling throttle.
 Main pushes use distinct concurrency groups per run, while deployment/channel

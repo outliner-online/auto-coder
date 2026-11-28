@@ -181,11 +181,11 @@ def test_contiguous_minimal_budget_boundary_and_indivisible_long_test() -> None:
     assert shards[0]["estimated_ms"] == 420_000
 
 
-def test_more_than_twelve_groups_binary_searches_smallest_capacity() -> None:
-    inventory = tuple(f"test.py::test_{position}" for position in range(36))
+def test_more_than_sixteen_groups_binary_searches_smallest_capacity() -> None:
+    inventory = tuple(f"test.py::test_{position}" for position in range(48))
     estimates = [{"nodeid": node, "estimated_ms": 210_001} for node in inventory]
     shards, capacity, limited = allocate(inventory, estimates)
-    assert limited and len(shards) == 12  # Three contiguous nodes fit the minimum feasible capacity.
+    assert limited and len(shards) == 16  # Three contiguous nodes fit the minimum feasible capacity.
     assert capacity == 630_003
     assert Counter(node for group in shards for node in group["nodeids"]) == Counter(inventory)
 

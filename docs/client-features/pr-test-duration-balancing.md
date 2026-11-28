@@ -2,7 +2,7 @@
 
 `Test Source for Runtime` plans its complete current pytest selection with
 `scripts/plan_ci_shards.py` and the `source-required-v1` duration policy. The
-immutable plan uses a 420-second estimated-work target and a twelve-shard cap.
+immutable plan uses a 420-second estimated-work target and a sixteen-shard cap.
 The retired fixed-four PR runner is no longer an execution path. The retained
 `tests/data/pr-test-durations.json` snapshot and its
 `tests/data/pr-test-durations.provenance.json` companion supply optional bootstrap
