@@ -14,11 +14,8 @@ from auto_coder.pr_processor import (
     _is_claude_pr,
     _is_codex_or_claude_pr,
     _is_codex_pr,
-    _is_jules_pr,
     _is_unsafe_codex_cloud_branch,
     _link_codex_cloud_pr_to_issue,
-    _send_jules_error_feedback,
-    _should_skip_waiting_for_jules,
     process_pull_request,
 )
 
@@ -132,75 +129,6 @@ def test_is_codex_or_claude_pr():
     assert _is_codex_or_claude_pr({"body": "https://chatgpt.com/codex/tasks/task_1", "user": {}}) is True
     assert _is_codex_or_claude_pr({"body": "https://claude.ai/code/session_1", "user": {}}) is True
     assert _is_codex_or_claude_pr({"body": "Regular PR", "user": {"login": "user1"}}) is False
-
-
-@pytest.mark.parametrize("route", ["remote", "codex/tasks", "codex/cloud/tasks"])
-def test_is_jules_pr_excludes_codex_and_claude(route):
-    """Verify that Codex and Claude PRs are never identified as Jules PRs."""
-    codex_pr = {
-        "number": 1,
-        "body": f"Closes #10\n\nhttps://chatgpt.com/{route}/task_e_123",
-        "user": {"login": "google-labs-jules[bot]"},  # Even if bot login spoofed
-    }
-    assert _is_jules_pr(codex_pr) is False
-
-    claude_pr = {
-        "number": 2,
-        "body": "Closes #11\n\nhttps://claude.ai/code/session_abc",
-        "user": {"login": "google-labs-jules[bot]"},
-    }
-    assert _is_jules_pr(claude_pr) is False
-
-    # Genuine Jules PR
-    jules_pr = {
-        "number": 3,
-        "body": "Fixed bug\n\nhttps://jules.google.com/session/987654321",
-        "user": {"login": "google-labs-jules[bot]"},
-    }
-    assert _is_jules_pr(jules_pr) is True
-
-
-@pytest.mark.parametrize("route", ["remote", "codex/tasks", "codex/cloud/tasks"])
-def test_should_skip_waiting_for_jules_bypasses_codex_and_claude(route):
-    """Verify _should_skip_waiting_for_jules immediately returns False for Codex/Claude PRs."""
-    github_client = MagicMock()
-    config = AutomationConfig()
-
-    codex_pr = {
-        "number": 10,
-        "body": f"Closes #5\n\nhttps://chatgpt.com/{route}/task_e_999",
-        "user": {"login": "octocat"},
-    }
-    assert _should_skip_waiting_for_jules(github_client, "owner/repo", codex_pr, config) is False
-    github_client.get_pr_comments.assert_not_called()
-
-    claude_pr = {
-        "number": 11,
-        "body": "Closes #6\n\nhttps://claude.ai/code/session_888",
-        "user": {"login": "octocat"},
-    }
-    assert _should_skip_waiting_for_jules(github_client, "owner/repo", claude_pr, config) is False
-    github_client.get_pr_comments.assert_not_called()
-
-
-@pytest.mark.parametrize("route", ["remote", "codex/tasks", "codex/cloud/tasks"])
-def test_send_jules_error_feedback_bypasses_codex_and_claude(route):
-    """Verify _send_jules_error_feedback never messages Jules or comments on Codex/Claude PRs."""
-    github_client = MagicMock()
-    config = AutomationConfig()
-
-    codex_pr = {
-        "number": 10,
-        "body": f"Closes #5\n\nhttps://chatgpt.com/{route}/task_e_999",
-        "user": {"login": "octocat"},
-    }
-
-    with patch("auto_coder.jules_client.JulesClient") as mock_jules:
-        actions = _send_jules_error_feedback("owner/repo", codex_pr, [{"name": "test"}], config, github_client)
-        assert any("Skipped Jules error feedback" in action for action in actions.actions)
-        assert actions.attempt_started is False
-        mock_jules.assert_not_called()
-        github_client.add_comment_to_pr.assert_not_called()
 
 
 def test_find_codex_cloud_task_for_issue_cloud_manager(tmp_path: Path):

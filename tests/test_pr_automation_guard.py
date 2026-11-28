@@ -360,9 +360,6 @@ def test_stopped_open_pr_preserves_linked_issue_exclusion_and_unrelated_work(mon
 
     monkeypatch.setattr(pr_processor, "_reject_unsafe_codex_cloud_pr", lambda *_args, **_kwargs: pr_processor.UnsafeCodexCloudPRResult())
     monkeypatch.setattr(pr_processor, "_close_empty_pr", empty)
-    monkeypatch.setattr(pr_processor, "_close_stale_jules_pr", lambda *_args: StaleJulesPRResult())
-    monkeypatch.setattr(pr_processor, "_should_skip_waiting_for_jules", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr("auto_coder.automation_engine._should_skip_waiting_for_jules", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("auto_coder.automation_engine.LabelManager", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr("auto_coder.util.github_action._check_github_actions_status", authoritative_ci_status(success=True, ids=[1]))
     monkeypatch.setattr("auto_coder.util.github_action.check_github_actions_and_exit_if_in_progress", lambda *_args, **_kwargs: True)

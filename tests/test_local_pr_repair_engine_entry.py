@@ -44,7 +44,6 @@ def _production_scope(engine: AutomationEngine):
     unsafe = stack.enter_context(patch("auto_coder.pr_processor._reject_unsafe_codex_cloud_pr"))
     unsafe.side_effect = lambda _client, _repo, candidate, _config, **_kwargs: MagicMock(closed=False, metadata_error=None, actions=[], authoritative_pr_data=candidate)
     stack.enter_context(patch("auto_coder.pr_processor._close_empty_pr", return_value=MagicMock(closed=False, actions=[], issue_numbers=[])))
-    stack.enter_context(patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=MagicMock(closed=False, actions=[], issue_numbers=[])))
     label = stack.enter_context(patch("auto_coder.automation_engine.LabelManager"))
     label.return_value.__enter__.return_value = True
     stack.enter_context(patch("auto_coder.pr_processor._selected_local_backend_name", return_value="codex"))

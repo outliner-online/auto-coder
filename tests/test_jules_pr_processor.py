@@ -1,170 +1,25 @@
-from unittest.mock import ANY, MagicMock, patch
+"""Supported provider PR-to-Issue linking after Jules PR retirement."""
 
-import pytest
+from unittest.mock import MagicMock, patch
 
-from auto_coder.pr_processor import _find_issue_by_session_id_in_comments, _link_jules_pr_to_issue, _update_jules_pr_body
+from auto_coder.pr_processor import _link_supported_provider_pr_to_issue
 
 
-class TestJulesPRProcessor:
+def test_claude_binding_adds_issue_reference():
+    github = MagicMock()
+    github.get_repository.return_value.get_pull.return_value = MagicMock()
+    pr = {"number": 17, "body": "https://claude.ai/code/session_supported", "user": {"login": "claude[bot]"}}
+    with patch("auto_coder.pr_processor.CloudManager") as manager:
+        manager.return_value.get_issues_by_session.return_value = [2898]
+        manager.return_value.get_issue_by_session.return_value = 2898
+        assert _link_supported_provider_pr_to_issue("owner/repo", pr, github)
+    assert "close #2898" in pr["body"]
 
-    @patch("auto_coder.util.gh_cache.get_ghapi_client")
-    @patch("auto_coder.util.gh_cache.GitHubClient")
-    def test_update_jules_pr_body(self, mock_gh_client_cls, mock_get_ghapi_client):
-        # Setup
-        repo_name = "owner/repo"
-        pr_number = 123
-        pr_body = "Original PR body"
-        issue_number = 456
 
-        # Mock GitHubClient instance
-        mock_client_instance = MagicMock()
-        mock_client_instance.token = "fake_token"
-
-        # Mock GhApi client
-        mock_api = MagicMock()
-        mock_get_ghapi_client.return_value = mock_api
-
-        # Execute
-        result = _update_jules_pr_body(repo_name, pr_number, pr_body, issue_number, mock_client_instance)
-
-        # Verify
-        assert result is True
-
-        # Check if api.pulls.update was called correctly
-        expected_body = f"{pr_body}\n\nclose #{issue_number}\n\nRelated issue: https://github.com/{repo_name}/issues/{issue_number}"
-        mock_api.pulls.update.assert_called_once_with("owner", "repo", pr_number, body=expected_body)
-
-    @patch("auto_coder.pr_processor.get_ghapi_client")
-    def test_update_jules_pr_body_already_exists(self, mock_get_ghapi_client):
-        # Setup
-        repo_name = "owner/repo"
-        pr_number = 123
-        pr_body = "Original PR body\n\nclose #456"
-        issue_number = 456
-        mock_client = MagicMock()
-
-        # Execute
-        result = _update_jules_pr_body(repo_name, pr_number, pr_body, issue_number, mock_client)
-
-        # Verify
-        assert result is True
-        mock_get_ghapi_client.assert_not_called()
-
-    def test_find_issue_by_session_id_in_comments(self):
-        # Setup
-        repo_name = "owner/repo"
-        session_id = "session_abc123"
-        mock_client = MagicMock()
-
-        # Mock search_issues_strict return value, keyed by the searched spelling
-        # (both "session_abc123" and its "cse_abc123" alias are searched).
-        # Case 1: Session ID in issue body
-        issue1 = {"number": 101, "body": f"This is related to {session_id}"}
-        issue2 = {"number": 102, "body": "Nothing here"}
-
-        def search_side_effect(query, *args, **kwargs):
-            if session_id in query:
-                return [issue1, issue2]
-            return []
-
-        mock_client.search_issues_strict.side_effect = search_side_effect
-        mock_client.get_issue_strict.side_effect = lambda repo, number: {101: issue1, 102: issue2}[number]
-        mock_client.get_issue_comments_strict.return_value = []
-
-        # Execute
-        result = _find_issue_by_session_id_in_comments(repo_name, session_id, mock_client)
-
-        # Verify
-        assert result == 101
-
-    def test_find_issue_by_session_id_in_comments_via_comment(self):
-        # Setup
-        repo_name = "owner/repo"
-        session_id = "session_xyz789"
-        mock_client = MagicMock()
-
-        # Mock search_issues_strict, keyed by the searched spelling
-        issue1 = {"number": 201, "body": "No session id here"}
-
-        def search_side_effect(query, *args, **kwargs):
-            if session_id in query:
-                return [issue1]
-            return []
-
-        mock_client.search_issues_strict.side_effect = search_side_effect
-        mock_client.get_issue_strict.return_value = issue1
-
-        # Mock get_issue_comments_strict (the authoritative comment read)
-        mock_client.get_issue_comments_strict.return_value = [{"body": "Just a comment"}, {"body": f"Here is the session: {session_id}"}]
-
-        # Execute
-        result = _find_issue_by_session_id_in_comments(repo_name, session_id, mock_client)
-
-        # Verify
-        assert result == 201
-        mock_client.get_issue_comments_strict.assert_called_once_with(repo_name, 201)
-
-    @patch("auto_coder.pr_processor._extract_session_id_from_pr_body")
-    @patch("auto_coder.pr_processor._is_jules_pr")
-    def test_process_jules_pr_skips_special_prefixes(self, mock_is_jules, mock_extract_session):
-        # Setup
-        repo_name = "owner/repo"
-        mock_client = MagicMock()
-        mock_is_jules.return_value = True
-
-        # Test cases for prefixes
-        prefixes = ["🛡️ Sentinel: ", "🎨 Palette: ", "⚡ Bolt: "]
-
-        for prefix in prefixes:
-            pr_data = {"number": 123, "title": f"{prefix} Some Title", "body": "Some body", "user": {"login": "google-labs-jules"}}
-
-            # Execute
-            result = _link_jules_pr_to_issue(repo_name, pr_data, mock_client)
-
-            # Verify
-            assert result is True
-            # Should NOT call extract session or proceed
-            mock_extract_session.assert_not_called()
-
-    @patch("auto_coder.pr_processor._extract_session_id_from_pr_body")
-    @patch("auto_coder.pr_processor._is_jules_pr")
-    def test_process_jules_pr_normal_title_ignores_session_history(self, mock_is_jules, mock_extract_session):
-        """Historical Jules ownership is not consulted when no explicit association exists."""
-        # Setup
-        repo_name = "owner/repo"
-        mock_client = MagicMock()
-        mock_is_jules.return_value = True
-        mock_extract_session.return_value = "historical-session"
-
-        pr_data = {"number": 124, "title": "Normal Title", "body": "Some body", "user": {"login": "google-labs-jules"}}
-
-        # Execute
-        result = _link_jules_pr_to_issue(repo_name, pr_data, mock_client)
-
-        # Verify
-        assert result is False
-        mock_extract_session.assert_not_called()
-        mock_client.update_pr_body.assert_not_called()
-
-    @patch("auto_coder.pr_processor._update_jules_pr_body")
-    @patch("auto_coder.pr_processor._resolve_jules_pr_issue_number")
-    def test_process_claude_session_pr(self, mock_resolve_issue, mock_update_body):
-        """Verify Claude Code session PRs are linked to the issue."""
-        repo_name = "owner/repo"
-        mock_client = MagicMock()
-        mock_resolve_issue.return_value = 5032
-        mock_update_body.return_value = True
-
-        pr_data = {
-            "number": 5036,
-            "title": "Add OAuth feature",
-            "body": "Some description\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01VU1TffiNXDxsq1Q4tRRbka)_",
-            "user": {"login": "developer"},
-        }
-
-        result = _link_jules_pr_to_issue(repo_name, pr_data, mock_client)
-
-        assert result is True
-        mock_resolve_issue.assert_called_once_with(repo_name, pr_data, mock_client)
-        mock_update_body.assert_called_once()
-        assert "close #5032" in pr_data["body"]
+def test_retired_url_does_not_enter_supported_linker():
+    github = MagicMock()
+    original = "Quoted: https://jules.google.com/session/legacy"
+    pr = {"number": 18, "body": original, "user": {"login": "human"}}
+    assert _link_supported_provider_pr_to_issue("owner/repo", pr, github)
+    assert pr["body"] == original
+    github.get_repository.assert_not_called()

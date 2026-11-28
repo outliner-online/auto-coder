@@ -423,8 +423,6 @@ def test_historical_jules_base_conflict_does_not_send_or_fallback(tmp_path, monk
     client = MagicMock()
     with (
         patch("auto_coder.jules_client.JulesClient", return_value=client) as jules,
-        patch("auto_coder.pr_processor._guard_outbound_jules_send", return_value=True),
-        patch("auto_coder.pr_processor._dispatch_jules_repair", side_effect=lambda _r, _p, _k, _s, send: send()),
         patch("auto_coder.pr_processor._dispatch_cloud_conflict_repair") as cloud,
         patch("auto_coder.pr_processor._dispatch_local_conflict_repair") as local,
     ):

@@ -45,7 +45,6 @@ def test_definitive_merge_rejection_preserves_cloud_wait_without_local_fallback(
     result = pr_processor.CloudConflictDelegationResult(reason="wait for provider", **cloud_result)
     merge_attempt = MagicMock()
     with (
-        patch.object(pr_processor, "_is_jules_pr", return_value=False),
         patch.object(pr_processor, "_is_dependabot_pr", return_value=False),
         patch.object(pr_processor, "_delegate_cloud_merge_conflict_repair_result", return_value=result) as delegate,
         patch.object(pr_processor, "_resolve_pr_merge_conflicts") as local,
@@ -84,7 +83,6 @@ def test_definitive_local_conflict_selection_durably_hands_off_before_execution(
     merge_attempt = MagicMock()
     with (
         pr_processor.local_pr_repair_context(pr_processor.LocalPRRepairContext(jobs, "execution-2504")),
-        patch.object(pr_processor, "_is_jules_pr", return_value=False),
         patch.object(pr_processor, "_is_dependabot_pr", return_value=False),
         patch.object(pr_processor, "_dispatch_cloud_conflict_repair", return_value=PRRepairResult(RepairDisposition.REFUSED)),
         patch.object(pr_processor, "_selected_local_backend_name", return_value="codex"),

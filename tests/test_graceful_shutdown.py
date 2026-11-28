@@ -19,7 +19,7 @@ from auto_coder.codex_cloud_client import CodexSubmissionOutcome, CodexSubmissio
 from auto_coder.entity_invalidation import EntityIdentity
 from auto_coder.exceptions import AutoCoderUsageLimitError
 from auto_coder.issue_processor import _apply_issue_actions_directly, _process_issue_claude_routine_mode, _process_issue_codex_cloud_mode, _process_issue_jules_mode
-from auto_coder.pr_processor import _apply_github_actions_fix, _apply_local_test_fix, _send_codex_cloud_error_feedback, _send_jules_error_feedback
+from auto_coder.pr_processor import _apply_github_actions_fix, _apply_local_test_fix, _send_codex_cloud_error_feedback
 from auto_coder.shutdown_context import new_work_allowed
 from auto_coder.utils import CommandExecutor
 
@@ -1007,44 +1007,6 @@ def test_cloud_ci_feedback_rechecks_drain_after_task_resolution(monkeypatch, tmp
 
     asyncio.run(scenario())
     client.continue_if_paused.assert_not_called()
-
-
-def test_jules_ci_feedback_rechecks_drain_after_log_acquisition(monkeypatch, tmp_path):
-    monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
-    engine = AutomationEngine(MagicMock(), AutomationConfig())
-    entered = threading.Event()
-    release = threading.Event()
-    client = MagicMock()
-
-    def load_logs(*_args):
-        entered.set()
-        assert release.wait(5)
-        return "failed output"
-
-    monkeypatch.setattr("auto_coder.pr_processor._get_github_actions_logs", load_logs)
-    monkeypatch.setattr("auto_coder.jules_client.JulesClient", lambda: client)
-
-    async def scenario():
-        feedback = asyncio.create_task(
-            engine._run_local_critical(
-                "worker 0 pr #90",
-                _send_jules_error_feedback,
-                "owner/repo",
-                {"number": 90, "title": "Repair", "body": "", "_jules_session_id": "session-90", "user": {}},
-                [{"name": "tests"}],
-                AutomationConfig(),
-            )
-        )
-        assert await asyncio.to_thread(entered.wait, 2)
-        engine.request_graceful_shutdown("SIGTERM")
-        feedback.cancel()
-        release.set()
-        actions = await feedback
-        assert actions.actions == ("Deferred Jules CI feedback for PR #90: graceful shutdown is draining",)
-        assert actions.attempt_started is False
-
-    asyncio.run(scenario())
-    client.send_message.assert_not_called()
 
 
 def test_sigint_and_sigterm_share_drain_transition_and_second_sigint_forces(tmp_path, monkeypatch):

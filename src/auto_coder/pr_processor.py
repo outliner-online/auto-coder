@@ -3809,6 +3809,11 @@ def _process_pull_request_impl(
         projection = _link_codex_cloud_pr_to_issue(repo_name, pr_data, github_client)
         projection_action = _codex_projection_action(projection)
 
+        # Claude Routine still uses its durable task binding to recover the
+        # source Issue. Retired Jules URLs are no longer parsed by the shared
+        # candidate extractor and therefore cannot enter this boundary.
+        _link_supported_provider_pr_to_issue(repo_name, pr_data, github_client)
+
         # Close PRs with zero effective diff before any further processing.
         # This runs before the @auto-coder label check so empty PRs left from earlier
         # runs are closed and their source issues retried immediately.
@@ -9693,6 +9698,71 @@ def _is_local_llm_pr(pr_data: Dict[str, Any], controller_identity: Optional[Any]
 
 
 is_local_llm_pr = _is_local_llm_pr
+
+
+def _resolve_supported_provider_issue_number(repo_name: str, pr_data: Dict[str, Any], github_client: Any) -> Optional[int]:
+    """Resolve a supported provider's source Issue without retired URL inference."""
+    candidates = _extract_session_id_candidates(str(pr_data.get("body") or ""))
+    manager = CloudManager(repo_name)
+    ambiguous = False
+    for _, task_id in candidates:
+        issues = manager.get_issues_by_session(task_id)
+        if len(issues) > 1:
+            ambiguous = True
+            continue
+        issue_number = manager.get_issue_by_session(task_id)
+        if issue_number:
+            pr_data["_provider_task_id"] = task_id
+            return issue_number
+    if ambiguous:
+        return None
+    for _, task_id in candidates:
+        if task_id.casefold() in {"true", "false", "none", "null"} or len(task_id) < 4:
+            continue
+        lookup = _find_issue_by_session_id_in_comments_detailed(repo_name, task_id, github_client)
+        if lookup.ambiguous:
+            return None
+        if lookup.issue_number:
+            pr_data["_provider_task_id"] = task_id
+            return lookup.issue_number
+    return None
+
+
+def _update_supported_provider_pr_body(repo_name: str, pr_data: Dict[str, Any], issue_number: int, github_client: Any) -> bool:
+    """Add a source-Issue closing reference for a verified supported binding."""
+    pr_number = int(pr_data["number"])
+    body = str(pr_data.get("body") or "")
+    if issue_number in extract_linked_issues_from_pr_body(body):
+        return True
+    separator = "\n\n" if body and not body.endswith("\n") else "\n"
+    new_body = f"{body}{separator}close #{issue_number}\n\nRelated issue: https://github.com/{repo_name}/issues/{issue_number}"
+    try:
+        validate_issue_references(new_body, github_client, repo_name)
+        if getattr(github_client, "_auth_provider", None) is not None:
+            api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
+            owner, repository = repo_name.split("/")
+            api.pulls.update(owner, repository, pr_number, body=new_body)
+        elif hasattr(github_client, "get_repository"):
+            github_client.get_repository(repo_name).get_pull(pr_number).edit(body=new_body)
+        else:
+            token = getattr(github_client, "token", None) or GitHubClient.get_instance().token
+            owner, repository = repo_name.split("/")
+            get_ghapi_client(token).pulls.update(owner, repository, pr_number, body=new_body)
+    except Exception as exc:
+        logger.error(f"Failed to update supported-provider PR #{pr_number} body: {exc}")
+        return False
+    pr_data["body"] = new_body
+    return True
+
+
+def _link_supported_provider_pr_to_issue(repo_name: str, pr_data: Dict[str, Any], github_client: Any) -> bool:
+    """Recover Claude Routine Issue attribution without accepting Jules prose."""
+    if not _is_claude_pr(pr_data):
+        return True
+    issue_number = _resolve_supported_provider_issue_number(repo_name, pr_data, github_client)
+    if issue_number is None:
+        return False
+    return _update_supported_provider_pr_body(repo_name, pr_data, issue_number, github_client)
 
 
 def _close_linked_issues(repo_name: str, pr_number: int, github_client: Optional[Any] = None) -> None:

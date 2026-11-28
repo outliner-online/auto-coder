@@ -46,10 +46,7 @@ def collection_dependencies():
         patch("auto_coder.util.github_action._check_github_actions_status", side_effect=authoritative_ci_status(success=False, ids=[1])),
         patch("auto_coder.pr_processor._reject_unsafe_codex_cloud_pr") as reject_unsafe,
         patch("auto_coder.pr_processor._close_empty_pr") as close_empty,
-        patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult()),
-        patch("auto_coder.pr_processor._is_jules_pr", return_value=False),
         patch("auto_coder.pr_processor._is_dependabot_pr", return_value=False),
-        patch("auto_coder.pr_processor._should_skip_waiting_for_jules", return_value=False),
     ):
         label_manager.return_value.__enter__.return_value = True
         reject_unsafe.return_value = MagicMock(closed=False, metadata_error=None, authoritative_pr_data=None)

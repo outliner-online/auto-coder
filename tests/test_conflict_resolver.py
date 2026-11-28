@@ -5,21 +5,12 @@ import pytest
 
 from src.auto_coder.automation_config import AutomationConfig
 from src.auto_coder.conflict_resolver import (
-    _extract_session_id_from_pr_body,
     _perform_base_branch_merge_and_conflict_resolution,
     _trigger_fallback_for_conflict_failure,
     check_mergeability_with_llm,
     resolve_merge_conflicts_with_llm,
 )
 from src.auto_coder.utils import CommandResult
-
-
-def test_extract_session_id_from_pr_body_jules_session_url():
-    """A real Jules session URL should be extracted even if the body also
-    contains a self-referencing GitHub PR link (regression for 404s when
-    archiving sessions for PRs Jules created directly)."""
-    pr_body = "This PR was created by Jules.\n\n" "https://jules.google.com/session/901463134778726610\n\n" "https://github.com/kitamura-tetsuo/outliner/pull/3976"
-    assert _extract_session_id_from_pr_body(pr_body) == "901463134778726610"
 
 
 def test_perform_base_merge_uses_fq_remote_ref():
@@ -67,57 +58,6 @@ def test_perform_base_merge_uses_fq_remote_ref():
         assert any("refs/remotes/origin/main" in str(arg) for arg in calls)
 
 
-def test_perform_base_merge_closes_jules_pr_on_degrade_with_linked_issues():
-    """Test that Jules PR is closed on degradation even with linked issues."""
-    with (
-        patch("src.auto_coder.conflict_resolver.cmd") as mock_cmd,
-        patch("src.auto_coder.conflict_resolver.GitHubClient") as mock_gh_client_class,
-        patch("src.auto_coder.conflict_resolver.scan_conflict_markers") as mock_scan,
-        patch("src.auto_coder.conflict_resolver.run_llm_noedit_prompt") as mock_llm,
-        patch("src.auto_coder.conflict_resolver.create_high_score_backend_manager") as mock_create_backend,
-        patch("src.auto_coder.jules_client.JulesClient", side_effect=AssertionError("historical Jules session accessed")),
-        patch("src.auto_coder.conflict_resolver.check_mergeability_with_llm") as mock_check_mergeability,
-    ):
-        mock_check_mergeability.return_value = False
-        # Setup mocks
-        mock_create_backend.return_value = None
-        mock_client = MagicMock()
-        mock_gh_client_class.get_instance.return_value = mock_client
-        mock_repo = MagicMock()
-        mock_client.get_repository.return_value = mock_repo
-        mock_pr = MagicMock()
-        mock_repo.get_pull.return_value = mock_pr
-        mock_client.get_pr_details.return_value = {"number": 1253, "title": "Fix something", "body": "Session ID: xyz", "author": {"login": "google-labs-jules"}, "head_branch": "jules-branch"}
-
-        # Sequence: reset, clean, abort, fetch pr, checkout, fetch base, rev-parse, merge (fails)
-        mock_cmd.run_command.side_effect = [
-            CommandResult(True, "", "", 0),  # reset
-            CommandResult(True, "", "", 0),  # clean
-            CommandResult(True, "", "", 0),  # merge --abort
-            CommandResult(True, "", "", 0),  # fetch pr
-            CommandResult(True, "", "", 0),  # checkout pr
-            CommandResult(True, "", "", 0),  # fetch origin main
-            CommandResult(True, "abc123\n", "", 0),  # rev-parse
-            CommandResult(False, "CONFLICT", "", 1),  # git merge fails
-        ]
-
-        mock_scan.return_value = ["file1.py"]
-        mock_llm.return_value = "DEGRADING_MERGE"
-
-        pr_data = {"number": 1253, "title": "Fix something", "body": "Session ID: xyz", "author": {"login": "google-labs-jules"}, "baseRefName": "main"}
-
-        ok = _perform_base_branch_merge_and_conflict_resolution(
-            pr_number=1253,
-            base_branch="main",
-            config=AutomationConfig(),
-            repo_name="test/repo",
-            pr_data=pr_data,
-        )
-
-        assert ok is False
-        mock_client.close_pr.assert_called_once()
-
-
 def test_perform_base_merge_enriches_pr_data_when_missing_fields():
     """Test that pr_data is enriched if author or body is missing."""
     config = AutomationConfig()
@@ -162,97 +102,6 @@ def test_perform_base_merge_enriches_pr_data_when_missing_fields():
 
         assert ok is True
         mock_client.get_pr_details.assert_called()
-
-
-def test_perform_base_merge_closes_jules_pr_without_replaying_historical_session():
-    """Conflict rejection closes the PR without using Jules history as authority."""
-    config = AutomationConfig()
-    with (
-        patch("src.auto_coder.conflict_resolver.cmd") as mock_cmd,
-        patch("src.auto_coder.conflict_resolver.GitHubClient") as mock_gh_client_class,
-        patch("src.auto_coder.conflict_resolver.scan_conflict_markers") as mock_scan,
-        patch("src.auto_coder.jules_client.JulesClient", side_effect=AssertionError("historical Jules session accessed")),
-        patch("src.auto_coder.conflict_resolver._close_pr") as mock_close,
-        patch("src.auto_coder.conflict_resolver.check_mergeability_with_llm") as mock_check_mergeability,
-        patch("src.auto_coder.conflict_resolver._extract_session_id_from_pr_body") as mock_extract_session_id,
-        patch("src.auto_coder.cloud_manager.CloudManager") as mock_cloud_manager_class,
-        patch("src.auto_coder.attempt_manager.increment_attempt") as mock_increment_attempt,
-        patch("src.auto_coder.issue_processor._dispatch_issue_candidates") as mock_process_issue,
-    ):
-        mock_check_mergeability.return_value = False
-        mock_extract_session_id.return_value = "session_xyz"
-
-        # Setup GitHubClient mock
-        mock_client = MagicMock()
-        mock_gh_client_class.get_instance.return_value = mock_client
-        mock_repo = MagicMock()
-        mock_client.get_repository.return_value = mock_repo
-        mock_pr = MagicMock()
-        mock_repo.get_pull.return_value = mock_pr
-
-        # Setup CloudManager mock
-        mock_cloud_manager = MagicMock()
-        mock_cloud_manager_class.return_value = mock_cloud_manager
-        mock_cloud_manager.get_issue_by_session.return_value = 123
-
-        # Setup issue mock details
-        mock_issue = MagicMock()
-        mock_client.get_issue.return_value = mock_issue
-        mock_client.get_issue_details.return_value = {
-            "number": 123,
-            "title": "Test Title",
-            "body": "## Requirements\nREQ-001: Preserve replacement dispatch.",
-            "state": "open",
-            "labels": ["implementation-ready", "@auto-coder"],
-        }
-        mock_client.get_item_type_strict.return_value = "issue"
-        mock_client.get_issue_dispatch_snapshot_strict.return_value = {
-            "number": 123,
-            "body": "## Requirements\nREQ-001: Preserve replacement dispatch.",
-            "state": "open",
-            "labels": [{"name": "implementation-ready"}, {"name": "@auto-coder"}],
-        }
-        mock_client.get_all_sub_issues.return_value = []
-        mock_client.disable_labels = False
-        mock_client.try_add_labels.return_value = False
-
-        dispatch_order = []
-        mock_increment_attempt.side_effect = lambda *_args: dispatch_order.append("increment") or 2
-        mock_process_issue.side_effect = lambda *_args, **_kwargs: dispatch_order.append("dispatch")
-
-        # Sequence: reset, clean, abort, fetch pr, checkout, fetch base, rev-parse, merge (fails)
-        mock_cmd.run_command.side_effect = [
-            CommandResult(True, "", "", 0),  # reset
-            CommandResult(True, "", "", 0),  # clean
-            CommandResult(True, "", "", 0),  # merge --abort
-            CommandResult(True, "", "", 0),  # fetch pr
-            CommandResult(True, "", "", 0),  # checkout pr
-            CommandResult(True, "", "", 0),  # fetch origin main
-            CommandResult(True, "abc123\n", "", 0),  # rev-parse
-            CommandResult(False, "CONFLICT", "", 1),  # git merge fails
-        ]
-
-        mock_scan.return_value = ["file1.py"]
-
-        pr_data = {"number": 1253, "title": "Fix something", "body": "Session ID: session_xyz", "author": {"login": "google-labs-jules"}, "baseRefName": "main"}
-
-        ok = _perform_base_branch_merge_and_conflict_resolution(
-            pr_number=1253,
-            base_branch="main",
-            config=config,
-            repo_name="test/repo",
-            pr_data=pr_data,
-        )
-
-        assert ok is False
-        mock_close.assert_called_once_with("test/repo", 1253)
-        mock_extract_session_id.assert_not_called()
-        mock_cloud_manager_class.assert_not_called()
-        mock_increment_attempt.assert_not_called()
-        mock_process_issue.assert_not_called()
-        assert dispatch_order == []
-        mock_client.try_add_labels.assert_not_called()
-        mock_client.remove_labels.assert_not_called()
 
 
 def test_perform_base_merge_skips_conflict_resolution_for_dependabot_pr():

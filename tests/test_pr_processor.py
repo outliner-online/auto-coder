@@ -616,7 +616,6 @@ class TestPRProcessorMerge:
             self._patch_merge_operation_store(tmp_path),
             patch("src.auto_coder.pr_processor.resolve_reviewer_app_identity") as mock_reviewer_identity,
             patch("src.auto_coder.pr_processor._close_linked_issues") as mock_close,
-            patch("src.auto_coder.pr_processor._archive_jules_session") as mock_archive,
         ):
             mock_reviewer_identity.return_value.login = "auto-coder-bot"
 
@@ -629,7 +628,6 @@ class TestPRProcessorMerge:
             # Verify merge was called for the expected head
             mock_api.pulls.merge.assert_called_once_with("owner", "repo", 123, merge_method="squash", sha=head_sha)
             mock_close.assert_called_once_with("owner/repo", 123, mock_instance)
-            mock_archive.assert_not_called()
 
     @patch("src.auto_coder.merge_operation_adapter.get_ghapi_client")
     @patch("auto_coder.util.gh_cache.get_ghapi_client")
@@ -664,7 +662,7 @@ class TestPRProcessorMerge:
         # Mock successful merge
         mock_api.pulls.merge.return_value = {"merged": True, "sha": "mergedsha"}
 
-        with self._patch_merge_operation_store(tmp_path), patch("src.auto_coder.pr_processor._close_linked_issues"), patch("src.auto_coder.pr_processor._archive_jules_session"):
+        with self._patch_merge_operation_store(tmp_path), patch("src.auto_coder.pr_processor._close_linked_issues"):
 
             result = _merge_pr("owner/repo", 124, {}, config)
 
@@ -731,7 +729,6 @@ class TestPRProcessorMerge:
         with (
             self._patch_merge_operation_store(tmp_path),
             patch("src.auto_coder.pr_processor._close_linked_issues"),
-            patch("src.auto_coder.pr_processor._archive_jules_session"),
         ):
             result = _merge_pr("owner/repo", 125, {}, config)
 
@@ -786,7 +783,6 @@ class TestPRProcessorMerge:
             self._patch_merge_operation_store(tmp_path),
             patch("src.auto_coder.pr_processor._resolve_pr_merge_conflicts") as mock_resolve,
             patch("src.auto_coder.pr_processor._close_linked_issues"),
-            patch("src.auto_coder.pr_processor._archive_jules_session"),
         ):
             disposition = MergeRouteDisposition()
             result = _merge_pr("owner/repo", 126, {}, config, route_disposition=disposition)

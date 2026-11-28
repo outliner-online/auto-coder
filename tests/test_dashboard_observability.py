@@ -994,17 +994,8 @@ class TestOutcomeMatrixCoverage:
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor.has_unresolved_review_threads", return_value=False)
     @patch("auto_coder.pr_processor.get_detailed_checks_from_history")
-    @patch("auto_coder.pr_processor._is_jules_pr", return_value=True)
-    @patch("auto_coder.pr_processor._close_stale_jules_pr")
-    @patch(
-        "auto_coder.pr_processor._send_jules_error_feedback",
-        return_value=PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN, ("Sent Jules error feedback",), attempt_started=True),
-    )
     def test_corrective_work_accepted_without_claiming_a_repair(
         self,
-        mock_send_feedback,
-        mock_close_stale,
-        mock_is_jules,
         mock_detailed,
         mock_threads,
         mock_checks,
@@ -1015,7 +1006,6 @@ class TestOutcomeMatrixCoverage:
 
         mock_checks.side_effect = authoritative_ci_status(success=False, ids=[1])
         mock_detailed.return_value = DetailedChecksResult(success=False, failed_checks=[{"name": "build"}])
-        mock_close_stale.return_value = StaleJulesPRResult(closed=False)
 
         config = AutomationConfig()
         pr_data = {"number": 3001, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": "a" * 40}}
@@ -1028,7 +1018,6 @@ class TestOutcomeMatrixCoverage:
             actions = _handle_pr_merge(client, "owner/repo", pr_data, config, {})
 
         assert any("Jules CI repair was not sent" in a for a in actions)
-        mock_send_feedback.assert_not_called()
         snapshot = get_trace_collector().get_snapshot(item_type="pr", item_number=3001)
         repair_events = [e for e in snapshot.events if e.stage_id == "pr.repair-delegation"]
         assert len(repair_events) == 1
@@ -1065,8 +1054,6 @@ class TestOutcomeMatrixCoverage:
             patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"}),
             patch("auto_coder.pr_processor.get_detailed_checks_from_history", return_value=DetailedChecksResult(success=False, failed_checks=[{"name": "build"}])),
             patch("auto_coder.pr_processor._is_codex_pr", return_value=False),
-            patch("auto_coder.pr_processor._is_jules_pr", return_value=True),
-            patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False)),
             patch("auto_coder.pr_processor.cmd.run_command", return_value=SimpleNamespace(success=True, stdout="main\n")),
             patch("auto_coder.pr_processor._get_github_actions_logs", return_value="failed CI evidence"),
             patch("auto_coder.pr_processor.new_work_allowed", return_value=False),

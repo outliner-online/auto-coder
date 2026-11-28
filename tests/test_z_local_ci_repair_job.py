@@ -168,7 +168,6 @@ class Harness:
             patch.object(pr_processor, "current_ci_failure_authority", return_value=nullcontext(authority)),
             patch.object(pr_processor, "check_github_actions_and_exit_if_in_progress", return_value=True),
             patch.object(pr_processor, "_get_mergeable_state", return_value={"mergeable": True}),
-            patch.object(pr_processor, "_is_jules_pr", return_value=False),
             patch.object(pr_processor, "_is_local_llm_pr", return_value=True),
             patch.object(pr_processor, "_check_github_actions_status", side_effect=authoritative_ci_status(success=False, ids=[1])),
             patch.object(
