@@ -427,7 +427,10 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         unrelated = {
             **pr,
             "number": 60,
-            "body": "<!-- auto-coder:local -->",
+            # This ordinary PR has no extra durable attribution marker.  The
+            # preceding request-scoped Jules fallback must not become a
+            # process-wide fence for later PRs.
+            "body": "",
             "changed_files": 0,
             "user": {"login": "octocat", "type": "User"},
             "head": {**pr["head"], "ref": "local-feature", "sha": "local-head"},

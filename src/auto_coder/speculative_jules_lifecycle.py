@@ -183,6 +183,12 @@ class SpeculativeCleanupStore:
 
     def has_retired_pr_association(self, repository: str, pr_number: int) -> bool:
         """Read an exact historical association without authorizing cleanup."""
+        # Read-only fallback stores deliberately use ``initialize=False``.
+        # Do not let a lookup against one create an empty SQLite database: its
+        # existence is itself startup evidence that activates the historical
+        # fence on subsequent requests.
+        if not self.path.is_file():
+            return False
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 "SELECT 1 FROM cleanup WHERE repository=? AND pr_number=? LIMIT 1",
@@ -468,11 +474,14 @@ def get_speculative_jules_lifecycle(
             # Preserve an UNKNOWN decision for that possible retired artifact
             # without manufacturing replacement history or globally fencing a
             # genuinely fresh installation.
-            _lifecycle = SpeculativeJulesLifecycle(
+            # This fallback is evidence about this PR, not evidence about the
+            # installation.  Do not cache it: otherwise one recognizable Jules
+            # PR would make every later PR in this process inherit an UNKNOWN
+            # history decision even though no durable history was discovered.
+            return SpeculativeJulesLifecycle(
                 UnavailableSpeculativeClassifier("retired Jules history is unavailable before migration"),
                 SpeculativeCleanupStore(cleanup_path, initialize=False),
             )
-            return _lifecycle
         try:
             cleanup_store = SpeculativeCleanupStore(cleanup_path)
         except (OSError, sqlite3.Error):
