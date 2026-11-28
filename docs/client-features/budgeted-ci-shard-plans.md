@@ -225,7 +225,7 @@ selector following the separator:
 Native history remains usable only with its original validated complete
 configuration/Python identity, including compatible partial profiles. Neither
 source estimate type is a test-selection, cached-outcome or PASS authority.
-The existing sixteen-shard contiguous allocation, 420-second target, fixed
+The existing twelve-shard contiguous allocation, 420-second target, fixed
 current-attempt plan and native receipt aggregate remain unchanged. Estimated
 pytest work excludes runner queue, fixture/browser setup, external stalls and
 observed critical path. Prior timing improvements are projections until verified

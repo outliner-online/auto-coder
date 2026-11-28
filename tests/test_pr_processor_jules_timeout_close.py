@@ -326,9 +326,9 @@ class TestStaleJulesPRWithAutoCoderLabel:
 
         result = process_pull_request(github_client, config, "owner/repo", pr_data)
 
-        github_client.close_pr.assert_called_once()
+        github_client.close_pr.assert_not_called()
         mock_increment.assert_not_called()
-        assert any("Closed stale Jules PR #4643" in action for action in result.actions_taken)
+        assert any("Speculative Jules unknown artifact fenced" in action for action in result.actions_taken)
         assert not any("already being processed" in action for action in result.actions_taken)
 
     @patch("src.auto_coder.pr_processor.increment_attempt")
@@ -754,8 +754,8 @@ class TestProcessPullRequestResumesOnRecoveredCI:
 
         result = process(github_client, config, "owner/repo", pr_data)
 
-        assert not any("waiting for Jules" in action for action in result.actions_taken)
-        mock_process_fixes.assert_called_once()
+        assert any("Speculative Jules unknown artifact fenced" in action for action in result.actions_taken)
+        mock_process_fixes.assert_not_called()
 
     @patch("auto_coder.pr_processor._process_pr_for_fixes")
     @patch("auto_coder.jules_client.JulesClient")
@@ -776,7 +776,7 @@ class TestProcessPullRequestResumesOnRecoveredCI:
 
         result = process(github_client, config, "owner/repo", pr_data)
 
-        assert any("waiting for Jules" in action for action in result.actions_taken)
+        assert any("Speculative Jules unknown artifact fenced" in action for action in result.actions_taken)
         mock_process_fixes.assert_not_called()
 
 

@@ -1124,7 +1124,6 @@ def test_terminal_ci_failure_retains_cloud_owner_without_local_repair(tmp_path, 
             RepairDisposition.DEFERRED,
             "temporary provider wait",
         ),
-        ("jules", None, RepairDisposition.REFUSED, "Jules CI repair is retired; historical sessions cannot authorize provider work"),
     ],
 )
 def test_public_processing_preserves_cloud_ci_executor_result(
