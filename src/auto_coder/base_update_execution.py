@@ -170,6 +170,7 @@ def _run_base_update_operation(
     logger = p.logger
     GitHubClient = p.GitHubClient
     _is_dependabot_pr = p._is_dependabot_pr
+    _has_retired_provider_bot_origin = p._has_retired_provider_bot_origin
     _dispatch_cloud_conflict_repair = p._dispatch_cloud_conflict_repair
     _is_local_llm_pr = p._is_local_llm_pr
     _dispatch_local_conflict_repair = p._dispatch_local_conflict_repair
@@ -331,6 +332,16 @@ def _run_base_update_operation(
         else:
             # Merge conflict occurred
             actions.append(f"Merge conflict detected for PR #{pr_number}")
+
+            # Historical Jules authors remain negative provenance. Retiring
+            # the provider must not route their conflicts into a supported
+            # cloud session or a local checkout.
+            if _has_retired_provider_bot_origin(pr_data):
+                actions.append(f"PR #{pr_number} has retired provider origin. Skipping conflict resolution.")
+                cmd.run_command(["git", "merge", "--abort"])
+                actions.append("ACTION_FLAG:SKIP_ANALYSIS")
+                record(RepairDisposition.REFUSED, reason=actions[-2])
+                return actions
 
             # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
             # the bot recreates the PR against the updated base branch by itself.

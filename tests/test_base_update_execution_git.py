@@ -418,7 +418,7 @@ def test_definitive_entry_refuses_changed_head_and_base_before_git_effects(tmp_p
 def test_historical_jules_base_conflict_does_not_send_or_fallback(tmp_path, monkeypatch, _use_real_commands):
     work, pr_data = conflict_repository(tmp_path)
     monkeypatch.chdir(work)
-    pr_data.update(user={"login": "google-labs-jules"}, body="Session ID: historical-session")
+    pr_data.update(author={"login": "google-labs-jules"}, user={"login": "google-labs-jules"}, body="Session ID: historical-session")
     github = github_for_remote(work, {pr_data["number"]: pr_data})
     client = MagicMock()
     with (
