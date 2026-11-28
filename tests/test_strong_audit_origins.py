@@ -73,7 +73,8 @@ class OriginScenario:
         self.pr = {
             "number": 100,
             "title": "Quota recovery",
-            "body": "Fixes #99",
+            # The local PR producer is independent of the selected reviewer.
+            "body": "<!-- auto-coder:local-llm -->\nFixes #99",
             "state": "open",
             "created_at": "2026-11-01T00:00:00Z",
             "updated_at": "2026-11-01T00:00:00Z",

@@ -645,7 +645,7 @@ def run_public_ci_consumer(snapshot, *, head, pr_number=PR_NUMBER, thread_state=
     config.pr_review_thread_gate = thread_state is not None
     pr_data = {
         "number": pr_number,
-        "body": "Fixes #99",
+        "body": "<!-- auto-coder:local-llm -->\nFixes #99",
         "labels": [],
         "state": "open",
         "user": {"login": "human"},
