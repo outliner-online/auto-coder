@@ -169,7 +169,6 @@ def _run_base_update_operation(
     git_push = p.git_push
     logger = p.logger
     GitHubClient = p.GitHubClient
-    _is_jules_pr = p._is_jules_pr
     _is_dependabot_pr = p._is_dependabot_pr
     _dispatch_cloud_conflict_repair = p._dispatch_cloud_conflict_repair
     _is_local_llm_pr = p._is_local_llm_pr
@@ -330,15 +329,8 @@ def _run_base_update_operation(
                         actions.append(f"Deferred base-update publication for PR #{pr_number}: destination head is unknown ({detail})")
                         record(RepairDisposition.DEFERRED, reason=actions[-1], resulting_head=candidate_head)
         else:
-            # Merge conflict occurred, check if Jules PR
+            # Merge conflict occurred
             actions.append(f"Merge conflict detected for PR #{pr_number}")
-
-            if _is_jules_pr(pr_data):
-                actions.append(f"Historical Jules repair is retired for PR #{pr_number}")
-                cmd.run_command(["git", "merge", "--abort"])
-                actions.append("ACTION_FLAG:SKIP_ANALYSIS")
-                record(RepairDisposition.REFUSED, reason=actions[-2])
-                return actions
 
             # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
             # the bot recreates the PR against the updated base branch by itself.

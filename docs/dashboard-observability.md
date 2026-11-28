@@ -4415,3 +4415,17 @@ evaluation without a repair or failure-backoff timer. The existing generic detai
 renderer displays these facts. `tests/test_pr_automation_guard.py::test_worker_acknowledges_stop_without_retry_and_dashboard_shows_intervention`
 drives the actual worker/history guard through the log projection. Related
 behavior is documented in [PR automation intervention stops](client-features/pr-automation-intervention-stop.md).
+
+# Retired Jules PR non-interference
+
+Issue #2898 removes the Jules-specific PR waiting, timeout recovery, body-link,
+CI-feedback, conflict fallback, draft-promotion, and post-merge cleanup paths.
+Those paths no longer emit `pr.provider-ownership-wait`,
+`pr.stale-jules-recovery`, or Jules `pr.repair-delegation` observations. No
+replacement stage is introduced: Codex Cloud, Claude Routine, local,
+dependency-bot, CI, review, and merge observations retain their existing
+schemas. The independent historical artifact fence remains observable through
+`pr.speculative-jules-authority` at ingress and
+`pr.speculative-jules-merge-authority` immediately before merge. Focused
+coverage is in `tests/test_retired_jules_pr_noninterference.py` and the final
+boundary coverage in `tests/test_speculative_jules_lifecycle.py`.
