@@ -24,6 +24,7 @@ from src.auto_coder.automation_config import AutomationConfig
 from src.auto_coder.github_controller_auth import ControllerIdentity
 from src.auto_coder.pr_processor import PRActionList, _get_mergeable_state, _handle_pr_merge, _start_mergeability_remediation
 from src.auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
+from tests.pr_automation_fakes import install_pr_history
 
 
 class _CloudFollowupClient:
@@ -108,12 +109,15 @@ def test_production_remediation_preserves_cloud_pr_metadata_and_defers_after_del
     mock_api.pulls.get.return_value = api_pr
     mock_get_ghapi_client.return_value = mock_api
     mock_github_client.get_instance.return_value.token = "token"
+    client = _client()
+    install_pr_history(client, api_pr["head"]["sha"])
 
-    def conflicting_update(repo_name, preserved_pr_data, _config):
+    def conflicting_update(repo_name, preserved_pr_data, _config, *, github_client):
+        assert github_client is client
         assert preserved_pr_data["body"] == api_pr["body"]
         assert preserved_pr_data["head"] == api_pr["head"]
         assert preserved_pr_data["base"] == api_pr["base"]
-        assert _delegate_cloud_merge_conflict_repair(repo_name, preserved_pr_data)
+        assert _delegate_cloud_merge_conflict_repair(repo_name, preserved_pr_data, github_client)
         actions = PRActionList(("Merge conflict detected for PR #1660", "Delegated merge-conflict repair for PR #1660 to its existing cloud session", "ACTION_FLAG:SKIP_ANALYSIS"))
         actions.repair_result = PRRepairResult(RepairDisposition.ACCEPTED_OR_UNCERTAIN)
         return actions
@@ -125,7 +129,7 @@ def test_production_remediation_preserves_cloud_pr_metadata_and_defers_after_del
         patch("src.auto_coder.pr_processor._resolve_cloud_conflict_origin", return_value=(cloud_client, "task_e_existing")),
         patch("src.auto_coder.pr_processor._cloud_conflict_state_path", return_value=tmp_path / "repairs.json"),
     ):
-        actions = _handle_pr_merge(_client(), "owner/repo", {**api_pr, "mergeable": False}, config, {})
+        actions = _handle_pr_merge(client, "owner/repo", {**api_pr, "mergeable": False}, config, {})
 
     assert len(cloud_client.messages) == 1
     assert "release/beta" in cloud_client.messages[0][1]

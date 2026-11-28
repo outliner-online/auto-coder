@@ -611,6 +611,7 @@ class GitHubAppReviewer:
         operation_id: Optional[str] = None,
         expected_ledger_revision: Optional[int] = None,
         approval_authority: Optional[Callable[[], str]] = None,
+        new_effect_authorizer: Optional[Callable[[], str]] = None,
     ) -> ReviewPublicationResult:
         """Submit a native review, failing closed on auth, head races, or API errors.
 
@@ -759,6 +760,10 @@ class GitHubAppReviewer:
                 attached_finding_count=sum("### Auto-Coder adversarial finding" in str(comment["body"]) for comment in comments),
             )
             comments_json = json.dumps(comments, sort_keys=True, separators=(",", ":"))
+            if new_effect_authorizer is not None:
+                refusal = self._approval_refusal(new_effect_authorizer)
+                if refusal:
+                    return ReviewPublicationResult(False, event, refusal, policy_refusal=True)
             if effective_ledger is not None and unrooted_blocker_ids and reconciled_snapshot:
                 try:
                     effective_ledger.record_publication_intent(
@@ -787,11 +792,24 @@ class GitHubAppReviewer:
                         effective_ledger.reject_publication_intent(self._api_url, repo_name, pr_number, intent_id, reason=refusal)
                     return ReviewPublicationResult(False, event, refusal, policy_refusal=True)
 
+            def new_effect_refusal() -> Optional[ReviewPublicationResult]:
+                if new_effect_authorizer is None:
+                    return None
+                refusal = self._approval_refusal(new_effect_authorizer)
+                if not refusal:
+                    return None
+                if effective_ledger is not None and unrooted_blocker_ids:
+                    effective_ledger.reject_publication_intent(self._api_url, repo_name, pr_number, intent_id, reason=refusal)
+                return ReviewPublicationResult(False, event, refusal, policy_refusal=True)
+
             # A standalone file-level review comment is the only supported REST
             # shape when no changed file exposes a represented diff line. Create
             # it before the durable verdict so a failed comment request cannot
             # leave a saved same-SHA result that suppresses the required thread.
             if file_level_clarification is not None:
+                refused = new_effect_refusal()
+                if refused is not None:
+                    return refused
                 stage = "clarification_publication"
                 response = self._request(
                     "POST",
@@ -799,6 +817,9 @@ class GitHubAppReviewer:
                     token,
                     json=file_level_clarification,
                 )
+            refused = new_effect_refusal()
+            if refused is not None:
+                return refused
             stage = "review_publication"
             try:
                 response = self._request(
@@ -838,6 +859,8 @@ class GitHubAppReviewer:
                 root_comment_id = result.provenance_thread_comment_ids.get(disposition.thread_id)
                 if disposition.status == "ADDRESSED" or root_comment_id is None:
                     continue
+                if new_effect_authorizer is not None and self._approval_refusal(new_effect_authorizer):
+                    break
                 try:
                     self._request(
                         "POST",
@@ -1224,6 +1247,7 @@ def publish_adversarial_review(
     expected_ledger_revision: Optional[int] = None,
     approval_authority: Optional[Callable[[], str]] = None,
     expected_publisher: Optional[ReviewerAppIdentity] = None,
+    new_effect_authorizer: Optional[Callable[[], str]] = None,
 ) -> ReviewPublicationResult:
     """Load dedicated credentials and publish without touching the user client."""
     try:
@@ -1243,6 +1267,7 @@ def publish_adversarial_review(
         operation_id=operation_id,
         expected_ledger_revision=expected_ledger_revision,
         approval_authority=approval_authority,
+        **({"new_effect_authorizer": new_effect_authorizer} if new_effect_authorizer is not None else {}),
     )
 
 

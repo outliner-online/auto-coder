@@ -19,6 +19,7 @@ from auto_coder.local_job_handoff import InvocationOutcome, LocalJobKind, LocalJ
 from auto_coder.local_job_runner import LocalJobExecutionResult, LocalJobRunner
 from auto_coder.pr_processor import DependencyBotAdmissionDecision, _offer_selected_local_pr_repair, local_pr_repair_context
 from auto_coder.pr_repair_dispatch import RepairDisposition, RepairKind
+from tests.pr_automation_fakes import install_pr_history
 
 
 def _pr(number: int) -> dict:
@@ -64,6 +65,7 @@ def _install_real_offer(engine: AutomationEngine, github: MagicMock, kind: Repai
 def test_unified_pr_entry_retains_exact_execution_without_merge_or_slot_release(tmp_path: Path) -> None:
     jobs = LocalJobStore(tmp_path / "jobs.sqlite3")
     github = MagicMock()
+    install_pr_history(github, lambda _repo, number: _pr(number)["head"]["sha"])
     github.get_pull_request_metadata_strict.side_effect = lambda _repo, number: _pr(number)
     engine = AutomationEngine(github, AutomationConfig())
     engine.local_job_store = jobs
@@ -86,6 +88,7 @@ def test_unified_pr_entry_retains_exact_execution_without_merge_or_slot_release(
 def test_linked_issue_owner_execution_is_transferred_to_pr_job(tmp_path: Path) -> None:
     jobs = LocalJobStore(tmp_path / "jobs.sqlite3")
     github = MagicMock()
+    install_pr_history(github, lambda _repo, number: _pr(number)["head"]["sha"])
     linked_pr = _pr(17)
     linked_pr["body"] = "Closes #10\n<!-- auto-coder:local-llm -->"
     github.get_issue.return_value = {"number": 10, "state": "open"}
@@ -114,6 +117,7 @@ def test_linked_issue_owner_execution_is_transferred_to_pr_job(tmp_path: Path) -
 async def test_pr_worker_processes_second_candidate_while_independent_runner_is_model_blocked(tmp_path: Path, monkeypatch) -> None:
     jobs = LocalJobStore(tmp_path / "jobs.sqlite3")
     github = MagicMock()
+    install_pr_history(github, lambda _repo, number: _pr(number)["head"]["sha"])
     github.get_pull_request_metadata_strict.side_effect = lambda _repo, number: _pr(number)
     engine = AutomationEngine(github, AutomationConfig())
     engine.local_job_store = jobs
@@ -171,6 +175,7 @@ async def test_pr_worker_processes_second_candidate_while_independent_runner_is_
 def test_explicit_pr_entry_retains_one_job_and_target_scoped_runner_ignores_unrelated_work(tmp_path: Path) -> None:
     jobs = LocalJobStore(tmp_path / "jobs.sqlite3")
     github = MagicMock()
+    install_pr_history(github, lambda _repo, number: _pr(number)["head"]["sha"])
     github.get_pull_request_metadata_strict.side_effect = lambda _repo, number: _pr(number)
     engine = AutomationEngine(github, AutomationConfig())
     engine.local_job_store = jobs

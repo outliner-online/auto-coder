@@ -21,6 +21,7 @@ from auto_coder.pr_review_cycle import ContractSnapshot, FindingDisposition, PrR
 from auto_coder.reviewer_session_registry import ReviewerSessionRegistry
 from auto_coder.strong_correction_scope import FIELD, review_context
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_accepted_finding_bridge import Env, accept_strong, finding_json, published_roots
 
 REPO, PR, TASK = "owner/repo", 4001, "task_e_strong"
@@ -124,6 +125,7 @@ def test_real_strong_scope_birth_and_ordinary_mixed_dispatch(tmp_path, monkeypat
     )
     state = {"head": HEAD, "threads": []}
     github = MagicMock()
+    install_pr_history(github, lambda _repo, _pr: state["head"])
     github.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
 
     def data():

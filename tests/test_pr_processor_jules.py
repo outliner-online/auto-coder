@@ -17,6 +17,7 @@ from auto_coder.pr_processor import (
     _update_jules_pr_body,
 )
 from auto_coder.pr_repair_dispatch import RepairDisposition
+from tests.pr_automation_fakes import install_pr_history
 
 
 @pytest.fixture(autouse=True)
@@ -700,6 +701,7 @@ class TestSendJulesErrorFeedback:
         config = Mock()
         config.MAX_CONCURRENT_IMPLEMENTATIONS = 2
         github_client = Mock()
+        install_pr_history(github_client, "test-head")
 
         # Execute
         result = _send_jules_error_feedback(repo_name, pr_data, failed_checks, config, github_client)
@@ -778,6 +780,7 @@ class TestSendJulesErrorFeedback:
         config = Mock()
         config.MAX_CONCURRENT_IMPLEMENTATIONS = 2
         github_client = Mock()
+        install_pr_history(github_client, "test-head")
 
         # Execute
         result = _send_jules_error_feedback(repo_name, pr_data, failed_checks, config, github_client)
@@ -813,6 +816,7 @@ class TestSendJulesErrorFeedback:
         config = Mock()
         config.MAX_CONCURRENT_IMPLEMENTATIONS = 2
         github_client = Mock()
+        install_pr_history(github_client, "test-head")
 
         # Execute
         result = _send_jules_error_feedback(repo_name, pr_data, failed_checks, config, github_client)
@@ -833,10 +837,11 @@ class TestSendJulesErrorFeedback:
         # Check that comment was posted on PR
         github_client.add_comment_to_pr.assert_called_once_with(repo_name, 456, "🤖 Auto-Coder: CI checks failed. I've sent the error logs to the Jules session and requested a fix. Please wait for the updates.")
 
+    @patch("auto_coder.pr_processor._add_unique_pr_comment")
     @patch("auto_coder.pr_processor._get_github_actions_logs")
     @patch("auto_coder.jules_client.JulesClient")
-    def test_send_jules_error_feedback_no_github_client(self, mock_jules_client_class, mock_get_logs):
-        """Test that PR comment is skipped when no GitHub client is provided."""
+    def test_send_jules_error_feedback_without_history_defers_before_provider_send(self, mock_jules_client_class, mock_get_logs, mock_add_comment):
+        """Missing authoritative history defers before provider or comment effects."""
         # Setup
         mock_jules_client = Mock()
         mock_jules_client.send_message.return_value = "Acknowledged"
@@ -862,10 +867,13 @@ class TestSendJulesErrorFeedback:
         actions = result.actions
 
         # Assert
-        assert len(actions) == 2
-        assert "Sent CI failure logs to Jules session 'sessionNoClient' for PR #789" in actions[0]
-        assert "Skipped posting comment on PR #789: no GitHub client available" in actions[1]
-        mock_jules_client.send_message.assert_called_once()
+        assert result.disposition is RepairDisposition.DEFERRED
+        assert result.attempt_started is False
+        assert "PR automation history unavailable" in result.reason
+        assert "strict PR history reader" in result.reason
+        assert actions == ()
+        mock_jules_client.send_message.assert_not_called()
+        mock_add_comment.assert_not_called()
 
     @patch("auto_coder.pr_processor._get_github_actions_logs")
     @patch("auto_coder.jules_client.JulesClient")
@@ -890,6 +898,7 @@ class TestSendJulesErrorFeedback:
         config = Mock()
         config.MAX_CONCURRENT_IMPLEMENTATIONS = 2
         github_client = Mock()
+        install_pr_history(github_client, "test-head")
         # Make add_comment_to_pr raise an exception
         github_client.add_comment_to_pr.side_effect = Exception("GitHub API error")
 

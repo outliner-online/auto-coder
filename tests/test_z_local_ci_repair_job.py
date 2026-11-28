@@ -34,6 +34,7 @@ from auto_coder.local_ci_repair_job import DurableCICorrection, LocalCIRepairJob
 from auto_coder.local_job_handoff import InvocationOutcome, LocalJobKind, LocalJobOffer, LocalJobState, LocalJobStore, PRRepairAdmission
 from auto_coder.local_job_runner import LocalJobRunner
 from auto_coder.local_review_repair import LocalReviewRepairStore
+from auto_coder.pr_automation_guard import PRCommit, PRCommitHistory
 from auto_coder.pr_repair_dispatch import RepairDisposition, RepairKind
 from auto_coder.pr_repair_workspace import PRRepairSource, PRRepairWorkspaceProducer
 from auto_coder.util.github_action import DetailedChecksResult
@@ -127,6 +128,13 @@ class Harness:
         github.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=101)
         github.get_authenticated_user_login.return_value = "controller"
         github.get_pull_request_metadata_strict.side_effect = lambda *_args: metadata(head, base)
+
+        def commit_history(*_args):
+            current_head = git(remote, "rev-parse", "refs/heads/feature")
+            commits = tuple(PRCommit(sha, git(remote, "show", "-s", "--format=%B", sha)) for sha in git(remote, "rev-list", "--reverse", f"{base}..{current_head}").splitlines())
+            return PRCommitHistory(current_head, len(commits), commits)
+
+        github.get_pr_automation_history_strict.side_effect = commit_history
         return cls(tmp_path, controller, remote, head, base, LocalJobStore(tmp_path / "jobs.sqlite3"), github, authority_head=head)
 
     def offer_from_production_selection(self) -> str:

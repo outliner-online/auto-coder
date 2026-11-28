@@ -21,6 +21,7 @@ from auto_coder.util.gh_cache import GitHubClient
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from auto_coder.util.github_request_outcome import GitHubRequestContext
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 """Tests for automation engine functionality."""
 
@@ -73,6 +74,7 @@ class TestAutomationEngine:
         slots.finish_execution(parent, parent_execution)
         github.child_reads = 0
         restarted = ImplementationSlotRepository("owner/repo", 3, tmp_path / "slots.json")
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         engine.implementation_slots = restarted
         downstream = Mock()
@@ -156,6 +158,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
 
         github = StrictGitHub()
         restarted = ImplementationSlotRepository("owner/repo", 3, storage_path)
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         engine.implementation_slots = restarted
         downstream = Mock()
@@ -207,6 +210,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         restarted = ImplementationSlotRepository("owner/repo", 3, storage_path)
         before = json.loads(storage_path.read_text(encoding="utf-8"))[child.key]
         github.fail_children = True
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         engine.implementation_slots = restarted
         downstream = Mock()
@@ -258,6 +262,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         github = StrictGitHub()
         storage_path = tmp_path / "live-unmarked-owner.json"
         first_slots = ImplementationSlotRepository("owner/repo", 3, storage_path)
+        install_pr_history(github, "a" * 40)
         first_engine = AutomationEngine(github, config=AutomationConfig())
         first_engine.implementation_slots = first_slots
         entered = Event()
@@ -439,6 +444,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         github = MagicMock()
         github.try_add_labels.return_value = False
         config = AutomationConfig()
+        install_pr_history(github, "head-a")
         engine = AutomationEngine(github, config=config)
         slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         owner = ImplementationOwner("pr", 100)
@@ -1034,6 +1040,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
                 return pull_request
 
         github = GitHubStub()
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         issue_owner = ImplementationOwner("issue", 100)
@@ -1066,6 +1073,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
 
     def test_source_less_recurrent_jules_pr_is_fenced_with_provider_owner_retained(self, tmp_path):
         github = MagicMock()
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         recurrent_owner = ImplementationOwner("recurrent", 12345)
@@ -1133,6 +1141,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
                 return pull_request
 
         github = GitHubStub()
+        install_pr_history(github, "a" * 40)
         engine = AutomationEngine(github, config=AutomationConfig())
         slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         issue_owner = ImplementationOwner("issue", 100)
@@ -1523,6 +1532,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         github_client.get_pr_review_threads_strict = MagicMock(side_effect=RuntimeError("detailed GraphQL lookup failed"))
         config = AutomationConfig()
         config.AUTO_MERGE = True
+        install_pr_history(github_client, lambda _repository, _number: pr_data["head"]["sha"])
         engine = AutomationEngine(github_client, config=config)
         pr_data = {"number": 80, "title": "PR", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.\n<!-- auto-coder:local -->", "labels": [], "head": {"ref": "feature-test", "sha": "abc123"}, "mergeable": True}
         pr_data.update({"user": {"login": "developer"}, "state": "open"})
@@ -1885,6 +1895,7 @@ BlockingRepository(Path(__import__("sys").argv[1]), Path(__import__("sys").argv[
         elif failure_kind in {"legacy-comment", "native-precedence"}:
             github._get_issue_comments.side_effect = OSError(diagnostic)
             native_comments.side_effect = OSError(diagnostic)
+        install_pr_history(github, lambda _repository, _number: pr_data["head"]["sha"])
         engine = AutomationEngine(github, config=config)
         candidate = Candidate(type="pr", data=pr_data, priority=1)
         engine._check_and_handle_closed_branch = Mock(return_value=True)

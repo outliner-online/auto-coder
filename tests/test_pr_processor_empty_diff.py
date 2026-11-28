@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from auto_coder.pr_automation_guard import PRCommit, PRCommitHistory
 from src.auto_coder.automation_config import AutomationConfig, EmptyPRResult
 from src.auto_coder.automation_engine import AutomationEngine, Candidate
 from src.auto_coder.cloud_run import CloudRun, CloudRunRepository
@@ -15,6 +16,20 @@ from src.auto_coder.pr_processor import (
     _resolve_pr_issue_numbers,
     process_pull_request,
 )
+
+
+def _install_declared_pr_history(client, pr_data):
+    """Retain the fixture's declared count even when its effective diff is empty."""
+
+    def observe(_repository, _number):
+        head = pr_data["head"]["sha"]
+        count = pr_data.get("commits_count", 1)
+        commits = tuple(PRCommit(f"{head}-ancestor-{index}", "Existing candidate commit") for index in range(max(0, count - 1)))
+        if count:
+            commits += (PRCommit(head, "Existing candidate head"),)
+        return PRCommitHistory(head, count, commits)
+
+    client.get_pr_automation_history_strict = Mock(side_effect=observe)
 
 
 def _empty_pr_data_with_commits() -> dict:
@@ -322,6 +337,7 @@ class TestProcessPullRequestEmptyDiff:
         config = AutomationConfig()
 
         pr_data = _empty_pr_data_with_commits()
+        _install_declared_pr_history(github_client, pr_data)
         result = process_pull_request(github_client, config, "owner/repo", pr_data)
 
         assert result.priority == "defer"
@@ -352,6 +368,7 @@ class TestAutomationEngineEmptyPRRequeue:
             "additions": 0,
             "deletions": 0,
         }
+        _install_declared_pr_history(github, pr)
         with patch.object(engine, "_process_unlocked_issue") as dispatch:
             result = engine._process_single_candidate_unified("owner/repo", Candidate(type="pr", data=pr, priority=1), engine.config, jules_mode=True)
         assert result.outcome is PRProcessingOutcome.DEFERRED
@@ -373,6 +390,7 @@ class TestAutomationEngineEmptyPRRequeue:
         empty_pr = _empty_pr_data_with_commits()
         empty_pr.update(body="<!-- auto-coder:local-llm -->\n\nCloses #4800", user={"login": "local-maintainer"})
         empty_pr["head"]["ref"] = "issue-4800"
+        _install_declared_pr_history(mock_github, empty_pr)
         engine.github.get_open_prs_json.return_value = [empty_pr]
         engine.github.get_issue.return_value = {"state": "open", "number": 4800}
         engine.github.get_open_issues.return_value = []
@@ -402,6 +420,7 @@ class TestAutomationEngineEmptyPRRequeue:
         empty_pr = _empty_pr_data_with_commits()
         empty_pr.update(body="<!-- auto-coder:local-llm -->\n\nCloses #4800", user={"login": "local-maintainer"})
         empty_pr["head"]["ref"] = "issue-4800"
+        _install_declared_pr_history(mock_github, empty_pr)
         candidate = Candidate(type="pr", data=empty_pr, priority=1)
         engine.github.get_issue.return_value = {"state": "open", "number": 4800}
 
@@ -430,6 +449,7 @@ class TestAutomationEngineEmptyPRRequeue:
             "additions": 0,
             "deletions": 0,
         }
+        _install_declared_pr_history(github, historical_pr)
         candidate = Candidate(type="pr", data=historical_pr, priority=1)
 
         with patch.object(engine, "_process_unlocked_issue") as process_unlocked:
@@ -461,6 +481,7 @@ class TestAutomationEngineEmptyPRRequeue:
             "additions": 0,
             "deletions": 0,
         }
+        _install_declared_pr_history(github, supported_pr)
         candidate = Candidate(type="pr", data=supported_pr, priority=1)
 
         with patch.object(engine, "_process_unlocked_issue", return_value=["Processed retry"]) as process_unlocked:
@@ -495,6 +516,7 @@ class TestAutomationEngineEmptyPRRequeue:
             "additions": 0,
             "deletions": 0,
         }
+        _install_declared_pr_history(github, historical_pr)
         candidate = Candidate(type="pr", data=historical_pr, priority=1)
 
         with patch.object(engine, "_process_unlocked_issue") as process_unlocked:
@@ -534,6 +556,7 @@ class TestAutomationEngineEmptyPRRequeue:
             "additions": 1,
             "deletions": 0,
         }
+        _install_declared_pr_history(github, historical_pr)
 
         # This is the same production link step reached after a nonempty PR is
         # admitted.  It must not turn retained session history into body text

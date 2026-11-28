@@ -11,6 +11,7 @@ from auto_coder.automation_engine import AutomationEngine
 from auto_coder.entity_invalidation import CIWebhookDelivery, DurableInvalidationQueue, EntityIdentity
 from auto_coder.util.gh_cache import GitHubClient
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 REPO = "owner/repo"
 PR = 6060
@@ -38,6 +39,7 @@ def test_real_scheduler_receipts_0_1_1point5_only_one_fresh_evaluation(tmp_path,
     path = tmp_path / "queue.db"
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(path))
     github = GitHubClient("test-token")
+    install_pr_history(github, "head")
     metadata = []
     data = {"number": PR, "state": "open", "mergeable": True, "head": {"sha": "head", "ref": "dependabot/topic"}, "user": {"login": "dependabot[bot]"}, "body": "", "labels": []}
     monkeypatch.setattr(github, "get_pull_request_metadata_strict", lambda *_: metadata.append("read") or data.copy())

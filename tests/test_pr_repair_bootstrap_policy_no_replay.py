@@ -38,6 +38,7 @@ from auto_coder.pr_processor import (
 from auto_coder.pr_repair import ExistingPrRepairTarget, build_existing_pr_repair_prompt
 from auto_coder.prompt_loader import render_prompt
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
+from tests.pr_automation_fakes import install_pr_history
 
 SHORT_OBJECTIVE_MARKER = "ISSUE AUTHORING AND REVIEW-RESPONSE POLICY:"
 OBJECTIVE_REQUIREMENTS_MARKER = "OBJECTIVE / REQUIREMENTS CONTRACT POLICY:"
@@ -68,11 +69,12 @@ def cloud_home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _feedback_github_client() -> MagicMock:
+def _feedback_github_client(head="head-1") -> MagicMock:
     """Supply authoritative identity and a complete empty receipt conversation."""
     client = MagicMock()
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
     client.get_pr_comments_strict.return_value = []
+    install_pr_history(client, head)
     return client
 
 
@@ -469,6 +471,7 @@ def test_claude_routine_named_backend_dispatch_then_conflict_repair_omits_replay
         "base": {"ref": "main", "sha": "base-1"},
     }
     pull_request["user"] = {"login": "claude[bot]"}
+    install_pr_history(github, pull_request["head"]["sha"])
 
     with (
         patch("auto_coder.claude_routine_client.get_llm_config", return_value=llm_config),
@@ -709,7 +712,8 @@ def test_second_repair_round_on_a_new_head_still_omits_replayed_policies(tmp_pat
         "base": {"ref": "main"},
     }
     pr_data_round_2 = dict(pr_data_round_1, head={"ref": "codex/issue-2", "sha": "head-round-2"})
-    github_client = _feedback_github_client()
+    current_pr = pr_data_round_1
+    github_client = _feedback_github_client(lambda _repo, _pr: current_pr["head"]["sha"])
     github_client.get_pr_comments.return_value = []
     github_client.get_pull_request_repair_metadata_strict.side_effect = [
         PullRequestRepairMetadata("codex/issue-2", "head-round-1", "main"),
@@ -725,6 +729,7 @@ def test_second_repair_round_on_a_new_head_still_omits_replayed_policies(tmp_pat
         patch("auto_coder.codex_cloud_client.CodexCloudClient.send_followup", return_value=True) as send_followup,
     ):
         _delegate_cloud_review_thread_repair("owner/repo", pr_data_round_1, github_client, (thread_1,))
+        current_pr = pr_data_round_2
         _delegate_cloud_review_thread_repair("owner/repo", pr_data_round_2, github_client, (thread_1, thread_2))
 
     assert send_followup.call_count == 2

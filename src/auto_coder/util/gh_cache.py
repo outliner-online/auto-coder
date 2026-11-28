@@ -3345,6 +3345,58 @@ class GitHubClient:
 
         return _paginate_pr_changed_files(pr_number, _fetch_page)
 
+    def get_pr_automation_history_strict(self, repo_name: str, pr_number: int):
+        """Read stable, uncached PR history for the automation stop boundary.
+
+        GitHub's PR commit endpoint exposes at most 250 commits. The total
+        count remains authoritative above that limit, sufficient to stop an
+        oversized PR, but an incomplete list never permits processing/resume.
+        """
+        from ..pr_automation_guard import PRCommit, PRCommitHistory
+
+        before = self.get_pull_request_metadata_strict(repo_name, pr_number)
+        head = (before.get("head") or {}).get("sha")
+        count = before.get("commits")
+        if not isinstance(head, str) or not head or type(count) is not int or count < 0:
+            raise ValueError("PR head and commit count are unavailable")
+        base = (before.get("base") or {}).get("sha")
+        if not isinstance(base, str) or not base:
+            raise ValueError("PR base identity is unavailable")
+        key = (repo_name.casefold(), pr_number, head, count, base)
+        cache = getattr(self, "_pr_automation_history_cache", None)
+        if isinstance(cache, dict) and key in cache:
+            return cache[key]
+        commits = []
+        for page in range(1, 4):
+            credential = self._credential_for(repo_name, {"pull_requests": "read"})
+            headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+            response = _strict_request("GET", f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/commits", headers=headers, params={"per_page": 100, "page": page}, timeout=30)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError("PR commit page is malformed")
+            for item in payload:
+                if not isinstance(item, dict) or not isinstance(item.get("sha"), str) or not isinstance(item.get("commit"), dict) or not isinstance(item["commit"].get("message"), str):
+                    raise ValueError("PR commit identity or message is malformed")
+                commits.append(PRCommit(item["sha"], item["commit"]["message"]))
+            if len(payload) < 100:
+                break
+        after = self.get_pull_request_metadata_strict(repo_name, pr_number)
+        if ((after.get("head") or {}).get("sha"), after.get("commits"), (after.get("base") or {}).get("sha")) != (head, count, base):
+            raise ValueError("PR history changed during observation")
+        history = PRCommitHistory(head, count, tuple(commits), len(commits) == count)
+        history.validate()
+        if not history.complete and count <= 250:
+            raise ValueError("PR commit history could not be completely enumerated")
+        if history.complete:
+            if not isinstance(cache, dict):
+                cache = {}
+                self._pr_automation_history_cache = cache
+            if len(cache) >= 128:
+                cache.pop(next(iter(cache)), None)
+            cache[key] = history
+        return history
+
     def get_pr_commits(self, repo_name: str, pr_number: int) -> List[Dict[str, Any]]:
         """Get all commits for a pull request."""
         try:

@@ -23,6 +23,7 @@ from auto_coder.pr_local_job_runtime import build_pr_local_job_adapters
 from auto_coder.pr_processor import _start_mergeability_remediation
 from auto_coder.pr_repair_dispatch import RepairDisposition, RepairKind
 from auto_coder.pr_repair_workspace import PRRepairSource, PRRepairWorkspaceProducer
+from tests.pr_automation_fakes import install_pr_history
 
 
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -288,6 +289,7 @@ def test_selected_local_origin_runs_through_runner_and_persists_exact_manifest(t
     }
     github = Mock()
     github.get_pull_request_metadata_strict.return_value = metadata
+    install_pr_history(github, lambda *_args: git(root.parent / "origin.git", "rev-parse", "refs/heads/feature").stdout.strip())
     editor_roots: list[Path] = []
 
     def edit(_prompt: str, workspace: Path) -> str:
@@ -383,6 +385,7 @@ def test_normal_mergeability_remediation_admits_and_runs_in_private_workspace(tm
     }
     github = Mock(token="token")
     github.get_pull_request_metadata_strict.return_value = metadata
+    install_pr_history(github, lambda *_args: git(root.parent / "origin.git", "rev-parse", "refs/heads/feature").stdout.strip())
     api = Mock()
     api.pulls.get.return_value = metadata
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -433,6 +436,7 @@ def test_production_adapter_refreshes_revocable_authority_before_preparation(tmp
     store, claim, metadata, _instance = adapter(tmp_path, root, head_sha, base_sha, lambda _prompt, _root: "ACTION_SUMMARY: unexpected")
     github = Mock()
     github.get_pull_request_metadata_strict.return_value = metadata
+    install_pr_history(github, lambda *_args: git(root.parent / "origin.git", "rev-parse", "refs/heads/feature").stdout.strip())
     config = Mock(ENABLE_MERGEABILITY_REMEDIATION=authority != "disabled")
     allowance = patch("auto_coder.pr_repair_guard.check_pr_repair_exhaustion", return_value=Mock(is_exhausted=True) if authority == "exhausted" else None)
     if authority == "unavailable":
@@ -461,6 +465,7 @@ def test_production_adapter_rechecks_cloud_binding_at_final_entry(tmp_path: Path
     store, claim, metadata, _instance = adapter(tmp_path, root, head_sha, base_sha, edit)
     github = Mock()
     github.get_pull_request_metadata_strict.return_value = metadata
+    install_pr_history(github, lambda *_args: git(root.parent / "origin.git", "rev-parse", "refs/heads/feature").stdout.strip())
     with (
         patch("auto_coder.pr_repair_guard.check_pr_repair_exhaustion", return_value=None),
         patch("auto_coder.cloud_manager.CloudManager.read_bindings_strict", side_effect=({}, {"7": Mock()})),
@@ -497,6 +502,7 @@ def test_production_adapter_rechecks_allowance_at_final_entry(tmp_path: Path, _u
     store, claim, metadata, _instance = adapter(tmp_path, root, head_sha, base_sha, edit)
     github = Mock()
     github.get_pull_request_metadata_strict.return_value = metadata
+    install_pr_history(github, lambda *_args: git(root.parent / "origin.git", "rev-parse", "refs/heads/feature").stdout.strip())
     allowance_effects: tuple[object, object]
     if isinstance(final_allowance, BaseException):
         allowance_effects = (None, final_allowance)

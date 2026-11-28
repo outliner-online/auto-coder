@@ -15,6 +15,7 @@ from auto_coder.local_job_handoff import InvocationOutcome, LocalJobKind, LocalJ
 from auto_coder.local_job_runner import LocalJobExecutionResult
 from auto_coder.pr_repair_dispatch import RepairKind
 from auto_coder.process_identity import ProcessIdentity
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_dashboard_observability import _assert_required_stage_visible, _mounted_detail
 from tests.test_local_pr_repair_engine_entry import _install_real_offer, _pr, _production_scope
 from tests.test_local_pr_repair_job import snapshot
@@ -56,6 +57,7 @@ def test_dead_pr_controller_retains_every_unsettled_job_execution(runtime_root, 
 def pending_repair(runtime_root, request):
     github = MagicMock()
     github.get_pull_request_metadata_strict.side_effect = lambda _repo, number: _pr(number)
+    install_pr_history(github, lambda _repo, number: _pr(number)["head"]["sha"])
     store = LocalJobStore()
     slots = ImplementationSlotRepository("owner/repo", 3)
     owner_kind, repair_kind = request.param

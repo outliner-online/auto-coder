@@ -26,6 +26,7 @@ from auto_coder.pr_processor import _two_tier_gate_inputs
 from auto_coder.pr_review_execution import ReviewExecutionResult
 from auto_coder.util.gh_cache import GitHubClient
 from tests.ci_observation_fakes import _Actions, _Checks
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_strong_audit_producer import _git, _repository
 
 
@@ -88,6 +89,7 @@ class OriginScenario:
         }
         self.issue = {"number": 99, "state": "open", "title": "Contract", "updated_at": "2026-11-01T00:00:00Z", "body": "## Requirements\nREQ-001: Preserve the gate.", "labels": []}
         self.github = GitHubClient("test-token")
+        install_pr_history(self.github, lambda _repo, _number: self.head)
         monkeypatch.setattr(GitHubClient, "_instance", self.github)
         monkeypatch.setattr(self.github, "get_authenticated_controller_identity", lambda _repo=None: ControllerIdentity("auto-coder-bot", account_id=20))
         monkeypatch.setattr(self.github, "_read_issue_resource", lambda _repo, _number, relation="", **kw: ([] if relation != "parent" else None) if relation else dict(self.issue))

@@ -15,6 +15,7 @@ from auto_coder.entity_invalidation import DurableInvalidationQueue, EntityIdent
 from auto_coder.execution_trace import TraceCollector, get_trace_collector
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.util.gh_cache import GitHubClient
+from tests.pr_automation_fakes import install_pr_history
 
 REPO = "owner/repo"
 PR = EntityIdentity(REPO, "pr", 100)
@@ -156,6 +157,7 @@ def test_capacity_deferral_is_not_worker_completion(tmp_path: Path, monkeypatch)
     engine = AutomationEngine(github, AutomationConfig())
     heads = []
     head = ["old"]
+    install_pr_history(github, lambda _repo, _number: head[0])
     monkeypatch.setattr(github, "get_pull_request_metadata_strict", lambda *_: {"number": 100, "state": "open", "head": {"sha": head[0]}, "user": {"login": "dependabot[bot]"}})
 
     def process(_repo, candidate, **_kwargs):
