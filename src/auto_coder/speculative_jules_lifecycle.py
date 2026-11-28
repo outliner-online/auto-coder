@@ -62,6 +62,62 @@ class RetiredJulesReader:
         raise RuntimeError("retired Jules competitions cannot read provider sessions")
 
 
+class UnavailableSpeculativeClassifier:
+    """Retain an explicit unknown decision when history cannot be opened."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def classify(
+        self,
+        repository: str,
+        issue_number: int,
+        pr_repository: str,
+        pr_number: int,
+    ) -> ClassificationResult:
+        return ClassificationResult(
+            ArtifactClassification.UNKNOWN,
+            diagnostics=(self.reason,),
+        )
+
+    def classify_pr(
+        self,
+        repository: str,
+        pr_repository: str,
+        pr_number: int,
+        hinted_issue_numbers: tuple[int, ...] = (),
+        independently_unrelated: bool = False,
+    ) -> tuple[Optional[int], ClassificationResult]:
+        if independently_unrelated:
+            return None, ClassificationResult(
+                ArtifactClassification.LEGACY,
+                mutation_allowed=True,
+            )
+        return None, self.classify(repository, 0, pr_repository, pr_number)
+
+    def selected_pr_number(self, repository: str, issue_number: int, generation_id: str) -> Optional[int]:
+        return None
+
+    def selected_merge_authorized(
+        self,
+        repository: str,
+        issue_number: int,
+        result: ClassificationResult,
+        pr_data: Mapping[str, object],
+        issue_data: Mapping[str, object],
+    ) -> bool:
+        return False
+
+    def selected_ingress_authorized(
+        self,
+        repository: str,
+        issue_number: int,
+        result: ClassificationResult,
+        pr_data: Mapping[str, object],
+    ) -> bool:
+        return False
+
+
 @dataclass(frozen=True)
 class CleanupObligation:
     repository: str
@@ -84,9 +140,11 @@ class LifecycleDecision:
 class SpeculativeCleanupStore:
     """Durable close obligations; retirement is recorded before GitHub mutation."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, initialize: bool = True):
         self.path = path
         self._lock = threading.RLock()
+        if not initialize:
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS cleanup (
@@ -401,16 +459,24 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
             history_marker.touch(exist_ok=True)
         elif not history_marker.exists() and not cleanup_path.exists():
             return None
-        ledger = JulesCompetitionLedger(ledger_path)
-        adapter = JulesCandidateObservationAdapter(
-            ledger,
-            CandidateObservationStore(observation_path),
-            RetiredJulesReader(),
-            github_client,  # type: ignore[arg-type]
-        )
+        try:
+            cleanup_store = SpeculativeCleanupStore(cleanup_path)
+        except (OSError, sqlite3.Error):
+            cleanup_store = SpeculativeCleanupStore(cleanup_path, initialize=False)
+        try:
+            ledger = JulesCompetitionLedger(ledger_path)
+            adapter = JulesCandidateObservationAdapter(
+                ledger,
+                CandidateObservationStore(observation_path),
+                RetiredJulesReader(),
+                github_client,  # type: ignore[arg-type]
+            )
+            classifier: SpeculativeClassifier = RefreshingSpeculativeClassifier(adapter, ledger)
+        except (OSError, sqlite3.Error) as exc:
+            classifier = UnavailableSpeculativeClassifier(f"retired Jules history unavailable: {type(exc).__name__}")
         _lifecycle = SpeculativeJulesLifecycle(
-            RefreshingSpeculativeClassifier(adapter, ledger),
-            SpeculativeCleanupStore(cleanup_path),
+            classifier,
+            cleanup_store,
         )
     return _lifecycle
 
