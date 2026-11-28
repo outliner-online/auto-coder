@@ -104,12 +104,16 @@ def _identify_test_runtime_as_confirmed_fresh(monkeypatch, request):
     verified deployment predicate rather than coupling their unrelated runtime
     roots to a synthetic state directory.
     """
-    if request.node.path.name == "test_speculative_jules_lifecycle.py":
+    if "jules" in request.node.path.name:
         return
-    monkeypatch.setattr(
-        "auto_coder.speculative_jules_lifecycle._has_confirmed_fresh_installation_provenance",
-        lambda: True,
-    )
+    for module in (
+        "auto_coder.speculative_jules_lifecycle",
+        "src.auto_coder.speculative_jules_lifecycle",
+    ):
+        monkeypatch.setattr(
+            f"{module}._has_confirmed_fresh_installation_provenance",
+            lambda: True,
+        )
 
 
 @pytest.fixture(autouse=True)
