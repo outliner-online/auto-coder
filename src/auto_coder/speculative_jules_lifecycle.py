@@ -465,9 +465,18 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
             cleanup_store = SpeculativeCleanupStore(cleanup_path, initialize=False)
         try:
             ledger = JulesCompetitionLedger(ledger_path)
+            try:
+                observations = CandidateObservationStore(observation_path)
+            except (OSError, sqlite3.Error):
+                if not ledger_path.is_file():
+                    raise
+                observations = CandidateObservationStore(
+                    observation_path,
+                    initialize=False,
+                )
             adapter = JulesCandidateObservationAdapter(
                 ledger,
-                CandidateObservationStore(observation_path),
+                observations,
                 RetiredJulesReader(),
                 github_client,  # type: ignore[arg-type]
             )

@@ -190,9 +190,11 @@ def normalize_pull_request_outputs(outputs: object) -> tuple[tuple[PullRequestId
 class CandidateObservationStore:
     """Small durable store for current evidence and retained membership."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, initialize: bool = True):
         self.path = Path(path)
         self._lock = threading.RLock()
+        if not initialize:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript("""
