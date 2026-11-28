@@ -88,9 +88,7 @@ def test_artifact_download_failure_does_not_log_listing_payload(tmp_path):
         if kwargs.get("follow_redirects") is False:
             transport.get.return_value = httpx.Response(403)
         else:
-            transport.get.return_value = httpx.Response(
-                200, json={"artifacts": [{"id": 9, "name": f"e2e-artifacts-{marker}", "expired": False}]}
-            )
+            transport.get.return_value = httpx.Response(200, json={"artifacts": [{"id": 9, "name": f"e2e-artifacts-{marker}", "expired": False}]})
         yield transport
 
     with patch("auto_coder.util.github_action.github_http_client", controlled_http_client):
