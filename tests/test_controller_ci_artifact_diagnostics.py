@@ -76,6 +76,31 @@ def test_artifact_listing_failure_does_not_log_response_payload():
     assert "status=403" in diagnostics
 
 
+def test_artifact_download_failure_does_not_log_listing_payload(tmp_path):
+    marker = "private-artifact-name-marker"
+    console = io.StringIO()
+    log_file = tmp_path / "github.log"
+    setup_logger(stream=console, log_file=str(log_file))
+
+    @contextmanager
+    def controlled_http_client(**kwargs):
+        transport = MagicMock()
+        if kwargs.get("follow_redirects") is False:
+            transport.get.return_value = httpx.Response(403)
+        else:
+            transport.get.return_value = httpx.Response(
+                200, json={"artifacts": [{"id": 9, "name": f"e2e-artifacts-{marker}", "expired": False}]}
+            )
+        yield transport
+
+    with patch("auto_coder.util.github_action.github_http_client", controlled_http_client):
+        assert _get_playwright_artifact_logs("owner/repo", 7, github_client=_controller_client()) == (None, None)
+
+    rendered = console.getvalue() + log_file.read_text()
+    assert "403" in rendered
+    assert marker not in rendered
+
+
 def test_foreign_artifact_exception_does_not_log_signed_url():
     marker = "signed-secret-marker"
     listing = httpx.Response(200, json={"artifacts": [{"id": 9, "name": "e2e-artifacts-basic", "expired": False}]})

@@ -2409,8 +2409,7 @@ def _get_playwright_artifact_logs(repo_name: str, run_id: int, github_client: Op
 
                 for i, artifact in enumerate(target_artifacts):
                     artifact_id = artifact.get("id")
-                    artifact_name = artifact.get("name")
-                    details_str = f"{artifact_name} ({artifact_id})"
+                    details_str = f"artifact {i + 1}"
 
                     download_url = f"{api_base}/repos/{repo_name}/actions/artifacts/{artifact_id}/zip"
                     zip_path = os.path.join(tmp_dir, f"logs_{i}.zip")
