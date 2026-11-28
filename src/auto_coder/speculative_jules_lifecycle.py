@@ -458,24 +458,16 @@ def get_speculative_jules_lifecycle(github_client: Optional[object] = None) -> O
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
         elif not history_marker.exists() and not cleanup_path.exists():
-            _lifecycle = SpeculativeJulesLifecycle(
-                UnavailableSpeculativeClassifier("retired Jules history is unavailable"),
-                SpeculativeCleanupStore(cleanup_path, initialize=False),
-            )
-            return _lifecycle
+            return None
         try:
             cleanup_store = SpeculativeCleanupStore(cleanup_path)
         except (OSError, sqlite3.Error):
             cleanup_store = SpeculativeCleanupStore(cleanup_path, initialize=False)
         try:
             ledger = JulesCompetitionLedger(ledger_path)
-            try:
-                observations = CandidateObservationStore(observation_path)
-            except (OSError, sqlite3.Error):
-                observations = CandidateObservationStore(observation_path, initialize=False)
             adapter = JulesCandidateObservationAdapter(
                 ledger,
-                observations,
+                CandidateObservationStore(observation_path),
                 RetiredJulesReader(),
                 github_client,  # type: ignore[arg-type]
             )
