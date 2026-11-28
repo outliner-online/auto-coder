@@ -523,7 +523,7 @@ def test_ordinary_local_issue_stays_owned_until_its_published_pr_is_validated_an
             "number": 77,
             "state": "open",
             "merged": False,
-            "body": "Closes #1",
+            "body": "<!-- auto-coder:local-llm -->\n\nCloses #1",
             "head": {"ref": record.work_branch, "sha": "published-head"},
             "base": {"ref": "main", "sha": "base-head"},
             "labels": [],
@@ -590,7 +590,7 @@ def test_ordinary_local_issue_stays_owned_until_its_published_pr_is_validated_an
         merge = stack.enter_context(patch("auto_coder.pr_processor._merge_pr", return_value=True))
         collection_label.return_value.__enter__.return_value = True
         label.return_value.__enter__.return_value = True
-        unsafe.side_effect = lambda _client, _repo, candidate, _config: MagicMock(closed=False, metadata_error=None, actions=[], authoritative_pr_data=candidate)
+        unsafe.side_effect = lambda _client, _repo, candidate, _config, **_kwargs: MagicMock(closed=False, metadata_error=None, actions=[], authoritative_pr_data=candidate)
 
         waiting = engine._process_single_candidate_unified(REPO, Candidate("pr", dict(pr_data), 0), config, origin="worker")
         assert waiting.outcome is PRProcessingOutcome.DEFERRED

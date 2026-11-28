@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from auto_coder import merge_operation_adapter
 from auto_coder.automation_config import AutomationConfig, PRProcessingOutcome
 from auto_coder.jules_candidate_observation import ArtifactClassification, ClassificationResult
 from auto_coder.jules_competition_ledger import ObligationKind
@@ -299,7 +300,7 @@ def test_recreated_empty_history_fences_ambiguous_pr_at_production_boundaries(tm
         outbound_api = Mock()
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
             patch(
                 "auto_coder.merge_operation_state.get_merge_operation_store",
                 return_value=MergeOperationStore(db_path=tmp_path / "merge-operations-empty.db"),
@@ -375,7 +376,8 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
     head_ref: str,
     provenance_state: str | None,
 ) -> None:
-    from auto_coder.automation_config import EmptyPRResult
+    from auto_coder.automation_config import Candidate, EmptyPRResult
+    from auto_coder.automation_engine import AutomationEngine
     from auto_coder.jules_candidate_observation import CandidateObservationStore
     from auto_coder.jules_competition_ledger import CandidateBindingObservation, JulesCompetitionLedger, SpeculativeGenerationBundle
     from auto_coder.merge_operation_state import MergeOperationStore
@@ -439,9 +441,24 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
         ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
         assert ingress.outcome is PRProcessingOutcome.DEFERRED
         assert ingress.actions_taken == ["Speculative Jules unknown artifact fenced: retired Jules history is unavailable before migration"]
+        # Collection and reserved-dispatch shortcuts must not close an empty
+        # candidate or mark a draft ready before reaching the same origin gate.
+        engine_pr = {**pr, "changed_files": 0, "draft": True, "node_id": "PR_unknown"}
+        github.get_open_prs_json.return_value = [dict(engine_pr)]
+        github.get_open_issues_json.return_value = []
+        github.get_open_issues.return_value = []
+        engine = AutomationEngine(github, config=AutomationConfig())
+        assert not engine._get_candidates("owner/repo")
+        for dispatch in (engine._process_single_candidate_unified, engine._process_single_candidate_reserved):
+            result = dispatch("owner/repo", Candidate("pr", dict(engine_pr), 1), engine.config)
+            assert result.outcome is PRProcessingOutcome.DEFERRED
+            assert "unknown artifact fenced" in result.actions[0]
+        github.close_pr.assert_not_called()
+        github.graphql_query.assert_not_called()
+        github.update_pr_body.assert_not_called()
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
             patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "merge.db")),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
@@ -470,12 +487,39 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
                 dict(unrelated),
             ).actions_taken == ["ordinary"]
         ordinary.assert_called_once()
+        # The same collection contains an unrelated local publication and an
+        # unknown historical candidate. Only the positive publication reaches
+        # ordinary policy; the still-open candidate keeps its Issue withheld.
+        github.get_open_prs_json.return_value = [dict(engine_pr), dict(unrelated)]
+        github.get_open_issues_json.return_value = [
+            {
+                "number": 7,
+                "title": "Existing implementation",
+                "body": "## Requirements\nREQ-001: Preserve existing behavior.",
+                "labels": [],
+                "created_at": "2020-01-01T00:00:00Z",
+                "linked_pr_numbers": [59],
+                "has_linked_prs": True,
+            }
+        ]
+        with patch(
+            "auto_coder.pr_processor._close_empty_pr",
+            return_value=EmptyPRResult(closed=True, actions=["ordinary"]),
+        ) as ordinary:
+            assert not engine._get_candidates("owner/repo")
+            assert [call.args[2]["number"] for call in ordinary.call_args_list] == [60]
+            for dispatch in (engine._process_single_candidate_unified, engine._process_single_candidate_reserved):
+                result = dispatch("owner/repo", Candidate("pr", dict(unrelated), 1), engine.config)
+                assert result.success, result
+                assert result.actions == ["ordinary"]
+            assert [call.args[2]["number"] for call in ordinary.call_args_list] == [60, 60, 60]
         metadata_api.pulls.get.return_value = dict(unrelated)
         outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged"}
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-            patch(
-                "auto_coder.merge_operation_adapter.get_ghapi_client",
+            patch.object(
+                merge_operation_adapter,
+                "get_ghapi_client",
                 return_value=outbound_api,
             ),
             patch(
@@ -559,7 +603,7 @@ def test_observation_open_failure_preserves_ledger_binding_at_both_boundaries(tm
         outbound.pulls.merge.return_value = {"merged": True, "sha": "merged"}
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=api),
-            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound),
             patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "merge-control.db")),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
@@ -572,7 +616,7 @@ def test_observation_open_failure_preserves_ledger_binding_at_both_boundaries(tm
         configure_speculative_jules_lifecycle(None)
 
 
-def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
+def test_fresh_runtime_receipt_does_not_authorize_existing_repository_prs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -598,7 +642,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     )
     configure_speculative_jules_lifecycle(None)
     try:
-        assert get_speculative_jules_lifecycle(Mock()) is None
+        assert get_speculative_jules_lifecycle(Mock()) is not None
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
@@ -607,10 +651,8 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
         pr = {
             "number": 64,
             "state": "open",
-            # A genuinely fresh ordinary PR must not need a synthetic
-            # publication marker merely to avoid activating the retired-Jules
-            # fence. This keeps the production regression sensitive to a
-            # global no-history UNKNOWN fallback.
+            # A new worker can encounter an existing repository's old PRs.
+            # Matching installation identity does not establish their origin.
             "body": "",
             "changed_files": 0,
             "user": {"login": "octocat", "type": "User"},
@@ -625,6 +667,25 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
                 "sha": "base",
             },
         }
+        ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
+        assert ingress.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in ingress.actions_taken[0]
+        metadata_api = Mock()
+        metadata_api.pulls.get.return_value = dict(pr)
+        outbound_api = Mock()
+        with (
+            patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
+            patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=MergeOperationStore(db_path=tmp_path / "unknown-merge.db")),
+            patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
+            patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
+        ):
+            assert not _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
+        assert record_stage.call_args.args[4]["classification"] == "UNKNOWN"
+        outbound_api.pulls.merge.assert_not_called()
+
+        # The ordinary local publisher supplies this marker in production.
+        pr["body"] = "<!-- auto-coder:local-llm -->"
         with patch(
             "auto_coder.pr_processor._close_empty_pr",
             return_value=EmptyPRResult(closed=True, actions=["ordinary"]),
@@ -632,7 +693,7 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
             ingress = process_pull_request(github, AutomationConfig(), "owner/repo", dict(pr))
         assert ingress.actions_taken == ["ordinary"]
         ordinary_effect.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is None
+        assert get_speculative_jules_lifecycle(github) is not None
 
         metadata_api = Mock()
         metadata_api.pulls.get.return_value = dict(pr)
@@ -643,8 +704,9 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
                 "auto_coder.util.gh_cache.get_ghapi_client",
                 return_value=metadata_api,
             ),
-            patch(
-                "auto_coder.merge_operation_adapter.get_ghapi_client",
+            patch.object(
+                merge_operation_adapter,
+                "get_ghapi_client",
                 return_value=outbound_api,
             ),
             patch(
@@ -661,9 +723,9 @@ def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
         ):
             assert _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
         outbound_api.pulls.merge.assert_called_once()
-        assert get_speculative_jules_lifecycle(github) is None
+        assert get_speculative_jules_lifecycle(github) is not None
 
-        # Both production boundaries must preserve the fresh-install distinction.
+        # Neither production boundary manufactures missing historical state.
         assert not (tmp_path / ".auto-coder" / "jules_competition.db").exists()
         assert not (tmp_path / ".auto-coder" / "jules_competition.db.history-present").exists()
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
@@ -711,7 +773,7 @@ def test_surviving_cleanup_association_fences_pr_after_primary_history_loss(
         assert merge.classification is ArtifactClassification.RETIRED
         assert not merge.allow_ordinary_processing
 
-        with patch("auto_coder.merge_operation_adapter.get_ghapi_client") as outbound:
+        with patch.object(merge_operation_adapter, "get_ghapi_client") as outbound:
             assert _merge_pr("owner/repo", 59, {}, AutomationConfig(), github_client=github) is False
         outbound.return_value.pulls.merge.assert_not_called()
         assert len(cleanup.pending()) == 1
@@ -788,8 +850,9 @@ def test_unreadable_history_at_startup_preserves_proven_origin_and_unknown(
                 "auto_coder.util.gh_cache.get_ghapi_client",
                 return_value=metadata_api,
             ),
-            patch(
-                "auto_coder.merge_operation_adapter.get_ghapi_client",
+            patch.object(
+                merge_operation_adapter,
+                "get_ghapi_client",
                 return_value=outbound_api,
             ),
             patch(
@@ -896,7 +959,7 @@ def test_local_origin_survives_malformed_unrelated_cloud_bindings(
     assert pr["_verified_non_jules_pr_origin"] == "local:local-feature"
 
 
-@pytest.mark.parametrize("origin", ["claude", "local"])
+@pytest.mark.parametrize("origin", ["claude", "local", "controller"])
 @pytest.mark.parametrize("unavailable_source", ["ledger", "observations"])
 def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_boundaries(
     tmp_path: Path,
@@ -907,6 +970,7 @@ def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_
     """REQ-005/006: production derives non-Jules proof at both PR gates."""
     from auto_coder.automation_config import EmptyPRResult
     from auto_coder.cloud_manager import CloudManager, CloudTaskBinding
+    from auto_coder.github_controller_auth import ControllerIdentity
     from auto_coder.jules_candidate_observation import CandidateObservationStore, JulesCandidateObservationAdapter
     from auto_coder.jules_competition_ledger import JulesCompetitionLedger
     from auto_coder.merge_operation_state import MergeOperationStore
@@ -937,6 +1001,8 @@ def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_
         manager.cloud_file_path.write_text("malformed,cloud\nrow,value\n", encoding="utf-8")
         body += "\n<!-- auto-coder:local -->"
         user = {"login": "octocat", "type": "User"}
+    if origin == "controller":
+        user = {"login": "auto-coder[bot]", "type": "Bot", "id": 101}
     pr = {
         "number": pr_number,
         "state": "open",
@@ -953,6 +1019,7 @@ def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_
             raise OSError("offline")
 
     github = Mock(token="token")
+    github.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101)
     ledger = UnavailableLedger() if unavailable_source == "ledger" else JulesCompetitionLedger(tmp_path / f"ledger-{origin}.db")
     observations = CandidateObservationStore(tmp_path / f"observations-{origin}.db")
     if unavailable_source == "observations":
@@ -992,7 +1059,7 @@ def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_
         outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged-sha"}
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
             patch(
                 "auto_coder.merge_operation_state.get_merge_operation_store",
                 return_value=MergeOperationStore(db_path=tmp_path / f"merge-{origin}.db"),
@@ -1023,7 +1090,7 @@ def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_
         metadata_api.pulls.get.return_value = ambiguous
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
             patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
@@ -1116,7 +1183,7 @@ def test_unavailable_ledger_allows_durably_attributed_codex_pr_at_production_bou
         outbound_api.pulls.merge.return_value = {"merged": True, "sha": "merged-sha"}
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
             patch(
                 "auto_coder.merge_operation_state.get_merge_operation_store",
                 return_value=MergeOperationStore(db_path=tmp_path / "merge-operations-codex.db"),
@@ -1361,7 +1428,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         merge_store = MergeOperationStore(db_path=tmp_path / "merge-operations.db")
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
             patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=merge_store),
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
@@ -1395,7 +1462,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         assert process_pull_request(github, AutomationConfig(), repository, strict_prs[42]).outcome is PRProcessingOutcome.DEFERRED
         with (
             patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-            patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+            patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
             patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=merge_store),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
         ):
@@ -1430,7 +1497,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
             assert process_pull_request(github, AutomationConfig(), repository, strict_prs[42]).outcome is PRProcessingOutcome.DEFERRED
             with (
                 patch("auto_coder.util.gh_cache.get_ghapi_client", return_value=metadata_api),
-                patch("auto_coder.merge_operation_adapter.get_ghapi_client", return_value=outbound_api),
+                patch.object(merge_operation_adapter, "get_ghapi_client", return_value=outbound_api),
                 patch("auto_coder.merge_operation_state.get_merge_operation_store", return_value=merge_store),
                 patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
             ):

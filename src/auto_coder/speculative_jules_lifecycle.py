@@ -7,7 +7,6 @@ state is never refreshed from Jules and never authorizes cleanup mutations.
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import threading
@@ -438,27 +437,6 @@ class RefreshingSpeculativeClassifier:
 
 _lifecycle: Optional[SpeculativeJulesLifecycle] = None
 
-_INSTALLATION_PROVENANCE_SCHEMA = "retired-jules-installation-provenance-v1"
-
-
-def retired_jules_installation_provenance_path() -> Path:
-    """Return the deployment-owned provenance receipt path."""
-    root = Path(os.environ.get("AUTO_CODER_RUNTIME_ROOT", Path.home() / ".auto-coder"))
-    return root / "state" / "retired_jules_installation_provenance.json"
-
-
-def _has_confirmed_fresh_installation_provenance() -> bool:
-    """Accept only a complete deployment receipt created after Jules retirement."""
-    current_installation_id = os.environ.get("AUTO_CODER_INSTALLATION_ID", "").strip()
-    if not current_installation_id:
-        return False
-    path = retired_jules_installation_provenance_path()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return False
-    return isinstance(payload, dict) and payload.get("schema") == _INSTALLATION_PROVENANCE_SCHEMA and payload.get("state") == "confirmed-fresh" and payload.get("installation_id") == current_installation_id
-
 
 def configure_speculative_jules_lifecycle(lifecycle: Optional[SpeculativeJulesLifecycle]) -> None:
     """Install the process lifecycle authority (also used by isolated tests)."""
@@ -490,14 +468,9 @@ def get_speculative_jules_lifecycle(
             history_marker.parent.mkdir(parents=True, exist_ok=True)
             history_marker.touch(exist_ok=True)
         elif not history_marker.exists() and not cleanup_path.exists():
-            if _has_confirmed_fresh_installation_provenance():
-                return None
-            # No surviving history cannot distinguish a fresh installation from
-            # lost pre-migration history. A request must not bypass the fence
-            # merely because the evidence identifying it as Jules was lost too.
-            # A present but malformed, foreign, or conflicting deployment receipt
-            # is itself contradictory evidence and also remains UNKNOWN.  Only a
-            # matching confirmed-fresh receipt bypasses this request-scoped fence.
+            # A fresh worker can process an existing repository with retired
+            # candidates. Installation identity is therefore never PR-origin
+            # evidence. Retain UNKNOWN until this PR has independent provenance.
             return SpeculativeJulesLifecycle(
                 UnavailableSpeculativeClassifier("retired Jules history is unavailable before migration"),
                 SpeculativeCleanupStore(cleanup_path, initialize=False),

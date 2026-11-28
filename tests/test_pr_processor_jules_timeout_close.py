@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 from auto_coder.ci_observation import CIConclusion, CIObservationSnapshot, ObservationAvailability, ObservationRequest, ObservationSubject, WorkflowExecutionIdentity, WorkflowObservation
 from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsStatusResult, is_ci_observation_recovered
-from src.auto_coder.automation_config import AutomationConfig, StaleJulesPRResult
+from src.auto_coder.automation_config import AutomationConfig, PRProcessingOutcome, StaleJulesPRResult
 from src.auto_coder.issue_stage_routing import IssueStageRoutingStore, implementation_classification
 from src.auto_coder.pr_processor import _close_stale_jules_pr, _handle_pr_merge, _should_skip_waiting_for_jules, process_pull_request
 from src.auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
@@ -333,7 +333,7 @@ class TestStaleJulesPRWithAutoCoderLabel:
 
     @patch("src.auto_coder.pr_processor.increment_attempt")
     @patch("src.auto_coder.pr_processor._check_github_actions_status")
-    def test_get_candidates_closes_labelled_stale_jules_pr(self, mock_check_status, mock_increment):
+    def test_get_candidates_fences_labelled_stale_jules_pr(self, mock_check_status, mock_increment):
         from src.auto_coder.automation_engine import AutomationEngine
 
         github_client = Mock()
@@ -353,13 +353,13 @@ class TestStaleJulesPRWithAutoCoderLabel:
         with patch("src.auto_coder.util.github_action.preload_github_actions_status"):
             candidates = engine._get_candidates("owner/repo")
 
-        github_client.close_pr.assert_called_once()
+        github_client.close_pr.assert_not_called()
         mock_increment.assert_not_called()
         assert all(candidate.data.get("number") != 4643 for candidate in candidates)
 
     @patch("src.auto_coder.pr_processor.increment_attempt")
     @patch("src.auto_coder.pr_processor._check_github_actions_status")
-    def test_single_candidate_closes_labelled_stale_jules_pr(self, mock_check_status, mock_increment):
+    def test_single_candidate_fences_labelled_stale_jules_pr(self, mock_check_status, mock_increment):
         from src.auto_coder.automation_config import Candidate
         from src.auto_coder.automation_engine import AutomationEngine
 
@@ -378,11 +378,11 @@ class TestStaleJulesPRWithAutoCoderLabel:
         with patch("src.auto_coder.pr_processor.process_pull_request") as mock_process:
             result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
-        github_client.close_pr.assert_called_once()
+        github_client.close_pr.assert_not_called()
         mock_increment.assert_not_called()
         mock_process.assert_not_called()
-        assert result.success is True
-        assert any("Closed stale Jules PR #4643" in action for action in result.actions)
+        assert result.outcome is PRProcessingOutcome.DEFERRED
+        assert any("unknown artifact fenced" in action for action in result.actions)
 
 
 class TestUnlockAndRetryLinkedIssue:
@@ -515,8 +515,9 @@ class TestUnlockAndRetryLinkedIssue:
         ):
             result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
-        assert result.success
-        github.close_pr.assert_called_once()
+        assert result.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in result.actions[0]
+        github.close_pr.assert_not_called()
         github.add_comment_to_issue.assert_not_called()
         increment.assert_not_called()
         dispatch.assert_not_called()
@@ -787,7 +788,7 @@ class TestGetCandidatesResumesOnRecoveredCI:
 
     @patch("auto_coder.jules_client.JulesClient")
     @patch("auto_coder.util.github_action._check_github_actions_status")
-    def test_recovered_ci_pr_is_not_excluded_at_collection(self, mock_check_status, mock_jules_client_class):
+    def test_recovered_ci_does_not_authorize_unknown_jules_collection(self, mock_check_status, mock_jules_client_class):
         from auto_coder.automation_engine import AutomationEngine
 
         mock_check_status.side_effect = authoritative_ci_status(success=True, ids=[1], namespace="auto_coder")
@@ -812,7 +813,9 @@ class TestGetCandidatesResumesOnRecoveredCI:
         with patch("auto_coder.util.github_action.preload_github_actions_status"):
             candidates = engine._get_candidates("owner/repo")
 
-        assert any(candidate.data.get("number") == pr_data["number"] for candidate in candidates)
+        assert not candidates
+        github_client.close_pr.assert_not_called()
+        mock_jules_client.get_session.assert_not_called()
 
 
 class TestSingleTargetTypeDetection:

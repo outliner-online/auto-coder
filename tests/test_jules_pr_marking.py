@@ -9,8 +9,8 @@ from auto_coder.util.gh_cache import GitHubClient
 class TestJulesPRMarking:
 
     @patch("auto_coder.automation_engine.get_ghapi_client")
-    def test_mark_jules_pr_as_ready_with_fallback(self, mock_get_ghapi, mock_github_client):
-        """Test marking Jules PR as ready, including fallback fetch and GraphQL call."""
+    def test_unknown_jules_pr_is_not_marked_ready_or_fetched_for_mutation(self, mock_get_ghapi, mock_github_client):
+        """Missing history must stop before draft-ready fallback or mutation."""
 
         # Setup mocks
         config = AutomationConfig()
@@ -52,24 +52,15 @@ class TestJulesPRMarking:
 
             candidates = engine._get_candidates("owner/repo")
 
-        # Assertions
-
-        # 1. Verify Fallback Fetch was called
-        mock_ghapi_instance.pulls.get.assert_called_once_with("owner", "repo", 123)
-
-        # 2. Verify GraphQL mutation was called on GitHubClient (Fix verification)
-        mock_github_client.graphql_query.assert_called_once()
-        args, kwargs = mock_github_client.graphql_query.call_args
-        assert "mutation" in kwargs["query"]
-        assert kwargs["variables"] == {"id": "PR_NODE_ID_123"}
-
-        # 3. Verify PR data was updated in place
-        assert pr_data["node_id"] == "PR_NODE_ID_123"
-        assert pr_data["draft"] is False
+        assert not candidates
+        mock_ghapi_instance.pulls.get.assert_not_called()
+        mock_github_client.graphql_query.assert_not_called()
+        assert "node_id" not in pr_data
+        assert pr_data["draft"] is True
 
     @patch("auto_coder.automation_engine.get_ghapi_client")
-    def test_mark_jules_pr_as_ready_no_fallback(self, mock_get_ghapi, mock_github_client):
-        """Test marking Jules PR as ready when node_id is already present."""
+    def test_unknown_jules_pr_keeps_draft_even_with_node_id(self, mock_get_ghapi, mock_github_client):
+        """A complete GitHub identity is not historical selection authority."""
 
         config = AutomationConfig()
         engine = AutomationEngine(mock_github_client, config=config)
@@ -85,7 +76,5 @@ class TestJulesPRMarking:
         # 1. Verify Fallback Fetch was NOT called
         mock_get_ghapi.return_value.pulls.get.assert_not_called()
 
-        # 2. Verify GraphQL mutation called with existing ID
-        mock_github_client.graphql_query.assert_called_once()
-        args, kwargs = mock_github_client.graphql_query.call_args
-        assert kwargs["variables"] == {"id": "EXISTING_NODE_ID"}
+        mock_github_client.graphql_query.assert_not_called()
+        assert pr_data["draft"] is True

@@ -205,7 +205,7 @@ from .reviewer_session_registry import ReviewerSessionRegistry
 from .runtime_locks import LockAcquisitionTimeout, ensure_lock_directory, file_lock, lock_path
 from .security_utils import redact_string
 from .shutdown_context import new_work_allowed
-from .speculative_jules_lifecycle import get_speculative_jules_lifecycle
+from .speculative_jules_lifecycle import ArtifactClassification, LifecycleDecision, get_speculative_jules_lifecycle
 from .stale_jules_recovery import stale_jules_recovery_context
 from .test_log_utils import extract_all_failed_tests, extract_first_failed_test, extract_important_errors
 from .test_result import TestResult
@@ -3554,7 +3554,7 @@ def _get_review_thread_gate_state(
         return ReviewThreadGateState(lookup_error=str(e))
 
 
-def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> None:
+def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any], github_client: Optional[Any] = None) -> None:
     """Reestablish durable non-Jules ownership without provider effects."""
     # Never accept a marker supplied by a caller or a stale metadata object.
     # Only the durable resolver below may establish unrelated ownership.
@@ -3611,13 +3611,59 @@ def _record_non_jules_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) ->
     head_ref = str(head.get("ref") or pr_data.get("headRefName") or pr_data.get("head_branch") or "")
     if author == "dependabot[bot]" and head_ref.startswith("dependabot/"):
         pr_data["_verified_non_jules_pr_origin"] = f"dependabot:{head_ref}"
-    elif _is_local_llm_pr(pr_data) and any(marker in str(pr_data.get("body") or "") for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
-        pr_data["_verified_non_jules_pr_origin"] = f"local:{head_ref or 'publication-marker'}"
+    elif any(marker in str(pr_data.get("body") or "") for marker in ("<!-- auto-coder:local-llm -->", "<!-- auto-coder:local -->")):
+        controller_identity = None
+        if author.endswith("[bot]") and github_client is not None:
+            try:
+                controller_identity = github_client.get_authenticated_controller_identity(repo_name)
+            except Exception as exc:
+                logger.warning(f"Controller identity unavailable for local PR #{pr_data.get('number')}: {type(exc).__name__}")
+        if _is_local_llm_pr(pr_data, controller_identity):
+            pr_data["_verified_non_jules_pr_origin"] = f"local:{head_ref or 'publication-marker'}"
 
 
 def _record_codex_pr_attribution(repo_name: str, pr_data: Dict[str, Any]) -> None:
     """Compatibility entry point for callers that request Codex attribution."""
     _record_non_jules_pr_attribution(repo_name, pr_data)
+
+
+def evaluate_retired_jules_ingress(github_client: Any, repo_name: str, pr_data: Dict[str, Any], *, refresh_metadata: bool = True) -> LifecycleDecision:
+    """Apply the same read-only origin fence before every PR ingress effect."""
+    # Reduced queue/list snapshots are not enough to prove publication origin.
+    # Reuse the existing uncached safety read before any policy may mutate the PR.
+    head = pr_data.get("head")
+    reduced_snapshot = "body" not in pr_data or not isinstance(head, dict) or not isinstance(head.get("ref"), str)
+    if (refresh_metadata or reduced_snapshot) and callable(getattr(type(github_client), "get_pull_request_metadata_strict", None)):
+        refreshed, metadata_error = _resolve_pr_safety_metadata(github_client, repo_name, pr_data)
+        if metadata_error or refreshed.get("number") != pr_data.get("number"):
+            reason = metadata_error or "GitHub returned a different PR identity"
+            decision = LifecycleDecision(ArtifactClassification.UNKNOWN, False, False, f"authoritative PR origin lookup failed: {reason}")
+            _record_pr_stage(
+                pr_data["number"],
+                "pr.speculative-jules-authority",
+                f"pr#{pr_data['number']} speculative Jules authority",
+                Outcome.DEFERRED,
+                {"classification": decision.classification.value, "reason": decision.reason},
+            )
+            return decision
+        if refreshed is not pr_data:
+            pr_data.clear()
+            pr_data.update(refreshed)
+    _record_non_jules_pr_attribution(repo_name, pr_data, github_client)
+    lifecycle = get_speculative_jules_lifecycle(github_client)
+    if lifecycle is None:
+        return LifecycleDecision()
+    issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
+    decision = lifecycle.evaluate_pr(repo_name, pr_data["number"], tuple(issue_numbers), pr_data)
+    if not decision.allow_ordinary_processing:
+        _record_pr_stage(
+            pr_data["number"],
+            "pr.speculative-jules-authority",
+            f"pr#{pr_data['number']} speculative Jules authority",
+            Outcome.DEFERRED,
+            {"classification": decision.classification.value, "cleanup_pending": decision.cleanup_pending},
+        )
+    return decision
 
 
 def process_pull_request(
@@ -3670,34 +3716,13 @@ def _process_pull_request_impl(
 
         pr_number = pr_data["number"]
 
-        # Resolve durable non-Jules ownership before the historical lifecycle
-        # fence. This is a read-only attribution lookup; it cannot perform a
-        # provider or GitHub mutation.
-        _record_non_jules_pr_attribution(repo_name, pr_data)
-
-        # Competition authority is checked before branch recovery, empty/stale
-        # cleanup, labels, CI, repair, fallback, merge, or provider continuation.
-        # ``--force`` therefore cannot turn a loser or an uncertain artifact into
-        # ordinary work (Issue #2073, REQ-001/REQ-004).
-        speculative = get_speculative_jules_lifecycle(
-            github_client,
-            possible_retired_ownership=_is_jules_pr(pr_data),
-        )
-        if speculative is not None:
-            issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
-            decision = speculative.evaluate_pr(repo_name, pr_number, tuple(issue_numbers), pr_data)
-            if not decision.allow_ordinary_processing:
-                processed_pr.priority = "cleanup" if decision.cleanup_pending else "defer"
-                processed_pr.outcome = PRProcessingOutcome.DEFERRED
-                processed_pr.actions_taken = [f"Speculative Jules {decision.classification.value.lower()} artifact fenced: {decision.reason}"]
-                _record_pr_stage(
-                    pr_number,
-                    "pr.speculative-jules-authority",
-                    f"pr#{pr_number} speculative Jules authority",
-                    Outcome.DEFERRED,
-                    {"classification": decision.classification.value, "cleanup_pending": decision.cleanup_pending},
-                )
-                return processed_pr
+        # All public ingress origins use the same pre-effect authority.
+        decision = evaluate_retired_jules_ingress(github_client, repo_name, pr_data)
+        if not decision.allow_ordinary_processing:
+            processed_pr.priority = "cleanup" if decision.cleanup_pending else "defer"
+            processed_pr.outcome = PRProcessingOutcome.DEFERRED
+            processed_pr.actions_taken = [f"Speculative Jules {decision.classification.value.lower()} artifact fenced: {decision.reason}"]
+            return processed_pr
 
         try:
             from .durable_repair_allowance import reconcile_unfulfilled_grant_reevaluations
@@ -3709,7 +3734,7 @@ def _process_pull_request_impl(
         # Resolve the execution origin before any diff, CI, merge, or checkout
         # behavior. ``work`` is Codex Cloud's shared/transient branch identity,
         # not a safe identity for an independently managed task.
-        unsafe_branch_result = _reject_unsafe_codex_cloud_pr(github_client, repo_name, pr_data, config)
+        unsafe_branch_result = _reject_unsafe_codex_cloud_pr(github_client, repo_name, pr_data, config, refresh_metadata=False)
         if unsafe_branch_result.metadata_error:
             processed_pr.actions_taken = list(unsafe_branch_result.actions)
             processed_pr.priority = "defer"
@@ -3718,7 +3743,7 @@ def _process_pull_request_impl(
             return processed_pr
         pr_data = unsafe_branch_result.authoritative_pr_data or pr_data
         processed_pr.pr_data = pr_data
-        _record_non_jules_pr_attribution(repo_name, pr_data)
+        _record_non_jules_pr_attribution(repo_name, pr_data, github_client)
         if unsafe_branch_result.closed:
             processed_pr.actions_taken = unsafe_branch_result.actions
             processed_pr.priority = "close"
@@ -4497,6 +4522,8 @@ def _reject_unsafe_codex_cloud_pr(
     repo_name: str,
     pr_data: Dict[str, Any],
     config: AutomationConfig,
+    *,
+    refresh_metadata: bool = True,
 ) -> UnsafeCodexCloudPRResult:
     """Close a Codex Cloud PR published from the shared remote ``work`` branch.
 
@@ -4507,7 +4534,7 @@ def _reject_unsafe_codex_cloud_pr(
     existing retry path.
     """
     result = UnsafeCodexCloudPRResult()
-    authoritative_pr_data, metadata_error = _resolve_pr_safety_metadata(github_client, repo_name, pr_data)
+    authoritative_pr_data, metadata_error = _resolve_pr_safety_metadata(github_client, repo_name, pr_data, refresh=refresh_metadata)
     result.authoritative_pr_data = authoritative_pr_data
     if metadata_error:
         result.metadata_error = metadata_error
@@ -9921,6 +9948,8 @@ def _resolve_pr_safety_metadata(
     github_client: Any,
     repo_name: str,
     pr_data: Dict[str, Any],
+    *,
+    refresh: bool = True,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """Return metadata sufficient for the Codex Cloud branch safety decision.
 
@@ -9931,7 +9960,7 @@ def _resolve_pr_safety_metadata(
     """
     client = github_client or GitHubClient.get_instance()
     getter = getattr(type(client), "get_pull_request_metadata_strict", None)
-    if callable(getter):
+    if refresh and callable(getter):
         try:
             refreshed = client.get_pull_request_metadata_strict(repo_name, int(pr_data["number"]))
         except Exception as exc:
@@ -13326,7 +13355,7 @@ def _merge_pr(
         # The strict, freshly-read PR must independently reestablish non-Jules
         # ownership before unavailable or recreated Jules history can be
         # treated as unrelated at the final mutation boundary.
-        _record_non_jules_pr_attribution(repo_name, pr_info)
+        _record_non_jules_pr_attribution(repo_name, pr_info, client)
 
         # The ingress classification is not merge authority: selection or
         # invalidation may change while CI/review work is running.  Re-read the

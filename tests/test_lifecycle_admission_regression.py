@@ -115,7 +115,7 @@ def test_unowned_draft_without_backend_defers_before_reservation(tmp_path, monke
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path))
     config = AutomationConfig()
     github = MagicMock()
-    pr = {"number": 5940, "title": "Grid cleanup", "body": NARRATIVE, "draft": True, "state": "open", "user": {"login": "human"}, "head": {"ref": "grid-cleanup", "sha": "a" * 40}, "labels": []}
+    pr = {"number": 5940, "title": "Grid cleanup", "body": "<!-- auto-coder:local-llm -->\n\n" + NARRATIVE, "draft": True, "state": "open", "user": {"login": "human"}, "head": {"ref": "grid-cleanup", "sha": "a" * 40}, "labels": []}
     github.get_pull_request_metadata_strict.return_value = pr
     github.get_issue.return_value = {"number": 5459, "state": "closed"}
     engine = AutomationEngine(github, config=config)
@@ -202,7 +202,7 @@ def test_draft_preflight_fails_closed_for_unavailable_evidence(evidence):
 def test_retained_and_manual_drafts_reach_ordinary_processing(tmp_path, retained, manual):
     config = AutomationConfig()
     github = MagicMock()
-    pr = {"number": 5940, "title": "Grid", "body": NARRATIVE, "draft": True, "head": {"ref": "grid-cleanup"}, "labels": []}
+    pr = {"number": 5940, "title": "Grid", "body": "<!-- auto-coder:local-llm -->\n\n" + NARRATIVE, "draft": True, "head": {"ref": "grid-cleanup"}, "labels": []}
     slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
     owner = ImplementationOwner("pr", 5940)
     if retained:
@@ -388,7 +388,7 @@ def test_reconciliation_after_active_sample_cannot_recreate_unsupported_draft(tm
     github = MagicMock()
     for name in ("get_issue", "get_issue_details", "get_pull_request", "get_pr_details", "get_connected_prs"):
         getattr(github, name).side_effect = getattr(state, name)
-    pr = {"number": 5940, "title": "New draft", "body": "", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "labels": []}
+    pr = {"number": 5940, "title": "New draft", "body": "<!-- auto-coder:local-llm -->", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "labels": []}
     github.get_pull_request_metadata_strict.return_value = pr
     engine = AutomationEngine(github, config=config)
     engine.implementation_slots = slots
@@ -463,7 +463,7 @@ def test_capacity_retry_rechecks_fresh_draft_admission(tmp_path):
         return issue
 
     github.get_issue_details.side_effect = issue_details
-    pr = {"number": 5940, "title": "Draft", "body": "", "state": "open", "draft": True, "head": {"ref": "issue-6000-grid", "sha": "a" * 40}, "labels": []}
+    pr = {"number": 5940, "title": "Draft", "body": "<!-- auto-coder:local-llm -->", "state": "open", "draft": True, "head": {"ref": "issue-6000-grid", "sha": "a" * 40}, "labels": []}
     github.get_pull_request_metadata_strict.side_effect = lambda *_: {**pr, "draft": reconciled}
     engine = AutomationEngine(github, config=config)
     engine.implementation_slots = slots
@@ -501,7 +501,7 @@ def test_retained_active_execution_survives_draft_admission_guard(tmp_path):
     config = AutomationConfig()
     engine = AutomationEngine(github, config=config)
     engine.implementation_slots = slots
-    pr = {"number": 5940, "title": "Draft", "body": "", "draft": True, "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "labels": []}
+    pr = {"number": 5940, "title": "Draft", "body": "<!-- auto-coder:local-llm -->", "draft": True, "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "labels": []}
     with patch.object(engine, "refresh_review_adjudications"), patch("auto_coder.pr_processor.draft_pr_implementation_blocker") as policy, patch.object(engine, "_process_single_candidate_reserved") as dispatch:
         result = engine._process_single_candidate_unified("owner/repo", Candidate(type="pr", data=pr, priority=0), config)
     assert result.target_outcome is ExplicitTargetOutcome.DEFERRED
@@ -568,12 +568,13 @@ def _joined_draft_review_repair(tmp_path, *, other_binding, retained=False, chan
     from auto_coder.cloud_manager import CloudManager
     from auto_coder.execution_trace import Outcome
     from auto_coder.pr_processor import _adversarial_repair_outcome, _delegate_cloud_review_thread_repair, _resolve_pr_issue_numbers
+    from auto_coder.speculative_jules_lifecycle import LifecycleDecision
     from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
 
     manager = CloudManager("owner/repo")
-    assert manager.add_session(5459, "task-A", provider="jules")
+    assert manager.add_session(5459, "task-A", provider="claude-routine")
     if other_binding:
-        assert manager.add_session(5460, "task-B", provider="jules")
+        assert manager.add_session(5460, "task-B", provider="claude-routine")
     calls = []
 
     class Transport:
@@ -581,6 +582,8 @@ def _joined_draft_review_repair(tmp_path, *, other_binding, retained=False, chan
             calls.append((task_id, prompt))
             return True
 
+    # Isolate draft repair association from the separately tested origin fence.
+    # A narrative Issue mention must not replace the retained lifecycle provider.
     pr = {"number": 5940, "title": "Grid", "body": "Related to #5460", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "base": {"ref": "main", "sha": "base"}, "labels": [], "user": {"login": "maintainer"}}
     github = MagicMock()
     github.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
@@ -601,7 +604,7 @@ def _joined_draft_review_repair(tmp_path, *, other_binding, retained=False, chan
 
     def dispatch(*_args, **_kwargs):
         if change == "binding":
-            assert manager.add_session(5459, "task-C", provider="jules")
+            assert manager.add_session(5459, "task-C", provider="claude-routine")
         elif change == "head":
             github.get_pull_request_metadata_strict.return_value = {**pr, "head": {**pr["head"], "sha": "b" * 40}}
         elif change == "unavailable":
@@ -609,7 +612,13 @@ def _joined_draft_review_repair(tmp_path, *, other_binding, retained=False, chan
         repairs.append(_delegate_cloud_review_thread_repair("owner/repo", pr, github_client=github, unresolved_threads=(thread,)))
         return CandidateProcessingResult(type="pr", number=5940, success=repairs[-1].delivered, target_outcome=ExplicitTargetOutcome.SUCCESS if repairs[-1].delivered else ExplicitTargetOutcome.DEFERRED)
 
-    with patch.object(engine, "refresh_review_adjudications"), patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory, patch.object(engine, "_process_single_candidate_reserved", side_effect=dispatch):
+    with (
+        patch("auto_coder.pr_processor.evaluate_retired_jules_ingress", return_value=LifecycleDecision()),
+        patch.object(engine, "refresh_review_adjudications"),
+        patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""),
+        patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory,
+        patch.object(engine, "_process_single_candidate_reserved", side_effect=dispatch),
+    ):
         factory.return_value.get_client_for_provider.return_value = Transport()
         result = engine._process_single_candidate_unified("owner/repo", Candidate(type="pr", data=pr, priority=0), config)
     assert _resolve_pr_issue_numbers("owner/repo", pr, github) == [5460]
@@ -635,7 +644,7 @@ def test_strict_draft_preflight_does_not_hold_slot_store_lock(tmp_path):
 
     slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
     github = MagicMock()
-    pr = {"number": 5940, "title": "Grid", "body": "", "draft": True, "state": "open", "head": {"ref": "grid-cleanup", "sha": "a" * 40}, "labels": []}
+    pr = {"number": 5940, "title": "Grid", "body": "<!-- auto-coder:local-llm -->", "draft": True, "state": "open", "head": {"ref": "grid-cleanup", "sha": "a" * 40}, "labels": []}
     entered = threading.Event()
     continue_read = threading.Event()
 

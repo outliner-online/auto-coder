@@ -66,7 +66,7 @@ def _pr_data(
     return {
         "number": number,
         "title": f"Feature PR #{number}",
-        "body": f"Fixes #{linked_issue}" if linked_issue else "",
+        "body": "<!-- auto-coder:local-llm -->\n" + (f"Fixes #{linked_issue}" if linked_issue else ""),
         "head": {"ref": ref, "sha": head_sha},
         "labels": labels or [],
         "mergeable": mergeable,

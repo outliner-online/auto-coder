@@ -3585,7 +3585,7 @@ class TestAtomicMergeSHAPrecondition:
         from auto_coder.pr_processor import _merge_pr
 
         mock_api = MagicMock()
-        mock_api.pulls.get.return_value = {"number": 100, "user": {"login": "developer"}}
+        mock_api.pulls.get.return_value = {"number": 100, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "developer"}}
         mock_api.pulls.merge.return_value = {"merged": True, "sha": "mergedsha"}
         mock_get_ghapi.return_value = mock_api
         mock_get_ghapi_adapter.return_value = mock_api
@@ -3640,7 +3640,7 @@ class TestAtomicMergeSHAPrecondition:
         from auto_coder.util.github_request_outcome import DeliveryCertainty, GitHubApiOutcome, GitHubRequestContext, GitHubRequestError, GitHubRequestOutcome, GitHubResponseMetadata, RequestProvenance
 
         mock_api = MagicMock()
-        mock_api.pulls.get.return_value = {"number": 100, "user": {"login": "developer"}, "mergeable": True}
+        mock_api.pulls.get.return_value = {"number": 100, "body": "<!-- auto-coder:local-llm -->", "user": {"login": "developer"}, "mergeable": True}
         # GitHub returns HTTP 409 Conflict when head branch was modified: a
         # synchronous merge PUT 409 means the expected head no longer
         # matches, so the operation is superseded rather than confirmed
@@ -3672,6 +3672,7 @@ class TestAtomicMergeSHAPrecondition:
             )
 
         assert result is False
+        mock_api.pulls.merge.assert_called_once()
         mock_close_issues.assert_not_called()
         mock_archive.assert_not_called()
 

@@ -57,7 +57,7 @@ class TestPrAdmissionGateVisible:
     def test_author_disallowed_pr_records_skip_without_dispatch(self):
         config = _no_prs_allowed_config()
         engine = AutomationEngine(MagicMock(), config)
-        candidate = Candidate(type="pr", data={"number": 5001, "title": "T", "body": "B", "labels": [], "head": {"sha": "a" * 40}}, priority=0)
+        candidate = Candidate(type="pr", data={"number": 5001, "title": "T", "body": "<!-- auto-coder:local-llm -->\nB", "labels": [], "head": {"sha": "a" * 40}}, priority=0)
 
         result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
@@ -284,7 +284,7 @@ class TestRecorderFailureIsNonInterfering:
 
         config = _no_prs_allowed_config()
         engine = AutomationEngine(MagicMock(), config)
-        candidate = Candidate(type="pr", data={"number": 5401, "title": "T", "body": "B", "labels": [], "head": {"sha": "a" * 40}}, priority=0)
+        candidate = Candidate(type="pr", data={"number": 5401, "title": "T", "body": "<!-- auto-coder:local-llm -->\nB", "labels": [], "head": {"sha": "a" * 40}}, priority=0)
 
         result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 

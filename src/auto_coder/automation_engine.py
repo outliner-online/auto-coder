@@ -6068,6 +6068,7 @@ class AutomationEngine:
             _is_dependabot_pr,
             _is_jules_pr,
             _reject_unsafe_codex_cloud_pr,
+            evaluate_retired_jules_ingress,
             is_current_head_adversarial_review_blocked,
         )
         from .pr_progress_policy import ProgressPhase, ProgressRoute, PRProgressInputs, PRProgressScope, select_pr_progress
@@ -6094,17 +6095,24 @@ class AutomationEngine:
             pr_data_list.sort(key=lambda x: x.get("created_at", ""))
 
             safe_pr_data_list = []
+            withheld_open_pr_numbers: set[int] = set()
             for pr_data in pr_data_list:
                 pr_number = pr_data.get("number")
                 if not isinstance(pr_number, int):
                     logger.warning(f"Skipping PR missing/invalid number in data: {pr_data}")
                     continue
 
+                authority = evaluate_retired_jules_ingress(self.github, repo_name, pr_data)
+                if not authority.allow_ordinary_processing:
+                    logger.info("PR #{} withheld at retired Jules ingress: {} ({})", pr_number, authority.classification.value, authority.reason)
+                    withheld_open_pr_numbers.add(pr_number)
+                    continue
+
                 # Branch identity is a safety invariant, not a normal PR
                 # processing decision. Reject unsafe Codex Cloud heads before
                 # even preloading CI, or author/label/CI gates can defer them
                 # indefinitely.
-                unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, pr_data, self.config)
+                unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, pr_data, self.config, refresh_metadata=False)
                 if unsafe_branch_result.closed or unsafe_branch_result.metadata_error:
                     for action in unsafe_branch_result.actions:
                         logger.info(f"PR #{pr_number}: {action}")
@@ -6424,7 +6432,9 @@ class AutomationEngine:
 
             # Numbers of the PRs that are currently open, used to tell a live PR apart
             # from a closed one still listed in an issue timeline
-            open_pr_numbers = {pr.get("number") for pr in pr_data_list if isinstance(pr.get("number"), int)}
+            # A withheld PR remains open and still owns its linked Issue.
+            # Excluding it from processing must not launch a replacement attempt.
+            open_pr_numbers = withheld_open_pr_numbers | {pr.get("number") for pr in pr_data_list if isinstance(pr.get("number"), int)}
 
             for issue_data in all_issues:
                 number = issue_data.get("number")
@@ -6877,6 +6887,16 @@ class AutomationEngine:
         if not isinstance(item_number, int) or isinstance(item_number, bool):
             result.error = f"Item number is missing for {candidate.type} #{candidate.data.get('number', 'N/A')}"
             return result
+        if candidate.type == "pr":
+            from .pr_processor import evaluate_retired_jules_ingress
+
+            authority = evaluate_retired_jules_ingress(self.github, repo_name, candidate.data, refresh_metadata=False)
+            if not authority.allow_ordinary_processing:
+                result.outcome = PRProcessingOutcome.DEFERRED
+                result.target_outcome = ExplicitTargetOutcome.DEFERRED
+                result.target_reason = authority.reason
+                result.actions = [f"Speculative Jules {authority.classification.value.lower()} artifact fenced: {authority.reason}"]
+                return result
         if candidate.type == "pr":
             try:
                 self.refresh_review_adjudications(repo_name, candidate.data)
@@ -8428,9 +8448,17 @@ class AutomationEngine:
                 previous_binding = CloudManager(repo_name).read_bindings_strict().get(str(item_number))
 
             if item_type == "pr":
-                from .pr_processor import _reject_unsafe_codex_cloud_pr
+                from .pr_processor import _reject_unsafe_codex_cloud_pr, evaluate_retired_jules_ingress
 
-                unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, candidate.data, config)
+                authority = evaluate_retired_jules_ingress(self.github, repo_name, candidate.data)
+                if not authority.allow_ordinary_processing:
+                    result.outcome = PRProcessingOutcome.DEFERRED
+                    result.target_outcome = ExplicitTargetOutcome.DEFERRED
+                    result.target_reason = authority.reason
+                    result.actions = [f"Speculative Jules {authority.classification.value.lower()} artifact fenced: {authority.reason}"]
+                    return result
+
+                unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, candidate.data, config, refresh_metadata=False)
                 if unsafe_branch_result.closed:
                     result.actions = list(unsafe_branch_result.actions)
                     result.success = True

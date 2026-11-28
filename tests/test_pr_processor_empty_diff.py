@@ -354,8 +354,9 @@ class TestAutomationEngineEmptyPRRequeue:
         }
         with patch.object(engine, "_process_unlocked_issue") as dispatch:
             result = engine._process_single_candidate_unified("owner/repo", Candidate(type="pr", data=pr, priority=1), engine.config, jules_mode=True)
-        assert result.success is True
-        github.close_pr.assert_called_once()
+        assert result.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in result.actions[0]
+        github.close_pr.assert_not_called()
         github.reopen_issue.assert_not_called()
         increment.assert_not_called()
         dispatch.assert_not_called()
@@ -370,6 +371,8 @@ class TestAutomationEngineEmptyPRRequeue:
         engine = AutomationEngine(mock_github, config=config)
 
         empty_pr = _empty_pr_data_with_commits()
+        empty_pr.update(body="<!-- auto-coder:local-llm -->\n\nCloses #4800", user={"login": "local-maintainer"})
+        empty_pr["head"]["ref"] = "issue-4800"
         engine.github.get_open_prs_json.return_value = [empty_pr]
         engine.github.get_issue.return_value = {"state": "open", "number": 4800}
         engine.github.get_open_issues.return_value = []
@@ -397,6 +400,8 @@ class TestAutomationEngineEmptyPRRequeue:
         engine = AutomationEngine(mock_github, config=config)
 
         empty_pr = _empty_pr_data_with_commits()
+        empty_pr.update(body="<!-- auto-coder:local-llm -->\n\nCloses #4800", user={"login": "local-maintainer"})
+        empty_pr["head"]["ref"] = "issue-4800"
         candidate = Candidate(type="pr", data=empty_pr, priority=1)
         engine.github.get_issue.return_value = {"state": "open", "number": 4800}
 
@@ -430,8 +435,9 @@ class TestAutomationEngineEmptyPRRequeue:
         with patch.object(engine, "_process_unlocked_issue") as process_unlocked:
             result = engine._process_single_candidate_unified("owner/repo", candidate, engine.config, jules_mode=True)
 
-        assert result.success is True, result.error
-        github.close_pr.assert_called_once()
+        assert result.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in result.actions[0]
+        github.close_pr.assert_not_called()
         github.reopen_issue.assert_not_called()
         mock_increment.assert_not_called()
         process_unlocked.assert_not_called()
@@ -446,7 +452,7 @@ class TestAutomationEngineEmptyPRRequeue:
         supported_pr = {
             "number": 4977,
             "title": "Supported provider output",
-            "body": "Closes #42",
+            "body": "<!-- auto-coder:local-llm -->\n\nCloses #42",
             "state": "open",
             "user": {"login": "supported-maintainer", "id": 123},
             "head": {"ref": "provider-output", "sha": "def456"},
@@ -474,6 +480,7 @@ class TestAutomationEngineEmptyPRRequeue:
     ):
         """A session-only association cannot authorize work at daemon PR intake."""
         github = Mock()
+        github.search_issues_strict.return_value = []
         engine = AutomationEngine(github, config=AutomationConfig())
         cloud_manager_class.return_value.get_issue_by_session.return_value = 42
         historical_pr = {
@@ -498,9 +505,9 @@ class TestAutomationEngineEmptyPRRequeue:
                 jules_mode=True,
             )
 
-        assert result.success is True
-        github.close_pr.assert_called_once()
-        cloud_manager_class.assert_not_called()
+        assert result.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in result.actions[0]
+        github.close_pr.assert_not_called()
         mock_increment.assert_not_called()
         process_unlocked.assert_not_called()
 
@@ -545,8 +552,8 @@ class TestAutomationEngineEmptyPRRequeue:
                 jules_mode=True,
             )
 
-        assert result.success is True
-        github.close_pr.assert_called_once()
-        cloud_manager_class.assert_not_called()
+        assert result.outcome is PRProcessingOutcome.DEFERRED
+        assert "unknown artifact fenced" in result.actions[0]
+        github.close_pr.assert_not_called()
         mock_increment.assert_not_called()
         process_unlocked.assert_not_called()

@@ -15,7 +15,7 @@ def _pr(number: int, *, labels: list[str] | None = None, mergeable: bool = True)
     return {
         "number": number,
         "title": f"PR {number}",
-        "body": "",
+        "body": "<!-- auto-coder:local-llm -->",
         "head": {"ref": f"pr-{number}", "sha": "a" * 40},
         "labels": labels or [],
         "mergeable": mergeable,

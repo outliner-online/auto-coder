@@ -11,8 +11,8 @@ class TestAutomationEngineCandidates:
     """Test cases for _get_candidates method in AutomationEngine."""
 
     @patch("auto_coder.pr_processor._is_jules_pr")
-    def test_get_candidates_jules_draft_pr(self, mock_is_jules_pr, mock_github_client):
-        """Test that Jules draft PRs are marked as ready."""
+    def test_get_candidates_unknown_jules_draft_pr_is_fenced(self, mock_is_jules_pr, mock_github_client):
+        """An unknown historical candidate must remain draft and unprocessed."""
         # Setup
         config = AutomationConfig()
         engine = AutomationEngine(mock_github_client, config=config)
@@ -45,25 +45,14 @@ class TestAutomationEngineCandidates:
             # Execute
             candidates = engine._get_candidates(repo_name)
 
-        # Assert
-        # Verify graphql_query was called to mark ready
-        mock_github_client.graphql_query.assert_called_once()
-        args = mock_github_client.graphql_query.call_args[1]
-        assert "markPullRequestReadyForReview" in args["query"]
-        assert args["variables"]["id"] == "PR_123"
-        assert args["repo_name"] == repo_name
-        assert args["required_permissions"] == {"pull_requests": "write"}
-
-        # Verify pr_data was updated
-        assert pr_data["draft"] is False
-
-        # Verify candidate was created
-        assert len(candidates) == 1
-        assert candidates[0].data["number"] == 123
+        mock_github_client.graphql_query.assert_not_called()
+        assert pr_data["draft"] is True
+        assert candidates == []
+        mock_close_stale.assert_not_called()
 
     @patch("auto_coder.pr_processor._is_jules_pr")
-    def test_get_candidates_jules_ready_pr(self, mock_is_jules_pr, mock_github_client):
-        """Test that Jules ready PRs are NOT marked as ready again."""
+    def test_get_candidates_unknown_jules_ready_pr_is_fenced(self, mock_is_jules_pr, mock_github_client):
+        """Ready status does not prove historical selection or unrelated origin."""
         # Setup
         config = AutomationConfig()
         engine = AutomationEngine(mock_github_client, config=config)
@@ -101,7 +90,8 @@ class TestAutomationEngineCandidates:
         mock_github_client.graphql_query.assert_not_called()
 
         # Verify candidate was created
-        assert len(candidates) == 1
+        assert candidates == []
+        mock_close_stale.assert_not_called()
 
     @patch("auto_coder.pr_processor._is_jules_pr")
     def test_get_candidates_non_jules_draft_pr(self, mock_is_jules_pr, mock_github_client):
@@ -112,7 +102,7 @@ class TestAutomationEngineCandidates:
         repo_name = "owner/repo"
 
         # Mock PR data
-        pr_data = {"number": 123, "title": "Regular PR", "draft": True, "head": {"ref": "feature-branch", "sha": "a" * 40}, "labels": [], "body": "Description", "created_at": "2023-01-01T00:00:00Z"}
+        pr_data = {"number": 123, "title": "Regular PR", "draft": True, "head": {"ref": "feature-branch", "sha": "a" * 40}, "labels": [], "body": "<!-- auto-coder:local-llm -->\n\nDescription", "created_at": "2023-01-01T00:00:00Z"}
 
         # Mock get_open_prs_json to return the PR data
         mock_github_client.get_open_prs_json.return_value = [pr_data]

@@ -6,12 +6,15 @@ import pytest
 
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.automation_engine import AutomationEngine
+from auto_coder.cloud_run import CloudRun, CloudRunRepository
 from auto_coder.pr_processor import _handle_pr_merge, _process_pr_for_fixes, _process_pr_for_merge, process_pull_request
 from auto_coder.util.gh_cache import GitHubClient
 
 
 @pytest.fixture
 def config() -> AutomationConfig:
+    # The task URL in codex_pr belongs to an actual accepted publication.
+    CloudRunRepository("owner/repo").save(CloudRun("owner/repo", 161, 0, "codex-cloud", task_id="task_e_reissue161", backend_name="codex-cloud", submission_outcome="accepted", launch_identity="launch-reissue161"))
     return AutomationConfig()
 
 
@@ -28,7 +31,7 @@ def codex_pr(*, branch: str = "work", changed_files: int = 3) -> dict:
         "title": "Fix issue #161",
         "body": "Closes #161\n\nhttps://chatgpt.com/codex/tasks/task_e_reissue161",
         "user": {"login": "chatgpt-codex-connector[bot]"},
-        "head": {"ref": branch, "sha": "abc123"},
+        "head": {"ref": branch, "sha": "abc123", "repo": {"full_name": "owner/repo"}},
         "base": {"ref": "main", "sha": "base123"},
         "changed_files": changed_files,
         "state": "open",
@@ -86,7 +89,8 @@ def test_task_specific_codex_branch_and_non_codex_work_branch_are_not_rejected(
     github_client: MagicMock,
 ) -> None:
     local_pr = codex_pr()
-    local_pr["body"] = "Closes #161"
+    local_pr["number"] = 163
+    local_pr["body"] = "<!-- auto-coder:local-llm -->\n\nCloses #161"
     local_pr["user"] = {"login": "developer"}
 
     for pr_data in (codex_pr(branch="issue-161-parser-fix"), local_pr):
@@ -209,7 +213,7 @@ def test_reduced_metadata_lookup_failure_fails_closed(
         result = process_pull_request(FailingMetadataClient(), config, "owner/repo", {"number": 162})
 
     assert result.outcome.value == "deferred"
-    assert result.actions_taken == ["Skipping PR #162: authoritative branch safety could not be established (metadata unavailable)"]
+    assert result.actions_taken == ["Speculative Jules unknown artifact fenced: authoritative PR origin lookup failed: metadata unavailable"]
     empty_check.assert_not_called()
     adversarial.assert_not_called()
 

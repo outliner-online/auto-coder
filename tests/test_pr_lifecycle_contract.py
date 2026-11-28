@@ -133,7 +133,8 @@ def test_public_processing_preserves_typed_repair_evidence(tmp_path, monkeypatch
     pr_data = {
         "number": PR_NUMBER,
         "title": "Typed repair",
-        "body": "Closes #2501",
+        "body": "<!-- auto-coder:local-llm -->\n\nCloses #2501",
+        "user": {"login": "local-maintainer"},
         "labels": [],
         "head": {"ref": "feature", "sha": H1},
     }
@@ -1153,7 +1154,7 @@ def test_public_processing_preserves_cloud_ci_executor_result(
         stack.enter_context(
             patch(
                 "auto_coder.pr_processor._record_non_jules_pr_attribution",
-                side_effect=lambda _repo, data: data.__setitem__(
+                side_effect=lambda _repo, data, _client=None: data.__setitem__(
                     "_verified_non_jules_pr_origin",
                     "codex-cloud:task_result_owner",
                 ),
@@ -1208,6 +1209,8 @@ def test_public_processing_preserves_cloud_ci_executor_result(
 
 def test_controller_reentry_carries_cloud_repair_to_new_head_and_final_merge(tmp_path, monkeypatch):
     """REQ-004/005: discovery, worker handoff, durable ownership and H2 merge stay joined."""
+    from auto_coder.cloud_run import CloudRun, CloudRunRepository
+
     monkeypatch.setenv("AUTO_CODER_INVALIDATION_DB", str(tmp_path / "invalidations.sqlite3"))
     pr_data = {
         "number": PR_NUMBER,
@@ -1215,11 +1218,25 @@ def test_controller_reentry_carries_cloud_repair_to_new_head_and_final_merge(tmp
         "body": "Closes #2501\nhttps://chatgpt.com/codex/tasks/task_joined_lifecycle",
         "labels": [],
         "user": {"login": "chatgpt-codex-connector[bot]"},
-        "head": {"ref": "issue-2501", "sha": H1},
+        "head": {"repo": {"full_name": REPOSITORY}, "ref": "issue-2501", "sha": H1},
         "base": {"ref": "main", "sha": "base-1"},
         "created_at": "2026-01-01T00:00:00Z",
         "mergeable": True,
     }
+    CloudRunRepository(REPOSITORY).save(
+        CloudRun(
+            REPOSITORY,
+            2501,
+            0,
+            "codex-cloud",
+            task_id="task_joined_lifecycle",
+            backend_name="codex-cloud",
+            submission_outcome="accepted",
+            launch_identity="joined-lifecycle-launch",
+            publication_head_repository=REPOSITORY,
+            publication_head_ref="issue-2501",
+        )
+    )
     github = MagicMock(token="controlled-token")
     github.get_open_prs_json.side_effect = lambda _repo: [dict(pr_data, head=dict(pr_data["head"]))]
     github.get_open_issues_json.return_value = []
@@ -1296,7 +1313,7 @@ def test_controller_reentry_carries_cloud_repair_to_new_head_and_final_merge(tmp
         stack.enter_context(patch.object(slots, "reconcile"))
         collection_label.return_value.__enter__.return_value = True
         worker_label.return_value.__enter__.return_value = True
-        unsafe.side_effect = lambda _client, _repo, candidate, _config: SimpleNamespace(closed=False, metadata_error=None, actions=[], authoritative_pr_data=candidate)
+        unsafe.side_effect = lambda _client, _repo, candidate, _config, **_kwargs: SimpleNamespace(closed=False, metadata_error=None, actions=[], authoritative_pr_data=candidate)
         first = next(candidate for candidate in engine._get_candidates(REPOSITORY) if candidate.type == "pr")
         first_result = engine._process_single_candidate_unified(REPOSITORY, first, config)
         reopened = ImplementationSlotRepository(REPOSITORY, 1, slots_path)

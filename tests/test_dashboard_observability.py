@@ -551,7 +551,7 @@ def _run_admission_to_view(mock_ui, item_type: str, item_number: int) -> None:
         config.PR_ALLOWLIST = []
     candidate = Candidate(
         type=item_type,
-        data={"number": item_number, "title": "Denied", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior.", "labels": [], "head": {"sha": "a" * 40}},
+        data={"number": item_number, "title": "Denied", "body": "## Requirements\nREQ-001: Preserve the tested dispatch behavior." + ("\n<!-- auto-coder:local -->" if item_type == "pr" else ""), "labels": [], "head": {"sha": "a" * 40}},
         priority=0,
     )
 
@@ -1436,7 +1436,13 @@ def test_claude_pr_slot_admission_reaches_detail_view(mock_ui, tmp_path, known_s
     if active_execution:
         assert slots.start_execution(owner) is not None
     session = "session_recorded" if known_session else "session_unknown"
-    pr = {"number": 2027, "title": "Dashboard", "body": f"https://claude.ai/code/{session}", "user": {"id": 1, "login": "developer"}, "labels": []}
+    from auto_coder.cloud_manager import CloudManager, CloudTaskBinding
+
+    # Publication provenance is independent of an implementation-slot match.
+    # A related-Issue reference provides origin context, not lifecycle ownership.
+    publication_issue = 1993 if known_session else 2993
+    CloudManager("owner/repo").ensure_binding(publication_issue, CloudTaskBinding("claude-routine", session, "claude-routine"))
+    pr = {"number": 2027, "title": "Dashboard", "body": f"Related to #{publication_issue}\nhttps://claude.ai/code/{session}", "user": {"id": 1, "login": "developer"}, "labels": []}
     with patch.object(engine, "_process_single_candidate_reserved", return_value=CandidateProcessingResult("pr", 2027, "Dashboard", True, ["processing reached"])) as dispatch:
         result = engine._process_single_candidate_unified("owner/repo", Candidate("pr", pr, 0), config)
     admitted = known_session and not active_execution

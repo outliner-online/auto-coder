@@ -96,27 +96,6 @@ def _clear_sensitive_env(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _identify_test_runtime_as_confirmed_fresh(monkeypatch, request):
-    """Keep unrelated tests on an explicitly fresh installation boundary.
-
-    Tests for the retired lifecycle exercise the real deployment receipt. Other
-    tests often replace ``HOME`` after fixture setup, so patch the already
-    verified deployment predicate rather than coupling their unrelated runtime
-    roots to a synthetic state directory.
-    """
-    if "jules" in request.node.path.name:
-        return
-    for module in (
-        "auto_coder.speculative_jules_lifecycle",
-        "src.auto_coder.speculative_jules_lifecycle",
-    ):
-        monkeypatch.setattr(
-            f"{module}._has_confirmed_fresh_installation_provenance",
-            lambda: True,
-        )
-
-
-@pytest.fixture(autouse=True)
 def _stub_reviewer_app_identity(monkeypatch):
     """Stub the dedicated adversarial-reviewer App identity for tests.
 
