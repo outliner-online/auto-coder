@@ -9,6 +9,7 @@ from auto_coder.automation_engine import AutomationEngine
 from auto_coder.cloud_run import CloudRun, CloudRunRepository
 from auto_coder.pr_processor import _handle_pr_merge, _process_pr_for_fixes, _process_pr_for_merge, process_pull_request
 from auto_coder.util.gh_cache import GitHubClient
+from tests.pr_automation_fakes import install_pr_history
 
 
 @pytest.fixture
@@ -21,6 +22,7 @@ def config() -> AutomationConfig:
 @pytest.fixture
 def github_client() -> MagicMock:
     client = MagicMock()
+    install_pr_history(client, "abc123")
     client.get_issue.return_value = {"state": "open"}
     return client
 
@@ -182,6 +184,7 @@ def test_reduced_metadata_is_strictly_refreshed_before_processing(
             return codex_pr()
 
     client = ReducedMetadataClient()
+    install_pr_history(client, "abc123")
     reduced_pr = {"number": 162, "title": "issue-like cached representation"}
 
     with (
@@ -206,11 +209,13 @@ def test_reduced_metadata_lookup_failure_fails_closed(
         def get_pull_request_metadata_strict(self, repo_name: str, pr_number: int) -> dict:
             raise RuntimeError("metadata unavailable")
 
+    client = FailingMetadataClient()
+    install_pr_history(client, "abc123")
     with (
         patch("auto_coder.pr_processor._close_empty_pr") as empty_check,
         patch("auto_coder.pr_processor.run_adversarial_validation") as adversarial,
     ):
-        result = process_pull_request(FailingMetadataClient(), config, "owner/repo", {"number": 162})
+        result = process_pull_request(client, config, "owner/repo", {"number": 162})
 
     assert result.outcome.value == "deferred"
     assert result.actions_taken == ["Speculative Jules unknown artifact fenced: authoritative PR origin lookup failed: metadata unavailable"]
@@ -222,6 +227,7 @@ def test_cached_task_branch_is_rejected_when_live_head_is_work(
     config: AutomationConfig,
 ) -> None:
     client = GitHubClient(token="test")
+    install_pr_history(client, "abc123")
     cached = codex_pr(branch="issue-161-stale")
     client.get_pull_request_metadata_strict = MagicMock(return_value=codex_pr(branch="work"))
     client.close_pr = MagicMock()
@@ -248,6 +254,7 @@ def test_connector_authored_work_pr_without_task_url_stops_at_lower_boundary(
 ) -> None:
     """Authoritative connector identity alone establishes Codex Cloud origin."""
     client = GitHubClient(token="test")
+    install_pr_history(client, "abc123")
     authoritative = codex_pr()
     authoritative["body"] = "Closes #161"
     client.get_pull_request_metadata_strict = MagicMock(return_value=authoritative)
@@ -281,6 +288,7 @@ def test_candidate_collection_preserves_live_task_branch_when_cache_says_work(
     config: AutomationConfig,
 ) -> None:
     client = GitHubClient(token="test")
+    install_pr_history(client, "abc123")
     cached = codex_pr(branch="work")
     cached.update({"created_at": "2026-01-01T00:00:00Z", "labels": [], "mergeable": True})
     live = {**cached, "head": {**cached["head"], "ref": "issue-161-fixed"}}
@@ -308,6 +316,7 @@ def test_production_wrappers_reject_before_label_or_progress(
     wrapper: str,
 ) -> None:
     client = GitHubClient(token="test")
+    install_pr_history(client, "abc123")
     client.get_pull_request_metadata_strict = MagicMock(return_value=codex_pr())
     client.close_pr = MagicMock()
     client.get_issue = MagicMock(return_value={"state": "open"})

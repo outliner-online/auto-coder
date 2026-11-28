@@ -21,6 +21,7 @@ from auto_coder.invocation_admission import InvocationAdmissionGate
 from auto_coder.local_job_handoff import LocalJobKind, LocalJobState, LocalJobStore
 from auto_coder.local_job_runner import LocalJobRunner
 from auto_coder.local_pr_repair_recovery import LOCAL_PR_REPAIR_FINALIZATION_EFFECT, LocalPRRepairFinalizationHandler, rediscover_pr_repair_finalizations
+from auto_coder.pr_automation_guard import PRCommit, PRCommitHistory
 from auto_coder.pr_local_job_runtime import build_pr_local_job_adapters
 from auto_coder.pr_processor import ClaimedReviewThreadGateState
 from auto_coder.pr_repair_finalizer import PRRepairJobFinalizer, PRRepairPublicationDisposition, PRRepairTargetObservation
@@ -81,6 +82,18 @@ def _remote_observer(remote: Path, base: str):  # type: ignore[no-untyped-def]
         return PRRepairTargetObservation(repository, number, "owner/repo", "feature", head, "owner/repo", "main", base, True, False, True)
 
     return observe
+
+
+def _install_remote_history(client: Mock, remote: Path, base: str) -> None:
+    """Observe the actual remote history before the durable editor can enter."""
+
+    def observe(repository: str, number: int) -> PRCommitHistory:
+        assert (repository, number) == ("owner/repo", 7)
+        head = git(remote, "rev-parse", "refs/heads/feature")
+        commits = tuple(PRCommit(sha, git(remote, "show", "-s", "--format=%B", sha)) for sha in git(remote, "rev-list", "--reverse", f"{base}..{head}").splitlines())
+        return PRCommitHistory(head, len(commits), commits)
+
+    client.get_pr_automation_history_strict.side_effect = observe
 
 
 def test_ci_public_origin_runs_claim_artifact_publication_and_fresh_head_gate(tmp_path: Path, _use_real_commands) -> None:
@@ -148,6 +161,7 @@ def test_conflict_public_origin_runs_real_merge_artifact_and_exact_h2_publicatio
     }
     github = Mock(token="token")
     github.get_pull_request_metadata_strict.return_value = metadata_value
+    _install_remote_history(github, remote, base)
     api = Mock()
     api.pulls.get.return_value = metadata_value
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -237,6 +251,7 @@ def test_conflict_terminal_failure_recovery_retires_exact_execution(tmp_path: Pa
     }
     github = Mock(token="token")
     github.get_pull_request_metadata_strict.return_value = metadata_value
+    _install_remote_history(github, remote, base)
     api = Mock()
     api.pulls.get.return_value = metadata_value
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

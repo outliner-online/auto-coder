@@ -133,3 +133,9 @@ Codex CLI provider transport failures are classified from structured diagnostic
 events (with a conservative text fallback). Exhausted reconnects defer the
 current target to normal scheduling without consuming an implementation attempt,
 while preserving the provider status and endpoint diagnostic for operators.
+
+Abnormal PR histories add the distinct `blocked` processing outcome. A first
+Revert or exhausted commit budget is an external-intervention state, not a
+retryable repair or successful PR effect. Its durable worker evaluation is
+acknowledged with an explicit blocked diagnostic and no timed repair retry.
+See [PR automation intervention stops](pr-automation-intervention-stop.md).

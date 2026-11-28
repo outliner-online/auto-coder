@@ -38,6 +38,7 @@ from .cli_commands_mcp import mcp_group
 from .cli_commands_mcp_pdb import mcp_pdb_group
 from .cli_commands_pending_work import pending_work_group
 from .cli_commands_pr_repair import pr_repair_group
+from .cli_commands_pr_safety import pr_safety_group
 from .cli_commands_review import review_group
 from .cli_commands_usage import usage_amount
 from .cli_commands_utils import auth_status, get_actions_logs, migrate_branches
@@ -126,7 +127,7 @@ def main(ctx: click.Context, force: bool) -> None:
         invoked_cmd = ctx.invoked_subcommand if hasattr(ctx, "invoked_subcommand") else None
 
         # Skip lock check for read-only commands
-        management_commands = ["config", "auth-status", "unlock", "get-actions-logs", "mcp-pdb", "management", "health", "usage-amount", "deployment", "pending-work", "pr-repair", "review"]
+        management_commands = ["config", "auth-status", "unlock", "get-actions-logs", "mcp-pdb", "management", "health", "usage-amount", "deployment", "pending-work", "pr-repair", "pr-safety", "review"]
         is_unlock = invoked_cmd == "unlock" or "unlock" in sys.argv
 
         if not (invoked_cmd in management_commands or has_help_flag or is_unlock):
@@ -198,6 +199,7 @@ main.add_command(mcp_pdb_group)
 main.add_command(management_group)
 main.add_command(pending_work_group)
 main.add_command(pr_repair_group)
+main.add_command(pr_safety_group)
 main.add_command(review_group)
 
 # Register top-level utility commands

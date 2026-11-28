@@ -237,6 +237,25 @@ def mock_github_client(mock_github_token):
     # This method was added to batch fetch issue details via GraphQL
     client.get_open_issues_json.return_value = []
     client.get_open_issue_declarations.return_value = []
+    from tests.pr_automation_fakes import install_pr_history
+
+    def controlled_pr_head(_repository, pr_number):
+        candidates = list(client.get_open_prs_json.return_value) if isinstance(client.get_open_prs_json.return_value, list) else []
+        for method in ("get_pull_request_metadata_strict", "get_pr_details", "get_pull_request", "get_pr"):
+            value = getattr(client, method).return_value
+            if isinstance(value, dict):
+                candidates.append(value)
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or candidate.get("number", pr_number) != pr_number:
+                continue
+            head = candidate.get("head", {})
+            sha = head.get("sha") if isinstance(head, dict) else None
+            if isinstance(sha, str) and sha:
+                return sha
+        # Minimal PR fixtures still declare one existing controlled commit.
+        return f"{pr_number:040x}"
+
+    install_pr_history(client, controlled_pr_head)
     return client
 
 

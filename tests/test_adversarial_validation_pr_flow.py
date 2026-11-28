@@ -56,6 +56,7 @@ from auto_coder.util.gh_cache import GitHubClient, ReviewThread, ReviewThreadCom
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from auto_coder.utils import CommandResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_mock_pr_history, install_pr_history
 from tests.test_accepted_finding_bridge import _simulated_review_source
 from tests.test_review_thread_closure_receipt import BASE, HEAD, PR_NUMBER, REPOSITORY, THREAD_ID
 from tests.test_review_thread_closure_receipt import receipt_scenario as receipt_scenario
@@ -66,6 +67,7 @@ def controller_github_mock() -> MagicMock:
     """Expose the legacy controller identity for production authority checks."""
     client = MagicMock()
     client.get_authenticated_user_login.return_value = "controller"
+    install_mock_pr_history(client, "original1")
     return client
 
 
@@ -74,6 +76,7 @@ def controller_github_client() -> GitHubClient:
     client = GitHubClient("test-token")
     client.get_authenticated_user_login = MagicMock(return_value="controller")
     client.get_authenticated_controller_identity = lambda *_: ControllerIdentity(client.get_authenticated_user_login(), account_id=2 if client.get_authenticated_user_login() == "implementer" else 20)
+    install_mock_pr_history(client, "original1")
     return client
 
 
@@ -167,6 +170,7 @@ def test_real_thread_closure_reuses_reply_after_pr_publication_failure(receipt_s
         monkeypatch.setattr(StaleReviewThreadRegistry, "record", record_pending)
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     client = scenario.client()
+    install_pr_history(client, HEAD)
     issue = {"number": 42, "title": "Retry counter", "body": "## Requirements\nREQ-001: Reset the retry counter before each retry."}
     pr_data = {
         "number": PR_NUMBER,
@@ -307,6 +311,7 @@ def test_real_thread_closure_reuses_reply_after_pr_publication_failure(receipt_s
             registry_path = tmp_path / "reconstructed-process-rollback.json"
             assert not registry_path.exists()
             reconstructed_client = scenario.client()
+            install_pr_history(reconstructed_client, HEAD)
 
             blocked_actions = _handle_pr_merge(reconstructed_client, REPOSITORY, pr_data, config, {})
 
@@ -2108,6 +2113,7 @@ class TestAdversarialValidationPRFlow:
                 return None
 
         client = ManifestChangingClient()
+        install_pr_history(client, "head-h2")
         pr_data = {"number": 100, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": "head-h2"}}
         config = AutomationConfig()
         config.AUTO_MERGE = True
@@ -4816,6 +4822,7 @@ class TestClaimedReviewThreadValidationFlow:
             ],
         )
         client = _closure_client([claimed])
+        install_pr_history(client, head_sha)
         client.get_pull_request_head_sha_strict.return_value = head_sha
         client.get_pr_comments.return_value = []
         client.get_pr_comments_strict = client.get_pr_comments
@@ -4890,6 +4897,7 @@ class TestClaimedReviewThreadValidationFlow:
             ],
         )
         client = _closure_client([claimed])
+        install_pr_history(client, head_sha)
         client.get_pull_request_head_sha_strict.return_value = head_sha
         client.get_pr_comments.return_value = []
         client.get_pr_comments_strict = client.get_pr_comments

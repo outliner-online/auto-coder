@@ -57,6 +57,7 @@ from auto_coder.specification_analyzer import SpecificationAnalysisResult
 from auto_coder.specification_validation_lifecycle import SpecificationValidationLifecycle
 from auto_coder.stale_jules_recovery import recovery_request_id
 from auto_coder.util.gh_cache import GitHubClient
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_issue_job_workspace import git, repository
 from tests.test_issue_stage_routing import REPO, _routing_engine
 
@@ -534,6 +535,7 @@ def test_ordinary_local_issue_stays_owned_until_its_published_pr_is_validated_an
     assert published.disposition == "published"
     assert published.pr_number == 77
     pr_data = observed_prs[checkpoint.work_branch]
+    install_pr_history(github, lambda _repo, _number: pr_data["head"]["sha"])
     owner_observation = next(item for item in engine.implementation_slots.snapshot().owners if item.owner == owner)
     assert owner_observation.implementation_prs == (77,)
     assert engine.implementation_slots.active_owners() == (owner,)

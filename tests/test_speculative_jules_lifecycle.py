@@ -18,6 +18,7 @@ from auto_coder.speculative_jules_lifecycle import (
     configure_speculative_jules_lifecycle,
     consume_due_speculative_work,
 )
+from tests.pr_automation_fakes import install_pr_history
 
 
 class Classifier:
@@ -153,6 +154,7 @@ def test_top_level_processor_fences_retired_empty_pr_before_lifecycle_effects(tm
         "body": "Closes #7",
         "head": {"sha": "abc", "ref": "issue-7"},
     }
+    install_pr_history(github, lambda _repo, _pr: pr["head"]["sha"])
     configure_speculative_jules_lifecycle(service)
     try:
         result = process_pull_request(github, AutomationConfig(), "owner/repo", pr, force_adversarial_validation=True)
@@ -170,6 +172,7 @@ def test_top_level_processor_fences_unlinked_retired_pr(tmp_path: Path) -> None:
     service, _ = lifecycle(tmp_path, retired)
     github = Mock()
     pr = {"number": 42, "state": "open", "changed_files": 0, "body": "", "head": {"sha": "abc", "ref": "jules-output"}}
+    install_pr_history(github, lambda _repo, _pr: pr["head"]["sha"])
     configure_speculative_jules_lifecycle(service)
     try:
         result = process_pull_request(github, AutomationConfig(), "owner/repo", pr)
@@ -232,6 +235,7 @@ def test_final_merge_fences_ambiguous_pr_before_exhaustion_comment(tmp_path: Pat
     service, _ = lifecycle(tmp_path, ClassificationResult(ArtifactClassification.BLOCKED))
     configure_speculative_jules_lifecycle(service)
     github = Mock(token="token")
+    install_pr_history(github, "head")
     api = Mock()
     api.pulls.get.return_value = {"number": 50, "body": "", "head": {"sha": "head"}}
     exhausted = SimpleNamespace(is_exhausted=True, exhausted_blocker_ids=("blocker",))
@@ -282,6 +286,7 @@ def test_recreated_empty_history_fences_ambiguous_pr_at_production_boundaries(tm
     ledger = JulesCompetitionLedger(tmp_path / "empty-ledger.db")
     store = CandidateObservationStore(tmp_path / "empty-observations.db")
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, _number: pr["head"]["sha"])
     service = SpeculativeJulesLifecycle(
         RefreshingSpeculativeClassifier(
             JulesCandidateObservationAdapter(ledger, store, RetiredJulesReader(), github),
@@ -416,6 +421,7 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
             encoding="utf-8",
         )
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, number: pr["head"]["sha"] if number == pr["number"] else unrelated["head"]["sha"])
     pr = {
         "number": 59,
         "state": "open",
@@ -576,6 +582,7 @@ def test_observation_open_failure_preserves_ledger_binding_at_both_boundaries(tm
         "base": {"repo": {"full_name": "owner/repo"}, "ref": "main", "sha": "base"},
     }
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, number: pr["head"]["sha"] if number == pr["number"] else unrelated["head"]["sha"])
     api = Mock()
     api.pulls.get.return_value = dict(pr)
     configure_speculative_jules_lifecycle(None)
@@ -648,6 +655,7 @@ def test_fresh_runtime_receipt_does_not_authorize_existing_repository_prs(
         assert not (tmp_path / "runtime" / "state" / "jules_candidate_observations.db").exists()
 
         github = Mock(token="token")
+        install_pr_history(github, lambda _repo, _number: pr["head"]["sha"])
         pr = {
             "number": 64,
             "state": "open",
@@ -753,6 +761,7 @@ def test_surviving_cleanup_association_fences_pr_after_primary_history_loss(
         None,
     )
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, _number: pr["head"]["sha"])
     configure_speculative_jules_lifecycle(None)
     try:
         service = get_speculative_jules_lifecycle(github)
@@ -802,6 +811,7 @@ def test_unreadable_history_at_startup_preserves_proven_origin_and_unknown(
     cleanup_path.mkdir(parents=True)
 
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, number: local_pr["head"]["sha"] if number == local_pr["number"] else ambiguous_pr["head"]["sha"])
     local_pr = {
         "number": 71,
         "state": "open",
@@ -1019,6 +1029,7 @@ def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_
             raise OSError("offline")
 
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, number: pr["head"]["sha"] if number == pr["number"] else ambiguous["head"]["sha"])
     github.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101)
     ledger = UnavailableLedger() if unavailable_source == "ledger" else JulesCompetitionLedger(tmp_path / f"ledger-{origin}.db")
     observations = CandidateObservationStore(tmp_path / f"observations-{origin}.db")
@@ -1148,6 +1159,7 @@ def test_unavailable_ledger_allows_durably_attributed_codex_pr_at_production_bou
             raise OSError("offline")
 
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, _number: pr["head"]["sha"])
     adapter = JulesCandidateObservationAdapter(
         UnavailableLedger(),
         CandidateObservationStore(tmp_path / "observations.db"),
@@ -1364,6 +1376,7 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
         },
     }
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, number: strict_prs[number]["head"]["sha"])
     github.get_pull_request_metadata_strict.side_effect = lambda _repo, number: strict_prs[number]
     restarted_ledger = JulesCompetitionLedger(ledger_path)
     retired_reader = Mock(wraps=RetiredJulesReader())
@@ -1527,6 +1540,7 @@ def test_issue_binding_number_does_not_authorize_ambiguous_pr(tmp_path: Path, mo
             raise OSError("offline")
 
     github = Mock(token="token")
+    install_pr_history(github, lambda _repo, _number: pr["head"]["sha"])
     ledger = UnavailableLedger()
     adapter = JulesCandidateObservationAdapter(ledger, CandidateObservationStore(tmp_path / "observations.db"), RetiredJulesReader(), github)
     configure_speculative_jules_lifecycle(SpeculativeJulesLifecycle(RefreshingSpeculativeClassifier(adapter, ledger), SpeculativeCleanupStore(tmp_path / "cleanup.db")))

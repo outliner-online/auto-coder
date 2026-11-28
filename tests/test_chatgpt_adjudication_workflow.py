@@ -12,6 +12,7 @@ from auto_coder.pr_processor import _apply_review_adjudication_effects
 from auto_coder.review_adjudication import Decision, parse_decision, render_decision
 from auto_coder.review_adjudication_github import AdjudicationContextStore, IssueEvidence, PullRequestBinding, ReviewAdjudicationService, build_issue_contracts, new_context, reconcile_thread, render_context_projection
 from auto_coder.util.gh_cache import GitHubClient, PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
+from tests.pr_automation_fakes import install_pr_history
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/review_adjudication_workflow.json").read_text(encoding="utf-8"))
 
@@ -104,6 +105,7 @@ def test_connector_replies_hydrate_and_run_normal_same_head_effects(tmp_path: Pa
         "base": {"ref": FIXTURE["base_ref"], "sha": FIXTURE["base_sha"], "repo": {"id": FIXTURE["repository_id"]}},
     }
     client.get_pull_request_metadata_strict = MagicMock(return_value=metadata)
+    install_pr_history(client, lambda *_args: metadata["head"]["sha"])
     client.get_pull_request_repair_metadata_strict = MagicMock(return_value=PullRequestRepairMetadata(head_ref="feature", head_sha=FIXTURE["head_sha"], base_ref=FIXTURE["base_ref"]))
     service = ReviewAdjudicationService(client, AdjudicationContextStore(tmp_path / "reader.sqlite"))
 

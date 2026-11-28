@@ -4,7 +4,7 @@ Tests for Codex Cloud PR CI failure handling and continuation workflow.
 
 from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,7 @@ from auto_coder.pr_processor import (
     _send_codex_cloud_error_feedback,
     process_pull_request,
 )
+from tests.pr_automation_fakes import install_pr_history
 
 
 def _failed_observation(pr_number: int, head_sha: str) -> CIObservationSnapshot:
@@ -79,6 +80,7 @@ class TestCodexCloudPRCIFlow:
             "head": {"ref": "codex/issue-101", "sha": "sha101"},
             "base": {"ref": "main"},
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
         failed_checks = [{"name": "PR Tests", "conclusion": "failure"}]
 
         with patch("auto_coder.codex_cloud_client.CodexCloudClient.continue_if_paused", return_value=True) as mock_cont:
@@ -117,6 +119,7 @@ class TestCodexCloudPRCIFlow:
             "head": {"ref": "codex/issue-101", "sha": "sha101"},
             "base": {"ref": "main"},
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
         failed_checks = [{"name": "PR Tests", "conclusion": "failure"}]
 
         with patch("auto_coder.codex_cloud_client.CodexCloudClient.continue_if_paused", return_value=True) as mock_cont:
@@ -138,6 +141,7 @@ class TestCodexCloudPRCIFlow:
             "number": 101,
             "body": "https://chatgpt.com/codex/tasks/task_e_11223344",
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
 
         with patch("auto_coder.codex_cloud_client.CodexCloudClient.continue_if_paused", return_value=True):
             result = _send_codex_cloud_error_feedback(
@@ -152,7 +156,7 @@ class TestCodexCloudPRCIFlow:
         assert result.delivered is True
         assert "Skipped duplicate Codex Cloud fix-request comment on PR #101" in result.actions
 
-    def test_send_codex_cloud_error_feedback_resolves_task_from_cloud_manager(self, config, tmp_path):
+    def test_send_codex_cloud_error_feedback_resolves_task_from_cloud_manager(self, config, tmp_path, mock_github_client):
         """Test resolving task ID via CloudManager when not directly in PR body."""
         repo = "owner/repo"
         cloud_csv = tmp_path / "cloud.csv"
@@ -165,6 +169,7 @@ class TestCodexCloudPRCIFlow:
             "body": "This fixes #50",
             "user": {"login": "octocat"},
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
 
         with (
             patch("auto_coder.pr_processor.CloudManager", return_value=cloud_manager),
@@ -175,13 +180,14 @@ class TestCodexCloudPRCIFlow:
                 pr_data=pr_data,
                 failed_checks=[{"name": "Lint", "conclusion": "failure"}],
                 config=config,
+                github_client=mock_github_client,
             )
 
-            mock_cont.assert_called_once_with("task_e_cloudmgr999")
+            mock_cont.assert_called_once_with("task_e_cloudmgr999", new_effect_authorizer=ANY)
             assert result.delivered is True
             assert any("Sent continuation request to Codex Cloud task 'task_e_cloudmgr999'" in a for a in result.actions)
 
-    def test_send_codex_cloud_error_feedback_when_task_cannot_be_resumed(self, config):
+    def test_send_codex_cloud_error_feedback_when_task_cannot_be_resumed(self, config, mock_github_client):
         """Test handling when continue_if_paused returns False."""
         pr_data = {
             "number": 103,
@@ -189,6 +195,7 @@ class TestCodexCloudPRCIFlow:
             "body": "https://chatgpt.com/codex/tasks/task_e_nonresumable",
             "user": {"login": "octocat"},
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
 
         with patch("auto_coder.codex_cloud_client.CodexCloudClient.continue_if_paused", return_value=False) as mock_cont:
             result = _send_codex_cloud_error_feedback(
@@ -196,14 +203,15 @@ class TestCodexCloudPRCIFlow:
                 pr_data=pr_data,
                 failed_checks=[{"name": "Tests", "conclusion": "failure"}],
                 config=config,
+                github_client=mock_github_client,
             )
 
-            mock_cont.assert_called_once_with("task_e_nonresumable")
+            mock_cont.assert_called_once_with("task_e_nonresumable", new_effect_authorizer=ANY)
             assert result.delivered is False
             assert result.retryable is True
             assert any("could not be resumed" in a for a in result.actions)
 
-    def test_invalid_metadata_falls_back_to_pr_body_task_for_continuation(self, config):
+    def test_invalid_metadata_falls_back_to_pr_body_task_for_continuation(self, config, mock_github_client):
         """Truthy placeholder metadata must not suppress the authoritative PR URL."""
         pr_data = {
             "number": 1670,
@@ -212,6 +220,7 @@ class TestCodexCloudPRCIFlow:
             "_codex_task_id": "task_fake",
             "user": {"login": "codex"},
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
 
         with patch("auto_coder.codex_cloud_client.CodexCloudClient.continue_if_paused", return_value=True) as mock_cont:
             result = _send_codex_cloud_error_feedback(
@@ -219,13 +228,14 @@ class TestCodexCloudPRCIFlow:
                 pr_data=pr_data,
                 failed_checks=[{"name": "Tests", "conclusion": "failure"}],
                 config=config,
+                github_client=mock_github_client,
             )
 
-        mock_cont.assert_called_once_with("task_e_real123")
+        mock_cont.assert_called_once_with("task_e_real123", new_effect_authorizer=ANY)
         assert result.delivered is True
         assert all("task_fake" not in action for action in result.actions)
 
-    def test_send_codex_cloud_error_feedback_missing_task_id(self, config):
+    def test_send_codex_cloud_error_feedback_missing_task_id(self, config, mock_github_client):
         """Test safe failure when no task ID can be found."""
         pr_data = {
             "number": 104,
@@ -233,6 +243,7 @@ class TestCodexCloudPRCIFlow:
             "body": "Regular description with no task info",
             "user": {"login": "codex-bot"},
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
 
         with patch("auto_coder.codex_cloud_client.CodexCloudClient.continue_if_paused") as mock_cont:
             result = _send_codex_cloud_error_feedback(
@@ -240,6 +251,7 @@ class TestCodexCloudPRCIFlow:
                 pr_data=pr_data,
                 failed_checks=[{"name": "Tests", "conclusion": "failure"}],
                 config=config,
+                github_client=mock_github_client,
             )
 
             mock_cont.assert_not_called()
@@ -263,6 +275,7 @@ class TestCodexCloudPRCIFlow:
             "mergeable": True,
             "draft": False,
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
 
         mock_checks = GitHubActionsStatusResult(
             success=False,
@@ -339,6 +352,7 @@ class TestCodexCloudPRCIFlow:
             "mergeable": True,
             "draft": False,
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
         mock_checks = GitHubActionsStatusResult(
             success=False,
             ids=[1002],
@@ -413,6 +427,7 @@ class TestCodexCloudPRCIFlow:
             "mergeable": True,
             "draft": False,
         }
+        install_pr_history(mock_github_client, pr_data.get("head", {}).get("sha") or f"controlled-pr-{pr_data['number']}")
         mock_checks = GitHubActionsStatusResult(
             success=False,
             ids=[1003],

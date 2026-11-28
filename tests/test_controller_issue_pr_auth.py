@@ -17,6 +17,7 @@ from auto_coder.pr_processor import (
 )
 from auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
 from auto_coder.util.gh_cache import GitHubClient
+from tests.pr_automation_fakes import install_pr_history
 
 
 def test_strict_pr_readers_use_current_installation_at_each_send():
@@ -735,6 +736,7 @@ def test_merge_entry_and_rejection_recheck_use_installation_pr_reads(tmp_path):
     provider = RenewableProvider()
     client = GitHubClient(auth_provider=provider, repository="owner/repo")
     head_sha = "a" * 40
+    install_pr_history(client, head_sha)
     pr = {
         "number": 7,
         "user": {"login": "developer"},
@@ -863,6 +865,7 @@ def test_controller_local_merge_does_not_enter_dependency_approval(tmp_path):
     provider = RenewableProvider()
     client = GitHubClient(auth_provider=provider, repository="owner/repo")
     head_sha = "b" * 40
+    install_pr_history(client, head_sha)
     request = httpx.Request("GET", "https://api.github.com/repos/owner/repo/pulls/7")
     transport = Mock()
     transport.request.return_value = httpx.Response(

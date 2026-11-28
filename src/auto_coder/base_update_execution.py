@@ -220,6 +220,17 @@ def _run_base_update_operation(
             base_ref=target_branch,
         )
 
+    def authorize_new_effect(candidate_head: str = "") -> bool:
+        decision = p._pr_automation_decision(github_client or GitHubClient.get_instance(), repo_name, pr_number)
+        if decision.allowed:
+            return True
+        actions.append(decision.reason)
+        actions.retry_not_before = None if decision.stopped else time.time() + 60
+        record(RepairDisposition.REFUSED if decision.stopped else RepairDisposition.DEFERRED, reason=decision.reason, resulting_head=candidate_head)
+        if actions.repair_result is not None:
+            actions.repair_result = replace(actions.repair_result, retry_not_before=actions.retry_not_before)
+        return False
+
     try:
         # Determine target base branch for this PR
         # Fetch latest changes from origin
@@ -249,6 +260,8 @@ def _run_base_update_operation(
         actions.append(f"PR #{pr_number} is {commits_behind} commits behind {target_branch}, updating...")
 
         # Try to merge base branch
+        if not authorize_new_effect():
+            return actions
         result = cmd.run_command(["git", "merge", f"refs/remotes/origin/{target_branch}"])
         if result.success:
             actions.append(f"Successfully merged {target_branch} branch into PR #{pr_number}")
@@ -265,6 +278,8 @@ def _run_base_update_operation(
                 return actions
 
             # Push the updated branch using centralized helper with retry
+            if not authorize_new_effect(candidate_head):
+                return actions
             push_result = git_push(branch=f"HEAD:{head_branch}", expected_remote_sha=input_head)
             if push_result.success:
                 actions.append(f"Pushed updated branch for PR #{pr_number}")
@@ -291,6 +306,8 @@ def _run_base_update_operation(
                 # bounded retry cannot overwrite another actor's update.
                 logger.warning(f"First push attempt failed: {push_result.stderr}, retrying...")
                 time.sleep(2)
+                if not authorize_new_effect(candidate_head):
+                    return actions
                 retry_push_result = git_push(branch=f"HEAD:{head_branch}", expected_remote_sha=input_head)
                 if retry_push_result.success:
                     actions.append(f"Pushed updated branch for PR #{pr_number} (after retry)")

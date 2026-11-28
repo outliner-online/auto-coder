@@ -17,6 +17,7 @@ from auto_coder.pr_processor import (
 from auto_coder.util.gh_cache import GitHubClient, ReviewThread, ReviewThreadComment
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
@@ -288,6 +289,7 @@ def test_handle_pr_merge_blocks_on_unresolved_threads(mock_merge_pr, mock_has_un
     pr_data = {"number": 123, "head": {"ref": "feature-123", "sha": "head-123"}, "labels": []}
 
     client = MagicMock()
+    install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
     client.get_pr_comments_strict.return_value = []
     client.get_pr_review_threads_strict.return_value = []
@@ -309,6 +311,7 @@ def test_handle_pr_merge_fails_closed_when_real_review_thread_lookup_fails(mock_
     config = AutomationConfig()
     config.AUTO_MERGE = True
     pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-99", "sha": "current-head"}}
+    install_pr_history(mock_github_client, pr_data["head"]["sha"])
     mock_github_client.get_pull_request_metadata_strict = MagicMock(return_value={**pr_data, "user": {"login": "developer"}, "state": "open"})
 
     actions = _handle_pr_merge(mock_github_client, "owner/repo", pr_data, config, {})
@@ -343,6 +346,7 @@ def test_handle_pr_merge_proceeds_when_all_threads_resolved(mock_merge_pr, mock_
     pr_data = {"number": 123, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-123", "sha": "123abc456"}}
 
     client = MagicMock()
+    install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
     client.get_pr_comments_strict.return_value = []
     client.get_pull_request.return_value = {"head": {"sha": "123abc456"}}
@@ -363,6 +367,7 @@ def test_merge_pr_safeguard_blocks_unresolved_threads(mock_get_ghapi, mock_has_u
     config = AutomationConfig()
     config.MERGE_METHOD = "--squash"
 
+    install_pr_history(client, "safeguard-head")
     merged = _merge_pr("owner/repo", 123, {}, config, github_client=client)
 
     assert merged is False

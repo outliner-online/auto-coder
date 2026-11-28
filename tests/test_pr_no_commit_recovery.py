@@ -10,6 +10,7 @@ from auto_coder.exceptions import DeliveryCertainty
 from auto_coder.pr_no_commit_recovery import NoCommitRecovery
 from auto_coder.pr_processor import _record_review_feedback_state
 from auto_coder.pr_repair import ExistingPrRepairTarget
+from tests.pr_automation_fakes import install_pr_history
 
 TARGET = ExistingPrRepairTarget("owner/repo", 88, "implementation", "main", "1" * 40)
 
@@ -186,7 +187,9 @@ def test_a_different_pr_repair_sender_invalidates_without_registering_a_budget(s
 
     native = Mock()
     native.send_followup.return_value = True
-    with patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=series.path):
+    github = Mock()
+    install_pr_history(github, TARGET.head_sha)
+    with patch("auto_coder.pr_processor._cloud_review_repair_state_path", return_value=series.path), patch("auto_coder.pr_processor.GitHubClient.get_instance", return_value=github):
         assert _send_followup_with_quota_admission(native, "owner/repo", "session-88", "new conflict correction", repair_target=TARGET)
     native.send_followup.assert_called_once_with("session-88", "new conflict correction")
     assert len(snapshot(series)) == 1

@@ -65,6 +65,7 @@ from auto_coder.util.github_request_outcome import (
     RequestProvenance,
     configure_github_request_boundary,
 )
+from tests.pr_automation_fakes import single_commit_history
 
 
 def _github_error(classification, *, delivery=DeliveryCertainty.HTTP_RESPONSE_RECEIVED, retry_after=0.0, status=403):
@@ -175,13 +176,18 @@ class _FakePrGithub:
     def __init__(self, responses):
         # responses: pr_number -> list of (dict | Exception), popped in order
         self._responses = {number: list(values) for number, values in responses.items()}
+        self._observed_prs = {}
         self.calls: list[tuple] = []
+
+    def get_pr_automation_history_strict(self, _repository, pr_number):
+        return single_commit_history(self._observed_prs[pr_number]["head"]["sha"])
 
     def get_pull_request_metadata_strict(self, repo_name, pr_number):
         self.calls.append(("get_pull_request_metadata_strict", repo_name, pr_number))
         value = self._responses[pr_number].pop(0)
         if isinstance(value, Exception):
             raise value
+        self._observed_prs[pr_number] = value
         return value
 
     def get_pr_details(self, raw):

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .logger_config import get_logger
 from .merge_operation_state import (
@@ -246,7 +246,18 @@ def _dispatch_mutation_failure(store: MergeOperationStore, identity: MergeOperat
     return _record_unclassified_exception(store, identity, effect_name, attempt_id, generation, exc, fallback)
 
 
-def attempt_approval(store: MergeOperationStore, token: str, identity: MergeOperationIdentity) -> AdapterResult:
+def _authorize_new_effect(store: MergeOperationStore, identity: MergeOperationIdentity, effect_name: EffectName, attempt_id: str, generation: int, authorizer: Optional[Callable[[], None]]) -> None:
+    if authorizer is None:
+        return
+    try:
+        authorizer()
+    except Exception as exc:
+        # A refused pre-send check is positive evidence that this attempt was unsent.
+        store.record_confirmed_unsent(identity, effect_name, attempt_id, generation, detail=str(exc))
+        raise
+
+
+def attempt_approval(store: MergeOperationStore, token: str, identity: MergeOperationIdentity, *, new_effect_authorizer: Optional[Callable[[], None]] = None) -> AdapterResult:
     """Perform one approval attempt: reserve, check-then-post, record (REQ-002/003/004/005)."""
     operation = _require_operation(store, identity)
     reservation = store.reserve_attempt(identity, EffectName.APPROVAL)
@@ -272,6 +283,7 @@ def attempt_approval(store: MergeOperationStore, token: str, identity: MergeOper
         store.record_confirmed_complete(identity, EffectName.APPROVAL, attempt_id, generation, receipt)
         return AdapterResult(AdapterOutcomeKind.CONFIRMED_COMPLETE, _resolve(store, identity, operation), reason="existing_approval_observed")
 
+    _authorize_new_effect(store, identity, EffectName.APPROVAL, attempt_id, generation, new_effect_authorizer)
     try:
         response = api.pulls.create_review(owner, repo, identity.pr_number, event="APPROVE", commit_id=operation.expected_head_sha)
     except Exception as exc:  # noqa: BLE001 - classified by _dispatch_mutation_failure
@@ -297,7 +309,7 @@ def attempt_approval(store: MergeOperationStore, token: str, identity: MergeOper
     return AdapterResult(AdapterOutcomeKind.INDETERMINATE, _resolve(store, identity, operation), http_status=200, delivery="http_response_received", reason="incomplete_or_mismatched_review_response")
 
 
-def attempt_merge(store: MergeOperationStore, token: str, identity: MergeOperationIdentity) -> AdapterResult:
+def attempt_merge(store: MergeOperationStore, token: str, identity: MergeOperationIdentity, *, new_effect_authorizer: Optional[Callable[[], None]] = None) -> AdapterResult:
     """Perform one merge attempt: reserve, send, record (REQ-002/005/006/007)."""
     operation = _require_operation(store, identity)
     reservation = store.reserve_attempt(identity, EffectName.MERGE)
@@ -308,6 +320,7 @@ def attempt_merge(store: MergeOperationStore, token: str, identity: MergeOperati
     owner, repo = _owner_repo(identity)
     api = get_ghapi_client(token)
 
+    _authorize_new_effect(store, identity, EffectName.MERGE, attempt_id, generation, new_effect_authorizer)
     try:
         response = api.pulls.merge(owner, repo, identity.pr_number, merge_method=operation.merge_method, sha=operation.expected_head_sha)
     except Exception as exc:  # noqa: BLE001 - classified by _dispatch_mutation_failure

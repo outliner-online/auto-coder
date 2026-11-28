@@ -290,7 +290,7 @@ def _resume_saved_ordinary_correction(ports, github_client: Any, repo_name: str,
                 if not published:
                     if publication_error:
                         raise RuntimeError(publication_error)
-                    publication = ports._publish_effective_review(repo_name, pr_number, head_sha, application.result, None)
+                    publication = ports._publish_effective_review(repo_name, pr_number, head_sha, application.result, None, github_client=github_client)
                     if not publication.success:
                         published, publication_error = ports._reconcile_failed_adversarial_publication(github_client, repo_name, pr_number, head_sha, application.result)
                         if not published:

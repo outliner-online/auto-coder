@@ -13,6 +13,7 @@ from .checkout_lock import checkout_lock
 from .git_branch import git_commit_with_retry
 from .git_commit import git_push
 from .local_job_handoff import InvocationOutcome, LocalJobClaim, LocalJobKind, LocalJobRecord, LocalJobState, LocalJobStore
+from .pr_automation_guard import PRGuardDecision, assess_local_pr_automation
 from .pr_repair_workspace import PRRepairResultManifest, PRRepairWorkspaceError, PRRepairWorkspaceProducer
 from .runtime_locks import ensure_lock_directory, file_lock, lock_path
 
@@ -65,11 +66,13 @@ class PRRepairJobFinalizer:
         wake: InvalidationWake,
         *,
         finish_execution: ExecutionCompletion | None = None,
+        new_effect_authorizer: Callable[[str, int], PRGuardDecision] | None = None,
     ) -> None:
         self._store = store
         self._observe_target = observe_target
         self._wake = wake
         self._finish_execution = finish_execution
+        self._new_effect_authorizer = new_effect_authorizer
         self._workspace = PRRepairWorkspaceProducer(store)
 
     @staticmethod
@@ -205,12 +208,18 @@ class PRRepairJobFinalizer:
             return self._finish_terminal(record, PRRepairPublicationDisposition.STALE, "PR target or publication ownership changed", candidate)
 
         if not candidate:
+            refusal = self._new_effect_refusal(record, candidate, workspace=workspace, source_head=manifest.head_sha, base_head=manifest.base_sha)
+            if refusal is not None:
+                return refusal
             candidate = self._commit(claim, manifest, verified.artifact_id)
             if not candidate:
                 return self._result(job_id, PRRepairPublicationDisposition.NO_CHANGE, diagnostic="artifact contains no CI edit")
 
         push = self._store.get_effect_strict(job_id, record.execution_incarnation, "push")
         if push is None:
+            refusal = self._new_effect_refusal(record, candidate, workspace=workspace, source_head=manifest.head_sha, base_head=manifest.base_sha)
+            if refusal is not None:
+                return refusal
             # Re-observe immediately before claiming the single send permission.
             observed = self._observe_target(record.repository, record.target_number)
             if not self._matches_target(observed, manifest) or observed.head_sha != manifest.head_sha:
@@ -248,6 +257,18 @@ class PRRepairJobFinalizer:
             return self._result(job_id, PRRepairPublicationDisposition.PENDING, candidate, "job settlement is pending")
         self._retire_execution(self._store.get(job_id) or record)
         return self._result(job_id, PRRepairPublicationDisposition.PUBLISHED, candidate)
+
+    def _new_effect_refusal(self, record: LocalJobRecord, candidate: str, *, workspace: Path, source_head: str, base_head: str) -> PRRepairPublicationResult | None:
+        if self._new_effect_authorizer is not None:
+            decision = self._new_effect_authorizer(record.repository, record.target_number)
+            if not decision.allowed:
+                disposition = PRRepairPublicationDisposition.REFUSED if decision.stopped else PRRepairPublicationDisposition.PENDING
+                return self._result(record.job_id, disposition, candidate, decision.reason)
+        local_guard = assess_local_pr_automation(record.repository, record.target_number, workspace, source_head, candidate or "HEAD", exclude_base_head=base_head)
+        if local_guard is not None:
+            disposition = PRRepairPublicationDisposition.REFUSED if local_guard.stopped else PRRepairPublicationDisposition.PENDING
+            return self._result(record.job_id, disposition, candidate, local_guard.reason)
+        return None
 
     def _retire_execution(self, record: LocalJobRecord) -> None:
         if self._finish_execution is not None and record.implementation_execution_id:

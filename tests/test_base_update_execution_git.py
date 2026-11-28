@@ -7,6 +7,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from auto_coder.automation_config import AutomationConfig
+from auto_coder.pr_automation_guard import PRCommit, PRCommitHistory
 from auto_coder.pr_processor import _resolve_pr_merge_conflicts, _start_mergeability_remediation, _update_with_base_branch
 from auto_coder.pr_repair_dispatch import RepairDisposition
 from auto_coder.utils import CommandResult
@@ -17,6 +18,32 @@ pytestmark = pytest.mark.pr_repair_contract
 
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=root, check=check, capture_output=True, text=True)
+
+
+def github_for_remote(work: Path, prs: dict[int, dict[str, object]]) -> MagicMock:
+    """Expose authoritative history from this test's actual remote refs."""
+    remote = Path(git(work, "remote", "get-url", "origin").stdout.strip())
+    client = MagicMock(token="token")
+
+    def metadata(repository: str, pr_number: int) -> dict[str, object]:
+        assert repository == "owner/repo"
+        observed = prs[pr_number]
+        head_ref = observed["head"]["ref"]
+        base_ref = observed["base"]["ref"]
+        head = git(remote, "rev-parse", f"refs/heads/{head_ref}").stdout.strip()
+        base = git(remote, "rev-parse", f"refs/heads/{base_ref}").stdout.strip()
+        return {**observed, "state": "open", "head": {**observed["head"], "sha": head}, "base": {**observed["base"], "sha": base}}
+
+    def history(repository: str, pr_number: int) -> PRCommitHistory:
+        current = metadata(repository, pr_number)
+        head = current["head"]["sha"]
+        base = current["base"]["sha"]
+        commits = tuple(PRCommit(sha, git(remote, "show", "-s", "--format=%B", sha).stdout) for sha in git(remote, "rev-list", "--reverse", f"{base}..{head}").stdout.splitlines())
+        return PRCommitHistory(head, len(commits), commits)
+
+    client.get_pull_request_metadata_strict.side_effect = metadata
+    client.get_pr_automation_history_strict.side_effect = history
+    return client
 
 
 def conflict_repository(tmp_path: Path) -> tuple[Path, dict[str, object]]:
@@ -108,6 +135,7 @@ def test_clean_update_reconciles_failed_push_without_blind_retry(
     outcome: str,
 ) -> None:
     work, remote, pr_data = clean_update_repository(tmp_path)
+    github = github_for_remote(work, {pr_data["number"]: pr_data})
     monkeypatch.chdir(work)
     push_calls = 0
     provider = MagicMock()
@@ -133,7 +161,7 @@ def test_clean_update_reconciles_failed_push_without_blind_retry(
         patch("auto_coder.pr_processor._dispatch_cloud_conflict_repair", provider),
         patch("auto_coder.base_update_execution.time.sleep") as sleep,
     ):
-        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig())
+        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig(), github_client=github)
 
     assert result.repair_result is not None
     candidate = git(work, "rev-parse", "HEAD").stdout.strip()
@@ -206,7 +234,7 @@ def test_real_rejections_preserve_candidate_and_continue_to_distinct_pr(
     }
     api = MagicMock()
     api.pulls.get.side_effect = lambda _owner, _repo, pull_number: prs[pull_number]
-    github = MagicMock(token="token")
+    github = github_for_remote(work, prs)
     provider = MagicMock()
 
     with (
@@ -246,6 +274,7 @@ def test_real_retry_lease_refuses_destination_advanced_during_delay(
 ) -> None:
     """REQ-004: the bounded retry cannot pull or overwrite a new remote head."""
     work, remote, pr_data = clean_update_repository(tmp_path)
+    github = github_for_remote(work, {pr_data["number"]: pr_data})
     monkeypatch.chdir(work)
     hook_count = tmp_path / "hook-count"
     hook = remote / "hooks" / "pre-receive"
@@ -270,7 +299,7 @@ def test_real_retry_lease_refuses_destination_advanced_during_delay(
         patch("auto_coder.git_branch.git_pull") as pull,
         patch("auto_coder.git_branch.try_llm_commit_push") as llm_recovery,
     ):
-        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig())
+        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig(), github_client=github)
 
     assert result.repair_result is not None
     assert result.repair_result.disposition is RepairDisposition.REFUSED
@@ -318,7 +347,7 @@ def test_update_entry_preserves_real_private_workspace_publication_facts(
 
     failed_push = CommandResult(False, "", "push rejected", 1)
     successful_push = CommandResult(True, "", "", 0)
-    github = MagicMock()
+    github = github_for_remote(work, {pr_data["number"]: pr_data})
     github.get_pull_request.return_value = pr_data
     github.get_pr_details.return_value = {**pr_data, "head_branch": "feature"}
     with (
@@ -335,7 +364,7 @@ def test_update_entry_preserves_real_private_workspace_publication_facts(
         patch("auto_coder.pr_processor._dispatch_cloud_conflict_repair") as cloud,
     ):
         cloud.return_value = MagicMock(disposition=RepairDisposition.REFUSED, reason="local origin", actions=())
-        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig())
+        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig(), github_client=github)
 
     assert result.repair_result is not None
     assert result.repair_result.disposition is expected
@@ -351,7 +380,7 @@ def test_definitive_entry_carries_non_main_base_into_real_checkout(tmp_path: Pat
     monkeypatch.chdir(work)
     api = MagicMock()
     api.pulls.get.return_value = pr_data
-    github = MagicMock(token="token")
+    github = github_for_remote(work, {pr_data["number"]: pr_data})
     with (
         patch("auto_coder.pr_processor.GitHubClient.get_instance", return_value=github),
         patch("auto_coder.pr_processor.get_ghapi_client", return_value=api),
@@ -372,7 +401,7 @@ def test_definitive_entry_refuses_changed_head_and_base_before_git_effects(tmp_p
     }
     api = MagicMock()
     api.pulls.get.side_effect = [observed, changed]
-    github = MagicMock(token="token")
+    github = github_for_remote(work, {observed["number"]: observed})
     original_head = git(work, "rev-parse", "HEAD").stdout.strip()
     with (
         patch("auto_coder.pr_processor.GitHubClient.get_instance", return_value=github),
@@ -390,6 +419,7 @@ def test_historical_jules_base_conflict_does_not_send_or_fallback(tmp_path, monk
     work, pr_data = conflict_repository(tmp_path)
     monkeypatch.chdir(work)
     pr_data.update(user={"login": "google-labs-jules"}, body="Session ID: historical-session")
+    github = github_for_remote(work, {pr_data["number"]: pr_data})
     client = MagicMock()
     with (
         patch("auto_coder.jules_client.JulesClient", return_value=client) as jules,
@@ -398,7 +428,7 @@ def test_historical_jules_base_conflict_does_not_send_or_fallback(tmp_path, monk
         patch("auto_coder.pr_processor._dispatch_cloud_conflict_repair") as cloud,
         patch("auto_coder.pr_processor._dispatch_local_conflict_repair") as local,
     ):
-        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig())
+        result = _update_with_base_branch("owner/repo", pr_data, AutomationConfig(), github_client=github)
     jules.assert_not_called()
     client.send_message.assert_not_called()
     cloud.assert_not_called()

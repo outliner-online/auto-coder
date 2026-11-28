@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .cloud_task_client_base import CloudTask, CloudTaskClientBase, CloudTaskState
 from .codex_cloud_task import canonical_codex_cloud_task_url, extract_codex_cloud_task_id, is_valid_codex_cloud_task_id
 from .codex_usage_checker import codex_cloud_quota_allows_task
-from .codex_wham_client import CodexWhamClient, FollowUpDeliveryOutcome
+from .codex_wham_client import CodexWhamClient, FollowUpDeliveryOutcome, FollowUpDeliveryResult
 from .exceptions import AutoCoderUsageLimitError
 from .llm_backend_config import get_llm_config
 from .logger_config import get_logger
@@ -713,7 +713,7 @@ class CodexCloudClient(CloudTaskClientBase):
             logger.warning(f"Failed to apply changes for Codex Cloud task {task_id}: {e}")
             return False
 
-    def continue_if_paused(self, task_id: str, prompt: Optional[str] = None, force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None) -> bool:
+    def continue_if_paused(self, task_id: str, prompt: Optional[str] = None, force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None, new_effect_authorizer: Optional[Callable[[], bool]] = None) -> bool:
         """Attempt to continue a paused or waiting Codex Cloud task via WHAM follow-up.
 
         Resolves the latest usable assistant turn ID and sends a continuation prompt
@@ -744,7 +744,10 @@ class CodexCloudClient(CloudTaskClientBase):
         else:
             continuation_prompt = prompt
 
-        sent = self.send_followup(task_id, continuation_prompt, force=force, repair_target=repair_target) if repair_target is not None else self.send_followup(task_id, continuation_prompt, force=force)
+        if new_effect_authorizer is not None:
+            sent = self.send_followup(task_id, continuation_prompt, force=force, repair_target=repair_target, new_effect_authorizer=new_effect_authorizer)
+        else:
+            sent = self.send_followup(task_id, continuation_prompt, force=force, repair_target=repair_target) if repair_target is not None else self.send_followup(task_id, continuation_prompt, force=force)
         if sent:
             self.last_continued_at[task_id] = now
             logger.info(f"Successfully sent continuation follow-up to Codex Cloud task '{task_id}'")
@@ -990,10 +993,21 @@ class CodexCloudClient(CloudTaskClientBase):
         latest = max(accepted, key=lambda record: record.accepted_at)
         return latest.completed_turn_id
 
-    def send_existing_pr_followup(self, task_id: str, message: str, target: ExistingPrRepairTarget, logical_identities: tuple[str, ...] = (), *, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None) -> bool:
+    def send_existing_pr_followup(
+        self,
+        task_id: str,
+        message: str,
+        target: ExistingPrRepairTarget,
+        logical_identities: tuple[str, ...] = (),
+        *,
+        final_authority_check: Optional[Callable[[], bool]] = None,
+        strong_source: Optional[str] = None,
+        strong_revision: Optional[str] = None,
+        new_effect_authorizer: Optional[Callable[[], bool]] = None,
+    ) -> bool:
         """Carry the existing-PR producer contract into the durable sender journal."""
-        if final_authority_check is not None:
-            return self.send_followup(task_id, message, logical_identities, repair_target=target, final_authority_check=final_authority_check, strong_source=strong_source, strong_revision=strong_revision)
+        if final_authority_check is not None or new_effect_authorizer is not None:
+            return self.send_followup(task_id, message, logical_identities, repair_target=target, final_authority_check=final_authority_check, strong_source=strong_source, strong_revision=strong_revision, new_effect_authorizer=new_effect_authorizer)
         return self.send_followup(task_id, message, logical_identities, repair_target=target)
 
     def consume_followup_duplicate_guard(self, task_id: str, logical_identities: tuple[str, ...]) -> bool:
@@ -1012,7 +1026,17 @@ class CodexCloudClient(CloudTaskClientBase):
         return rejection == (task_id, tuple(sorted(logical_identities)))
 
     def send_followup(
-        self, task_id: str, message: str, logical_identities: tuple[str, ...] = (), force: bool = False, *, repair_target: Optional[ExistingPrRepairTarget] = None, final_authority_check: Optional[Callable[[], bool]] = None, strong_source: Optional[str] = None, strong_revision: Optional[str] = None
+        self,
+        task_id: str,
+        message: str,
+        logical_identities: tuple[str, ...] = (),
+        force: bool = False,
+        *,
+        repair_target: Optional[ExistingPrRepairTarget] = None,
+        final_authority_check: Optional[Callable[[], bool]] = None,
+        strong_source: Optional[str] = None,
+        strong_revision: Optional[str] = None,
+        new_effect_authorizer: Optional[Callable[[], bool]] = None,
     ) -> bool:
         """Send work once, reconciling any prior ambiguous POST before retrying."""
         self._followup_rejection = None
@@ -1098,7 +1122,26 @@ class CodexCloudClient(CloudTaskClientBase):
             except Exception as exc:
                 logger.warning(f"Could not reconcile ambiguous Codex follow-ups for task '{task_id}': {exc}")
 
+        def authorize_new_effect() -> bool:
+            if new_effect_authorizer is None:
+                return True
+            try:
+                allowed = new_effect_authorizer() is True
+            except Exception as exc:
+                logger.warning("PR follow-up authorization is unavailable: {}", exc)
+                allowed = False
+            if not allowed:
+                self._followup_rejection = (task_id, tuple(sorted(identities)))
+                logger.warning("PR follow-up stopped before native reservation and transport")
+            return allowed
+
+        reservation_written = False
+
         def send_registered_followup():
+            nonlocal reservation_written
+            # Keep generic intervention policy separate from scoped owner authority.
+            if not authorize_new_effect():
+                return FollowUpDeliveryResult(FollowUpDeliveryOutcome.NOT_DELIVERED)
             repair_binding = {}
             if repair_target is not None and fence is not None and work_identity is not None:
                 from .implementation_slots import ImplementationOwner, ImplementationSlotSnapshot
@@ -1128,8 +1171,11 @@ class CodexCloudClient(CloudTaskClientBase):
                         **repair_binding,
                     )
                 _save_pending_followups(state_path, pending)
+                reservation_written = True
             return wham.send_follow_up(task_id=task_id, turn_id=turn_id, prompt=message)
 
+        if not authorize_new_effect():
+            return False
         try:
             if final_authority_check is not None and (fence is None or work_identity is None):
                 raise CodexWorkAuthorityRefused("Scoped final authority requires the existing tracked owner fence")
@@ -1180,9 +1226,11 @@ class CodexCloudClient(CloudTaskClientBase):
                     )
             elif result.outcome is FollowUpDeliveryOutcome.NOT_DELIVERED:
                 self._followup_rejection = (task_id, tuple(sorted(identities)))
-                for key in keys:
-                    pending.pop(key, None)
-            _save_pending_followups(state_path, pending)
+                if reservation_written:
+                    for key in keys:
+                        pending.pop(key, None)
+            if reservation_written:
+                _save_pending_followups(state_path, pending)
         if fence is not None and work_identity is not None:
             from .implementation_slots import ImplementationOwner
 

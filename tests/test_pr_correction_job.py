@@ -18,6 +18,7 @@ from auto_coder.invocation_admission import InvocationAdmissionGate
 from auto_coder.local_job_handoff import InvocationOutcome, LocalJobClaim, LocalJobKind, LocalJobState, LocalJobStore
 from auto_coder.local_job_runner import LocalJobRunner
 from auto_coder.local_review_repair import LocalReviewRepairClaim, LocalReviewRepairOutcome, LocalReviewRepairRequest, LocalReviewRepairStore, admit_local_repair_allowance
+from auto_coder.pr_automation_guard import PRCommit, PRCommitHistory
 from auto_coder.pr_correction_job import PRCorrectionJobAdapter, offer_pr_correction_job, resume_pr_correction_publication
 from auto_coder.pr_processor import ReviewRepairRouteDecision, ReviewRepairRouteDisposition
 from auto_coder.util.gh_cache import PullRequestRoutingMetadata, ReviewThread, ReviewThreadComment
@@ -81,6 +82,7 @@ def test_offer_is_durable_and_replay_does_not_consume_another_generation(tmp_pat
 @pytest.mark.parametrize("marker_count", [0, 1, 2])
 def test_adapter_revalidates_exact_head_route_and_allowance_before_entry(tmp_path: Path, marker_count: int) -> None:
     github = MagicMock()
+    github.get_pr_automation_history_strict.return_value = PRCommitHistory("head-1", 1, (PRCommit("head-1", "Existing candidate"),))
     github.get_pull_request_routing_metadata_strict.return_value = PullRequestRoutingMetadata("https://api.github.com", "owner/repo", 42, "open", "<!-- auto-coder:local-llm -->", "owner/repo", "repair", "head-1")
     thread = ReviewThread(id="thread-1", comments=[ReviewThreadComment(database_id=1, body="fix")])
     github.get_pr_review_threads_strict.return_value = [thread]
@@ -141,7 +143,7 @@ def test_publication_pending_result_resumes_without_another_model_invocation(tmp
             return_value=LocalReviewRepairOutcome("awaiting_validation", "published", executed=True, published=True),
         ) as resume,
     ):
-        assert resume_pr_correction_publication(retained, jobs) == "awaiting_validation"
+        assert resume_pr_correction_publication(retained, jobs, github_client=MagicMock()) == "awaiting_validation"
 
     assert "executor" not in resume.call_args.kwargs
 

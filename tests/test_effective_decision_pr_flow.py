@@ -58,6 +58,7 @@ from auto_coder.util.gh_cache import PullRequestRoutingMetadata, ReviewThread, R
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from auto_coder.utils import CommandResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_accepted_finding_bridge import (  # noqa: F401  (env is a shared fixture)
     CONTRACT,
     POLICY,
@@ -181,6 +182,7 @@ class Flow:
         self.head = self.head or self.env.head
         self.current_base = self.current_base or self.env.base
         self.router = RouterClient(self.head)
+        install_pr_history(self.client, lambda _repo, _pr: self.live_head or self.head)
         # Retain the same production publication proof used at public ingress.
         if self.origin == "cloud":
             if self.provider_name == "codex-cloud":
@@ -208,7 +210,7 @@ class Flow:
         reviewer = reviewer_for(self.env.tmp, self.monkeypatch, self.router)
         config = ReviewerAppConfig("4765828", "client", self.env.tmp / "reviewer.pem")
         with patch("auto_coder.pr_processor.load_reviewer_app_config", return_value=config), patch("auto_coder.pr_processor.GitHubAppReviewer", return_value=reviewer):
-            published, reason = _consume_pending_two_tier_publication(REPO, self.pr, inputs)
+            published, reason = _consume_pending_two_tier_publication(REPO, self.pr, inputs, github_client=self.client)
         assert published, reason
         observation = reviewer.observe_authenticated_review_roots(REPO, self.pr, strong.head_sha)
         assert observation.complete and len(observation.roots) == 1
