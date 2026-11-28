@@ -50,14 +50,12 @@ from auto_coder.github_pending_work import PendingWorkStore, WorkIdentity
 from auto_coder.llm_backend_config import get_pr_repair_max_failed_corrections
 from auto_coder.pr_processor import (
     _close_empty_pr,
-    _close_stale_jules_pr,
     _delegate_cloud_review_thread_repair,
     _handle_pr_merge,
     _merge_pr,
     _reject_unsafe_codex_cloud_pr,
     _send_adversarial_validation_feedback_to_cloud_task,
     _send_codex_cloud_error_feedback,
-    _send_jules_error_feedback,
     _start_mergeability_remediation,
 )
 from auto_coder.pr_repair_guard import (
@@ -246,17 +244,10 @@ def test_as002_bypass_matrix_stopped(allowance_store: RepairAllowanceLedger, mon
     unsafe_result = _reject_unsafe_codex_cloud_pr(mock_gh, REPO, {"number": PR_NUMBER, "head": {"ref": "work"}}, config)
     assert not unsafe_result.closed
 
-    stale_jules = _close_stale_jules_pr(mock_gh, REPO, {"number": PR_NUMBER, "user": {"login": "google-labs-jules"}}, config)
-    assert not stale_jules.closed
-
     # 3. Provider error feedback stopped
     codex_feedback = _send_codex_cloud_error_feedback(REPO, pr_data, [], config, mock_gh)
     assert not codex_feedback.delivered
     assert any("repair allowance is exhausted" in a for a in codex_feedback.actions)
-
-    jules_feedback = _send_jules_error_feedback(REPO, pr_data, [], config, mock_gh)
-    assert any("repair allowance is exhausted" in a for a in jules_feedback.actions)
-    assert jules_feedback.attempt_started is False
 
     # 4. Review repair delegation stopped
     review_feedback = _delegate_cloud_review_thread_repair(REPO, pr_data, mock_gh)

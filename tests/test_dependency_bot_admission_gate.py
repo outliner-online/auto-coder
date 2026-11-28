@@ -161,9 +161,9 @@ class TestEvaluateDependencyBotAdmission:
         assert decision.allowed is True
         assert client.calls == 0
 
-    def test_jules_bot_is_not_classified_as_dependency_bot(self):
+    def test_retired_provider_bot_uses_generic_bot_policy(self):
         client = _FakeStrictClient()
-        config = _config()
+        config = _config(auto_merge=False)
         pr_data = {"number": 1, "author": "google-labs-jules[bot]", "head": {"ref": "x"}, "mergeable": True}
         decision = evaluate_dependency_bot_admission(client, "o/r", pr_data, config)
         assert decision.allowed is True

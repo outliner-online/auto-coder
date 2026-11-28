@@ -538,7 +538,6 @@ def test_missing_history_after_restart_fences_ambiguous_pr_at_production_boundar
             ),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[7]),
             patch("auto_coder.pr_processor._close_linked_issues"),
-            patch("auto_coder.pr_processor._archive_jules_session"),
         ):
             assert _merge_pr(
                 "owner/repo",
@@ -615,7 +614,6 @@ def test_observation_open_failure_preserves_ledger_binding_at_both_boundaries(tm
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
             patch("auto_coder.pr_processor._close_linked_issues"),
-            patch("auto_coder.pr_processor._archive_jules_session"),
         ):
             assert _merge_pr("owner/repo", 60, {}, AutomationConfig(), github_client=github)
         outbound.pulls.merge.assert_called_once()
@@ -727,7 +725,6 @@ def test_fresh_runtime_receipt_does_not_authorize_existing_repository_prs(
             ),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[]),
             patch("auto_coder.pr_processor._close_linked_issues"),
-            patch("auto_coder.pr_processor._archive_jules_session"),
         ):
             assert _merge_pr("owner/repo", 64, {}, AutomationConfig(), github_client=github)
         outbound_api.pulls.merge.assert_called_once()
@@ -878,7 +875,6 @@ def test_unreadable_history_at_startup_preserves_proven_origin_and_unknown(
                 side_effect=lambda _repo, current, _client: ([72] if current.get("number") == 72 else []),
             ),
             patch("auto_coder.pr_processor._close_linked_issues"),
-            patch("auto_coder.pr_processor._archive_jules_session"),
             patch("auto_coder.pr_processor._record_pr_stage") as record_stage,
         ):
             metadata_api.pulls.get.return_value = dict(local_pr)
@@ -1078,7 +1074,6 @@ def test_unavailable_retired_evidence_allows_claude_and_local_prs_at_production_
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
             patch("auto_coder.pr_processor._close_linked_issues"),
-            patch("auto_coder.pr_processor._archive_jules_session"),
         ):
             github.get_issue.return_value = {"state": "open", "body": f"ordinary {origin} issue"}
             assert _merge_pr(repository, pr_number, {}, AutomationConfig(), github_client=github) is True
@@ -1203,7 +1198,6 @@ def test_unavailable_ledger_allows_durably_attributed_codex_pr_at_production_bou
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
             patch("auto_coder.pr_processor._close_linked_issues"),
-            patch("auto_coder.pr_processor._archive_jules_session"),
         ):
             github.get_issue.return_value = {"state": "open", "body": "ordinary codex issue"}
             assert _merge_pr(repository, pr_number, {}, AutomationConfig(), github_client=github) is True
@@ -1446,7 +1440,6 @@ def test_restarted_persisted_generation_fences_ingress_and_final_merge_transport
             patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
             patch("auto_coder.pr_processor._resolve_pr_issue_numbers", return_value=[issue_number]),
             patch("auto_coder.pr_processor._close_linked_issues"),
-            patch("auto_coder.pr_processor._archive_jules_session"),
         ):
             github.get_issue.return_value = {"state": "open", "body": "requirements-v1"}
             # Both historical artifacts reach the real final entry and are

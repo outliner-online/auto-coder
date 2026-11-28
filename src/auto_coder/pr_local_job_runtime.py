@@ -62,9 +62,9 @@ def build_pr_local_job_adapters(
     from .codex_pr_attribution import AttributionDisposition, CodexPrAttributionRepository
     from .local_ci_repair_job import LocalCIRepairJobPorts, build_local_ci_repair_job_adapter
     from .pr_processor import (
+        _has_retired_provider_bot_origin,
         _is_codex_or_claude_pr,
         _is_dependabot_pr,
-        _is_jules_pr,
         _is_local_llm_pr,
         build_durable_ci_correction,
     )
@@ -78,7 +78,7 @@ def build_pr_local_job_adapters(
         return isinstance(payload, dict) and payload.get("explicit_local_checkout") is True
 
     def conflict_route(_job: object, metadata: dict[str, Any]) -> bool:
-        return not (_is_codex_or_claude_pr(metadata) or _is_jules_pr(metadata) or _is_dependabot_pr(metadata))
+        return not (_has_retired_provider_bot_origin(metadata) or _is_codex_or_claude_pr(metadata) or _is_dependabot_pr(metadata))
 
     def conflict_authority(job: Any, _metadata: dict[str, Any]) -> bool:
         """Refresh every revocable execution-time conflict authority."""

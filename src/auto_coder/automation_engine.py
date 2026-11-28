@@ -137,7 +137,7 @@ from .parent_issue_reconciliation import ParentDeclarationStatus, ParentOperatio
 from .pr_processor import PR_PROCESSING_STAGE, DraftPRAdmissionEvidence, DraftPRRepairAuthority, LocalPRRepairContext
 from .pr_processor import _create_pr_analysis_prompt as _engine_pr_prompt
 from .pr_processor import _get_pr_diff as _pr_get_diff
-from .pr_processor import _should_skip_waiting_for_jules, draft_pr_repair_authority_scope, process_pull_request
+from .pr_processor import draft_pr_repair_authority_scope, process_pull_request
 from .progress_footer import ProgressStage
 from .prompt_loader import render_prompt
 from .reissue_required_store import ReissueRequiredStore
@@ -6076,11 +6076,9 @@ class AutomationEngine:
         from .issue_context import extract_linked_issues_from_pr_body
         from .pr_processor import (
             _close_empty_pr,
-            _close_stale_jules_pr,
             _dependency_bot_flag_decision,
             _dependency_bot_readiness_decision,
             _is_dependabot_pr,
-            _is_jules_pr,
             _reject_unsafe_codex_cloud_pr,
             evaluate_retired_jules_ingress,
             is_current_head_adversarial_review_blocked,
@@ -6092,7 +6090,6 @@ class AutomationEngine:
         )
 
         candidates: List[Candidate] = []
-        # Issues queued from the stale-Jules-PR path, to avoid queueing them twice
         requeued_issue_numbers: set[int] = set()
 
         try:
@@ -6142,9 +6139,6 @@ class AutomationEngine:
 
             pr_data_list = safe_pr_data_list
 
-            # Lazy-load repository object if needed for Jules PRs
-            repo = None
-
             for pr_data in pr_data_list:
                 labels = pr_data.get("labels", []) or []
 
@@ -6157,53 +6151,6 @@ class AutomationEngine:
                 if not self._is_pr_author_allowed(pr_data):
                     logger.debug(f"Skipping PR #{pr_number} - author not in PR allowlist")
                     continue
-
-                # Check if Jules PR is a draft and mark as ready if so
-                # This must be done BEFORE checking GitHub Actions status, as some actions only run on ready PRs
-                if _is_jules_pr(pr_data) and pr_data.get("draft"):
-                    logger.info(f"Jules PR #{pr_number} is a draft, marking as ready for review")
-                    try:
-                        api = self.github.api_for(repo_name, required_permissions={"pull_requests": "read"})
-                        node_id = pr_data.get("node_id")
-
-                        if not node_id:
-                            logger.info(f"Node ID missing for PR #{pr_number}, fetching details...")
-                            try:
-                                # Fallback: Fetch PR details to get node_id
-                                owner, repo = repo_name.split("/")
-                                pr_details = api.pulls.get(owner, repo, pr_number)
-                                node_id = pr_details.get("node_id")
-                                if node_id:
-                                    # Update local data
-                                    pr_data["node_id"] = node_id
-                            except Exception as e:
-                                logger.warning(f"Failed to fetch details for PR #{pr_number}: {e}")
-
-                        if node_id:
-                            end_ci_read_phase("mark-pr-ready")
-                            # GraphQL mutation to mark as ready
-                            mutation = """
-                            mutation($id: ID!) {
-                              markPullRequestReadyForReview(input: {pullRequestId: $id}) {
-                                pullRequest {
-                                  isDraft
-                                }
-                              }
-                            }
-                            """
-                            self.github.graphql_query(
-                                query=mutation,
-                                variables={"id": node_id},
-                                repo_name=repo_name,
-                                required_permissions={"pull_requests": "write"},
-                            )
-                            logger.info(f"Successfully marked Jules PR #{pr_number} as ready for review (via GraphQL)")
-                            # Update local data
-                            pr_data["draft"] = False
-                        else:
-                            logger.warning(f"Could not mark Jules PR #{pr_number} as ready: missing node_id after fetch attempt")
-                    except Exception as e:
-                        logger.error(f"Failed to mark Jules PR #{pr_number} as ready: {e}")
 
                 # Close PRs that have zero effective diff.
                 # Runs before label and stale checks so empty PRs are cleaned up and retried immediately.
@@ -6221,26 +6168,6 @@ class AutomationEngine:
                             candidates.append(issue_candidate)
                             requeued_issue_numbers.add(issue_number)
                             logger.info(f"Queued issue #{issue_number} for a new attempt after closing empty PR #{pr_number}")
-                    continue
-
-                # Close Jules PRs that could not get CI green within the configured timeout.
-                # This runs before the label and "waiting for Jules" skips below, because a
-                # stale Jules PR normally still carries the @auto-coder label from an earlier
-                # run and would otherwise never be looked at again.
-                end_ci_read_phase("stale-jules-policy")
-                stale_jules_result = _close_stale_jules_pr(self.github, repo_name, pr_data, self.config)
-                if stale_jules_result.closed:
-                    for action in stale_jules_result.actions:
-                        logger.info(f"PR #{pr_number}: {action}")
-                    # Queue the unlocked issue(s) right away so the new attempt starts in
-                    # this cycle instead of waiting for the next poll.
-                    for issue_number in stale_jules_result.issue_numbers:
-                        issue_candidate = self._create_candidate_from_single(repo_name, "issue", issue_number)
-                        if issue_candidate:
-                            issue_candidate.priority = 3
-                            candidates.append(issue_candidate)
-                            requeued_issue_numbers.add(issue_number)
-                            logger.info(f"Queued issue #{issue_number} for a new attempt after closing stale Jules PR #{pr_number}")
                     continue
 
                 # Skip if another instance is processing (@auto-coder label present) using LabelManager check
@@ -6291,14 +6218,6 @@ class AutomationEngine:
                 if not should_continue:
                     logger.info(f"PR #{pr_number} retained by candidate progress policy ({progress.reason})")
 
-                # Check if we should skip this PR because it's waiting for Jules.
-                # ``checks`` is this same current-head CI observation, so a
-                # recovered CI never gets excluded here only for the processor
-                # to release the same wait moments later (Issue #2275, REQ-007).
-                if _should_skip_waiting_for_jules(self.github, repo_name, pr_data, github_checks=checks):
-                    logger.info(f"Skipping PR #{pr_number} - waiting for Jules to fix CI failures")
-                    continue
-
                 mergeable = pr_data.get("mergeable", True)
 
                 # Handle dependency-bot PRs based on configuration, using the
@@ -6332,69 +6251,6 @@ class AutomationEngine:
                 if not dependency_bot_decision.allowed:
                     logger.debug(f"Skipping dependency-bot PR #{pr_number} at collector prefilter: {dependency_bot_decision.reason}")
                     continue
-
-                # Check if PR is created by Jules and waiting for Jules update
-                if pr_data.get("author") == "jules":
-                    try:
-                        # Fetch PR reviews and comments to check for interaction
-                        last_interaction_time = None
-                        last_interaction_type = None
-
-                        # Check reviews
-                        reviews = self.github.get_pr_reviews(repo_name, pr_number)
-                        for review in reviews:
-                            user = review.get("user")
-                            if user and user.get("login") != "jules":
-                                submitted_at = review.get("submitted_at")
-                                if submitted_at:
-                                    dt = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
-                                    if last_interaction_time is None or dt > last_interaction_time:
-                                        last_interaction_time = dt
-                                        last_interaction_type = review.get("state")
-
-                        # Check comments
-                        comments = self.github.get_pr_comments(repo_name, pr_number)
-                        from .util.github_action import is_verified_prompt_regression_advisory_comment
-
-                        pr_head_sha = str(pr_data.get("head", {}).get("sha") or "")
-                        for comment in comments:
-                            if is_verified_prompt_regression_advisory_comment(repo_name, pr_number, pr_head_sha, comment):
-                                continue
-                            user = comment.get("user")
-                            if user and user.get("login") != "jules":
-                                created_at = comment.get("created_at")
-                                if created_at:
-                                    dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                                    if last_interaction_time is None or dt > last_interaction_time:
-                                        last_interaction_time = dt
-                                        last_interaction_type = "COMMENT"
-
-                        if last_interaction_time and last_interaction_type != "APPROVED":
-                            # Check for Jules commits after interaction
-                            commits = self.github.get_pr_commits(repo_name, pr_number)
-                            jules_responded = False
-                            if commits:
-                                for commit_data in reversed(commits):
-                                    # Check commit date
-                                    committer = commit_data.get("commit", {}).get("committer", {})
-                                    commit_date_str = committer.get("date")
-                                    if commit_date_str:
-                                        commit_date = datetime.fromisoformat(commit_date_str.replace("Z", "+00:00"))
-                                        if commit_date > last_interaction_time:
-                                            author = commit_data.get("author")
-                                            if author and author.get("login") == "jules":
-                                                jules_responded = True
-                                                break
-                                        else:
-                                            # Commits are ordered, so if we hit an older one, we can stop
-                                            break
-
-                            if not jules_responded:
-                                logger.info(f"Skipping PR #{pr_number} - Waiting for Jules to update (requested at {last_interaction_time})")
-                                continue
-
-                    except Exception as e:
-                        logger.warning(f"Failed to check Jules PR status for #{pr_number}: {e}")
 
                 # Calculate priority
                 # Enhanced priority logic to distinguish unmergeable PRs
@@ -8537,9 +8393,9 @@ class AutomationEngine:
 
                     increment_attempt(repo_name, item_number)
 
-            # Close empty PRs or stale Jules PRs before the label gate below.
+            # Close empty PRs before the label gate below.
             if item_type == "pr":
-                from .pr_processor import _close_empty_pr, _close_stale_jules_pr
+                from .pr_processor import _close_empty_pr
 
                 empty_pr_result = _close_empty_pr(self.github, repo_name, candidate.data, config)
                 if empty_pr_result.closed:
@@ -8548,18 +8404,6 @@ class AutomationEngine:
                     result.actions = list(empty_pr_result.actions)
                     # Start the new attempt on the unlocked issue(s) right away
                     for issue_number in empty_pr_result.issue_numbers:
-                        result.actions.extend(self._process_unlocked_issue(repo_name, issue_number, config, jules_mode))
-                    result.success = True
-                    result.target_outcome = ExplicitTargetOutcome.SUCCESS
-                    return result
-
-                stale_jules_result = _close_stale_jules_pr(self.github, repo_name, candidate.data, config)
-                if stale_jules_result.closed:
-                    for action in stale_jules_result.actions:
-                        logger.info(f"PR #{item_number}: {action}")
-                    result.actions = list(stale_jules_result.actions)
-                    # Start the new attempt on the unlocked issue(s) right away
-                    for issue_number in stale_jules_result.issue_numbers:
                         result.actions.extend(self._process_unlocked_issue(repo_name, issue_number, config, jules_mode))
                     result.success = True
                     result.target_outcome = ExplicitTargetOutcome.SUCCESS

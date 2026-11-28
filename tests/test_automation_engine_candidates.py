@@ -11,8 +11,7 @@ from tests.ci_observation_fakes import authoritative_ci_status
 class TestAutomationEngineCandidates:
     """Test cases for _get_candidates method in AutomationEngine."""
 
-    @patch("auto_coder.pr_processor._is_jules_pr")
-    def test_get_candidates_unknown_jules_draft_pr_is_fenced(self, mock_is_jules_pr, mock_github_client):
+    def test_get_candidates_unknown_jules_draft_pr_is_fenced(self, mock_github_client):
         """An unknown historical candidate must remain draft and unprocessed."""
         # Setup
         config = AutomationConfig()
@@ -27,22 +26,17 @@ class TestAutomationEngineCandidates:
         mock_github_client.get_pr_automation_history_strict.return_value = PRCommitHistory(pr_data["head"]["sha"], 1, (PRCommit(pr_data["head"]["sha"], "Existing candidate"),))
 
         # Mock _is_jules_pr to return True
-        mock_is_jules_pr.return_value = True
 
         # Mock other dependencies to avoid errors
         with (
             patch("auto_coder.automation_engine.LabelManager") as mock_label_manager,
             patch("auto_coder.util.github_action.check_github_actions_and_exit_if_in_progress") as mock_check_actions,
             patch("auto_coder.util.github_action._check_github_actions_status") as mock_check_status,
-            patch("auto_coder.pr_processor._should_skip_waiting_for_jules") as mock_skip_jules,
-            patch("auto_coder.pr_processor._close_stale_jules_pr") as mock_close_stale,
         ):
 
             mock_label_manager.return_value.__enter__.return_value = True
             mock_check_actions.return_value = True
             mock_check_status.side_effect = authoritative_ci_status(success=True, ids=[1])
-            mock_skip_jules.return_value = False
-            mock_close_stale.return_value = StaleJulesPRResult()
 
             # Execute
             candidates = engine._get_candidates(repo_name)
@@ -50,10 +44,8 @@ class TestAutomationEngineCandidates:
         mock_github_client.graphql_query.assert_not_called()
         assert pr_data["draft"] is True
         assert candidates == []
-        mock_close_stale.assert_not_called()
 
-    @patch("auto_coder.pr_processor._is_jules_pr")
-    def test_get_candidates_unknown_jules_ready_pr_is_fenced(self, mock_is_jules_pr, mock_github_client):
+    def test_get_candidates_unknown_jules_ready_pr_is_fenced(self, mock_github_client):
         """Ready status does not prove historical selection or unrelated origin."""
         # Setup
         config = AutomationConfig()
@@ -68,22 +60,17 @@ class TestAutomationEngineCandidates:
         mock_github_client.get_pr_automation_history_strict.return_value = PRCommitHistory(pr_data["head"]["sha"], 1, (PRCommit(pr_data["head"]["sha"], "Existing candidate"),))
 
         # Mock _is_jules_pr to return True
-        mock_is_jules_pr.return_value = True
 
         # Mock other dependencies
         with (
             patch("auto_coder.automation_engine.LabelManager") as mock_label_manager,
             patch("auto_coder.util.github_action.check_github_actions_and_exit_if_in_progress") as mock_check_actions,
             patch("auto_coder.util.github_action._check_github_actions_status") as mock_check_status,
-            patch("auto_coder.pr_processor._should_skip_waiting_for_jules") as mock_skip_jules,
-            patch("auto_coder.pr_processor._close_stale_jules_pr") as mock_close_stale,
         ):
 
             mock_label_manager.return_value.__enter__.return_value = True
             mock_check_actions.return_value = True
             mock_check_status.side_effect = authoritative_ci_status(success=True, ids=[1])
-            mock_skip_jules.return_value = False
-            mock_close_stale.return_value = StaleJulesPRResult()
 
             # Execute
             candidates = engine._get_candidates(repo_name)
@@ -94,10 +81,8 @@ class TestAutomationEngineCandidates:
 
         # Verify candidate was created
         assert candidates == []
-        mock_close_stale.assert_not_called()
 
-    @patch("auto_coder.pr_processor._is_jules_pr")
-    def test_get_candidates_non_jules_draft_pr(self, mock_is_jules_pr, mock_github_client):
+    def test_get_candidates_non_jules_draft_pr(self, mock_github_client):
         """Test that non-Jules draft PRs are NOT marked as ready."""
         # Setup
         config = AutomationConfig()
@@ -112,22 +97,17 @@ class TestAutomationEngineCandidates:
         mock_github_client.get_pr_automation_history_strict.return_value = PRCommitHistory(pr_data["head"]["sha"], 1, (PRCommit(pr_data["head"]["sha"], "Existing candidate"),))
 
         # Mock _is_jules_pr to return False
-        mock_is_jules_pr.return_value = False
 
         # Mock other dependencies
         with (
             patch("auto_coder.automation_engine.LabelManager") as mock_label_manager,
             patch("auto_coder.util.github_action.check_github_actions_and_exit_if_in_progress") as mock_check_actions,
             patch("auto_coder.util.github_action._check_github_actions_status") as mock_check_status,
-            patch("auto_coder.pr_processor._should_skip_waiting_for_jules") as mock_skip_jules,
-            patch("auto_coder.pr_processor._close_stale_jules_pr") as mock_close_stale,
         ):
 
             mock_label_manager.return_value.__enter__.return_value = True
             mock_check_actions.return_value = True
             mock_check_status.side_effect = authoritative_ci_status(success=True, ids=[1])
-            mock_skip_jules.return_value = False
-            mock_close_stale.return_value = StaleJulesPRResult()
 
             # Execute
             candidates = engine._get_candidates(repo_name)

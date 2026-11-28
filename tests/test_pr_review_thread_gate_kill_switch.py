@@ -196,14 +196,12 @@ class TestAS001UnresolvedHumanThreadBypassed:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._delegate_cloud_review_thread_repair")
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
     def test_production_pr_processing_bypasses_human_thread_and_merges(
         self,
         mock_merge_pr,
         mock_repair,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -271,12 +269,10 @@ class TestAS002DisabledModeIsNonDestructive:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
     def test_repeated_processing_does_not_mutate_review_threads_on_github(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -327,12 +323,10 @@ class TestAS003ThreadLookupFailureDoesNotStopPR:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
     def test_graphql_lookup_failure_does_not_fail_or_defer_pr(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -363,12 +357,10 @@ class TestAS003ThreadLookupFailureDoesNotStopPR:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
     def test_missing_strict_getter_does_not_apply_fail_closed_substitute(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -415,12 +407,10 @@ class TestAS004NoGateOnlyLookup:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
     def test_no_thread_lookup_when_adversarial_validation_disabled(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -450,12 +440,10 @@ class TestAS004NoGateOnlyLookup:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
     def test_no_thread_lookup_when_adversarial_validation_not_applicable(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -520,12 +508,10 @@ class TestAS005AdversarialValidationRemainsIndependent:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr")
     def test_adversarial_needs_fix_blocks_merge_when_gate_disabled(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -566,12 +552,10 @@ class TestAS006GitHubRequiredReviewCannotBeBypassed:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr", return_value=False)
     def test_github_merge_refusal_is_authoritative(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -612,14 +596,12 @@ class TestAS007AS008ReenableSemantics:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._delegate_cloud_review_thread_repair")
     @patch("auto_coder.pr_processor._merge_pr")
     def test_as007_reenable_with_still_unresolved_thread_blocks_and_repairs(
         self,
         mock_merge_pr,
         mock_repair,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -655,12 +637,10 @@ class TestAS007AS008ReenableSemantics:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
     def test_as008_reenable_after_real_external_resolution_merges(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,

@@ -460,38 +460,6 @@ def resolve_merge_conflicts_with_llm(
 # _extract_linked_issues removed in favor of issue_context.extract_linked_issues_from_pr_body
 
 
-def _extract_session_id_from_pr_body(pr_body: str) -> Optional[str]:
-    """Extract Session ID from PR body."""
-    if not pr_body:
-        return None
-
-    # Pattern 1: Look for "Session ID:" or "Session:" followed by the session ID
-    session_pattern = r"(?:session\s*id:|session:)\s*(.+?)(?:\n|$)"
-    match = re.search(session_pattern, pr_body, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    # Pattern 2: Look for URLs that might contain session IDs
-    url_session_pattern = r"(?:session(?:_id)?=)([a-zA-Z0-9-_]+)"
-    match = re.search(url_session_pattern, pr_body, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    # Pattern 3: Look for Jules session URLs (e.g., https://jules.google.com/session/901463134778726610)
-    jules_session_pattern = r"jules\.google\.com/session/([a-zA-Z0-9-_]+)"
-    match = re.search(jules_session_pattern, pr_body)
-    if match:
-        return match.group(1).strip()
-
-    # Pattern 4: Look for Jules task URLs
-    jules_task_pattern = r"https?://jules\.google\.com/task/(\d+)"
-    match = re.search(jules_task_pattern, pr_body)
-    if match:
-        return match.group(1).strip()
-
-    return None
-
-
 def _close_pr(repo_name: str, pr_number: int) -> None:
     """Close a PR."""
     try:
@@ -500,33 +468,6 @@ def _close_pr(repo_name: str, pr_number: int) -> None:
         logger.info(f"Closed PR #{pr_number}")
     except Exception as e:
         logger.error(f"Error closing PR #{pr_number}: {e}")
-
-
-def _archive_jules_session(repo_name: str, pr_number: int, pr_body: str) -> None:
-    """Archive Jules session."""
-    try:
-        session_id = _extract_session_id_from_pr_body(pr_body)
-        if not session_id:
-            logger.warning(f"No session ID found in Jules PR #{pr_number} body for archiving")
-            return
-
-        # Archive the Jules session
-        try:
-            from .jules_client import JulesClient
-
-            jules_client = JulesClient()
-            success = jules_client.archive_session(session_id)
-
-            if success:
-                logger.info(f"Archived Jules session '{session_id}' for PR #{pr_number}")
-                log_action(f"Archived Jules session for PR #{pr_number}")
-            else:
-                logger.warning(f"Failed to archive Jules session '{session_id}' for PR #{pr_number}")
-        except Exception as e:
-            logger.warning(f"Error archiving Jules session for PR #{pr_number}: {e}")
-
-    except Exception as e:
-        logger.warning(f"Error processing Jules session archiving for PR #{pr_number}: {e}")
 
 
 def _perform_base_branch_merge_and_conflict_resolution(
@@ -648,14 +589,14 @@ def _perform_base_branch_merge_and_conflict_resolution(
 
             # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
             # the bot recreates the PR against the updated base branch by itself.
-            from .pr_processor import _is_dependabot_pr, _is_jules_pr, _is_local_llm_pr
+            from .pr_processor import _is_dependabot_pr, _is_local_llm_pr
 
             if _is_dependabot_pr(pr_data):
                 logger.info(f"Skipping merge conflict resolution for dependency-bot PR #{pr_number}")
                 cmd.run_command(["git", "merge", "--abort"])
                 return False
 
-            if not _is_local_llm_pr(pr_data) and not _is_jules_pr(pr_data):
+            if not _is_local_llm_pr(pr_data):
                 logger.info(f"Skipping merge conflict resolution for non-local PR #{pr_number}")
                 cmd.run_command(["git", "merge", "--abort"])
                 return False
@@ -671,16 +612,6 @@ def _perform_base_branch_merge_and_conflict_resolution(
 
             if not safe_to_merge:
                 logger.info(f"LLM determined merge would degrade code quality for PR #{pr_number}, skipping merge attempt")
-
-                # Check if PR is from Jules
-                pr_author_login = get_pr_author_login(pr_data) or ""
-                is_jules_pr = "google-labs-jules" in pr_author_login.lower()
-
-                if is_jules_pr:
-                    logger.info(f"PR #{pr_number} is a historical Jules PR with degrade risk. Closing PR without mutating its provider session.")
-                    if repo_name:
-                        _close_pr(repo_name, pr_number)
-                    return False
 
                 # Trigger fallback and signal to proceed to fixing
                 _trigger_fallback_for_conflict_failure(

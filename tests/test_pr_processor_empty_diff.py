@@ -12,7 +12,7 @@ from src.auto_coder.pr_processor import (
     PRProcessingOutcome,
     _close_empty_pr,
     _is_empty_pr,
-    _link_jules_pr_to_issue,
+    _link_supported_provider_pr_to_issue,
     _resolve_pr_issue_numbers,
     process_pull_request,
 )
@@ -138,20 +138,6 @@ class TestResolvePRIssueNumbers:
         issues = _resolve_pr_issue_numbers("owner/repo", pr_data, github_client)
         assert 4800 in issues
         assert 4801 in issues
-
-    def test_resolves_from_branch_name(self):
-        pr_data = {"body": "", "head": {"ref": "issue-4805"}}
-        github_client = Mock()
-        with patch("src.auto_coder.pr_processor._resolve_jules_pr_issue_number", return_value=None):
-            issues = _resolve_pr_issue_numbers("owner/repo", pr_data, github_client)
-            assert issues == [4805]
-
-    def test_resolves_from_title(self):
-        pr_data = {"body": "", "head": {"ref": "some-random-branch"}, "title": "Fix #4810 issue"}
-        github_client = Mock()
-        with patch("src.auto_coder.pr_processor._resolve_jules_pr_issue_number", return_value=None):
-            issues = _resolve_pr_issue_numbers("owner/repo", pr_data, github_client)
-            assert issues == [4810]
 
 
 class TestCloseEmptyPR:
@@ -561,7 +547,7 @@ class TestAutomationEngineEmptyPRRequeue:
         # This is the same production link step reached after a nonempty PR is
         # admitted.  It must not turn retained session history into body text
         # that a later daemon cycle treats as explicit authorization.
-        assert _link_jules_pr_to_issue("owner/repo", historical_pr, github) is False
+        assert _link_supported_provider_pr_to_issue("owner/repo", historical_pr, github) is True
         github.update_pr_body.assert_not_called()
         assert "close #42" not in historical_pr["body"].lower()
 

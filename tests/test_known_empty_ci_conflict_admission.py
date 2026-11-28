@@ -73,9 +73,6 @@ def test_real_ci_decoding_controls_conflicting_candidate_admission(mock_github_c
         patch("auto_coder.util.github_action.get_ghapi_client", return_value=api),
         patch("auto_coder.automation_engine.LabelManager") as labels,
         patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult()),
-        patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult()),
-        patch("auto_coder.pr_processor._should_skip_waiting_for_jules", return_value=False),
-        patch("auto_coder.pr_processor._is_jules_pr", return_value=False),
     ):
         labels.return_value.__enter__.return_value = True
         candidates = engine._get_candidates("owner/repo")
@@ -120,9 +117,6 @@ def test_known_empty_collector_diagnostics_match_policy_membership(mock_github_c
         patch("auto_coder.automation_engine.logger.debug") as engine_debug,
         patch("auto_coder.automation_engine.LabelManager") as labels,
         patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult()),
-        patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult()),
-        patch("auto_coder.pr_processor._should_skip_waiting_for_jules", return_value=False),
-        patch("auto_coder.pr_processor._is_jules_pr", return_value=False),
     ):
         labels.return_value.__enter__.return_value = True
         candidates = engine._get_candidates("owner/repo")
@@ -168,9 +162,6 @@ def test_unavailable_ci_conflict_survives_collection_and_reaches_remediation(moc
         patch("auto_coder.util.github_action.get_ghapi_client", return_value=api),
         patch("auto_coder.automation_engine.LabelManager") as labels,
         patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult()),
-        patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult()),
-        patch("auto_coder.pr_processor._should_skip_waiting_for_jules", return_value=False),
-        patch("auto_coder.pr_processor._is_jules_pr", return_value=False),
     ):
         labels.return_value.__enter__.return_value = True
         candidates = engine._get_candidates("owner/repo")
@@ -230,9 +221,6 @@ def test_pending_candidate_recovers_and_reconstructed_engine_processes_durable_w
         patch("auto_coder.automation_engine.LabelManager", return_value=label_context),
         patch("auto_coder.pr_processor.LabelManager", return_value=label_context),
         patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult()),
-        patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult()),
-        patch("auto_coder.pr_processor._should_skip_waiting_for_jules", return_value=False),
-        patch("auto_coder.pr_processor._is_jules_pr", return_value=False),
         patch("auto_coder.pr_processor._reject_unsafe_codex_cloud_pr") as unsafe,
         patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
         patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"}),
@@ -270,7 +258,6 @@ def test_pending_candidate_recovers_and_reconstructed_engine_processes_durable_w
             patch("auto_coder.pr_processor.check_pr_repair_exhaustion", return_value=None),
             patch("auto_coder.pr_processor._start_mergeability_remediation", return_value=PRActionList(["entered remediation"])) as remediation,
             patch("auto_coder.pr_processor._link_codex_cloud_pr_to_issue", return_value=None),
-            patch("auto_coder.pr_processor._link_jules_pr_to_issue", return_value=True),
             patch("auto_coder.util.github_action.trigger_workflow_dispatch") as dispatch,
         ):
             processed = reconstructed._process_single_candidate_unified("owner/repo", rebuilt_pr, config)

@@ -189,23 +189,6 @@ def test_issue_declaration_discovery_uses_installation_credentials():
     assert provider.requests == [("owner/repo", {"issues": "read"})] * 2
 
 
-def test_jules_projection_and_timeline_use_installation_credentials():
-    from auto_coder.pr_processor import _update_jules_pr_body
-
-    provider = RenewableProvider()
-    client = GitHubClient(auth_provider=provider, repository="owner/repo")
-    transport = Mock()
-    request = httpx.Request("PATCH", "https://api.github.com/repos/owner/repo/pulls/7")
-    transport.request.return_value = httpx.Response(200, json={}, request=request)
-    with patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport), patch("auto_coder.pr_processor.validate_issue_references"):
-        assert _update_jules_pr_body("owner/repo", 7, "body", 42, client) is True
-    assert transport.request.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-one"
-    with patch("auto_coder.util.gh_cache._strict_request", return_value=httpx.Response(200, json=[], request=request)) as send:
-        assert client.get_issue_timeline_strict("owner/repo", 7) == []
-    assert send.call_args.kwargs["headers"]["Authorization"] == "Bearer installation-two"
-    assert provider.requests == [("owner/repo", {"pull_requests": "write"}), ("owner/repo", {"issues": "read"})]
-
-
 def test_open_pr_membership_observation_renews_on_each_page():
     provider = RenewableProvider()
     client = GitHubClient(auth_provider=provider, repository="owner/repo")
@@ -615,15 +598,6 @@ def test_linked_issue_cleanup_uses_injected_scoped_read_and_write_apis():
     write_api.issues.update.assert_called_once_with("owner", "repo", 42, state="closed")
 
 
-def test_confirmed_merge_finalizer_keeps_success_when_scoped_cleanup_fails():
-    from auto_coder.pr_processor import _finalize_merge_success
-
-    client = Mock()
-    client.api_for.side_effect = RuntimeError("installation unavailable")
-    with patch("auto_coder.pr_processor._archive_jules_session"):
-        assert _finalize_merge_success("owner/repo", 9, "--squash", client) is True
-
-
 def test_common_admission_distinguishes_same_body_controller_and_unrelated_bot():
     client = Mock()
     identity = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
@@ -814,50 +788,6 @@ def test_mergeability_refresh_uses_injected_installation_pr_read():
     assert provider.requests == [("owner/repo", {"pull_requests": "read"})]
 
 
-def test_jules_mode_body_update_uses_injected_installation_pr_write():
-    from auto_coder.pr_processor import _process_pr_jules_mode
-
-    provider = RenewableProvider()
-    client = GitHubClient(auth_provider=provider, repository="owner/repo")
-    transport = Mock()
-    request = httpx.Request("PATCH", "https://api.github.com/repos/owner/repo/pulls/7")
-    transport.request.side_effect = [
-        httpx.Response(200, json={"number": 7}, request=request),
-        httpx.Response(201, json={"id": 9}, request=request),
-    ]
-
-    with (
-        patch("auto_coder.util.gh_cache.get_caching_client", return_value=transport),
-        patch("auto_coder.pr_processor._is_jules_pr", return_value=False),
-        patch("auto_coder.pr_processor._get_pr_diff", return_value="diff"),
-        patch("auto_coder.pr_processor._create_pr_analysis_prompt", return_value="prompt"),
-        patch("auto_coder.pr_processor.CloudManager.add_session"),
-        patch("auto_coder.pr_processor.validate_issue_references"),
-        patch("auto_coder.jules_client.JulesClient.start_session", return_value="session-7"),
-    ):
-        actions = _process_pr_jules_mode(
-            "owner/repo",
-            {
-                "number": 7,
-                "title": "Implement feature",
-                "body": "body",
-                "head": {"ref": "issue-7"},
-            },
-            AutomationConfig(),
-            client,
-        )
-
-    assert "Updated PR body with session ID: session-7" in actions
-    assert [call.kwargs["headers"]["Authorization"] for call in transport.request.call_args_list] == [
-        "Bearer installation-one",
-        "Bearer installation-two",
-    ]
-    assert provider.requests == [
-        ("owner/repo", {"pull_requests": "write"}),
-        ("owner/repo", {"issues": "write"}),
-    ]
-
-
 def test_controller_local_merge_does_not_enter_dependency_approval(tmp_path):
     from auto_coder.merge_operation_state import MergeOperationStore
     from auto_coder.pr_processor import _merge_pr
@@ -889,7 +819,6 @@ def test_controller_local_merge_does_not_enter_dependency_approval(tmp_path):
         patch("auto_coder.pr_processor._is_pr_review_thread_gate_enabled", return_value=False),
         patch("auto_coder.pr_processor.get_speculative_jules_lifecycle", return_value=None),
         patch("auto_coder.pr_processor._close_linked_issues"),
-        patch("auto_coder.pr_processor._archive_jules_session"),
     ):
         assert _merge_pr("owner/repo", 7, {}, AutomationConfig(), github_client=client) is True
 

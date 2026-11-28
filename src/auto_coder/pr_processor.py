@@ -55,7 +55,7 @@ from .adversarial_validator import (
     validation_snapshot_is_current,
 )
 from .attempt_manager import build_pr_attempt_trigger, get_current_attempt, increment_attempt
-from .automation_config import AutomationConfig, EmptyPRResult, ExplicitTargetOutcome, ProcessedPRResult, PRProcessingOutcome, StaleJulesPRResult
+from .automation_config import AutomationConfig, EmptyPRResult, ExplicitTargetOutcome, ProcessedPRResult, PRProcessingOutcome
 from .base_update_execution import BaseUpdateConflictExecutionService, BaseUpdateExecutionRequest
 from .bounded_repair_bundle import (
     build_repair_handoff_bundle,
@@ -207,7 +207,6 @@ from .runtime_locks import LockAcquisitionTimeout, ensure_lock_directory, file_l
 from .security_utils import redact_string
 from .shutdown_context import new_work_allowed
 from .speculative_jules_lifecycle import ArtifactClassification, LifecycleDecision, get_speculative_jules_lifecycle
-from .stale_jules_recovery import stale_jules_recovery_context
 from .test_log_utils import extract_all_failed_tests, extract_first_failed_test, extract_important_errors
 from .test_result import TestResult
 from .trace_logger import get_trace_logger
@@ -2237,24 +2236,6 @@ def _dispatch_local_repair(
     return dispatch_pr_repair(request, lambda _request: operation())
 
 
-def _dispatch_jules_repair(
-    repo_name: str,
-    pr_data: Dict[str, Any],
-    kind: RepairKind,
-    session_id: str,
-    operation: Callable[[], PRRepairResult],
-) -> PRRepairResult:
-    request = _repair_request(
-        repo_name,
-        pr_data,
-        kind,
-        RepairOrigin.JULES if session_id else RepairOrigin.UNKNOWN,
-        owner_identity=session_id,
-    )
-
-    return dispatch_pr_repair(request, lambda _request: operation())
-
-
 def _dispatch_local_ci_failure_repair(
     repo_name: str,
     pr_data: Dict[str, Any],
@@ -2495,7 +2476,7 @@ def _offer_selected_local_pr_repair(
         if kind is RepairKind.CI_FAILURE:
             local_route = explicit_local_checkout or _is_local_llm_pr(final_metadata, controller_identity)
         else:
-            local_route = explicit_local_checkout or not (_is_codex_or_claude_pr(final_metadata) or _is_jules_pr(final_metadata) or _is_dependabot_pr(final_metadata, controller_identity))
+            local_route = explicit_local_checkout or not (_has_retired_provider_bot_origin(final_metadata) or _is_codex_or_claude_pr(final_metadata) or _is_dependabot_pr(final_metadata, controller_identity))
         if not local_route:
             return False
         exhaustion = check_pr_repair_exhaustion(
@@ -3707,7 +3688,10 @@ def evaluate_retired_jules_ingress(github_client: Any, repo_name: str, pr_data: 
             pr_data.clear()
             pr_data.update(refreshed)
     _record_non_jules_pr_attribution(repo_name, pr_data, github_client)
-    lifecycle = get_speculative_jules_lifecycle(github_client)
+    lifecycle = get_speculative_jules_lifecycle(
+        github_client,
+        possible_retired_ownership=_has_retired_provider_bot_origin(pr_data),
+    )
     if lifecycle is None:
         return LifecycleDecision()
     issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
@@ -3750,15 +3734,8 @@ def process_pull_request(
     implementation_slots: Optional[ImplementationSlotRepository] = None,
     local_repair_context: Optional[LocalPRRepairContext] = None,
 ) -> ProcessedPRResult:
-    """Process a single pull request with priority order.
-
-    *stage_routing*/*implementation_slots* are optional engine handles made
-    available (via a context variable, not threaded through every nested
-    helper) to ``_close_stale_jules_pr`` so it can capture a durable
-    automatic recovery identity for a Jules PR closed for stale CI (Issue
-    #2286). Omitting them preserves the historical unlinked behavior.
-    """
-    with stale_jules_recovery_context(stage_routing, implementation_slots), _local_pr_repair_scope(local_repair_context):
+    """Process a single pull request through ordinary provider-neutral gates."""
+    with _local_pr_repair_scope(local_repair_context):
         return _process_pull_request_impl(
             github_client,
             config,
@@ -3832,6 +3809,11 @@ def _process_pull_request_impl(
         projection = _link_codex_cloud_pr_to_issue(repo_name, pr_data, github_client)
         projection_action = _codex_projection_action(projection)
 
+        # Claude Routine still uses its durable task binding to recover the
+        # source Issue. Retired Jules URLs are no longer parsed by the shared
+        # candidate extractor and therefore cannot enter this boundary.
+        _link_supported_provider_pr_to_issue(repo_name, pr_data, github_client)
+
         # Close PRs with zero effective diff before any further processing.
         # This runs before the @auto-coder label check so empty PRs left from earlier
         # runs are closed and their source issues retried immediately.
@@ -3840,17 +3822,6 @@ def _process_pull_request_impl(
             processed_pr.actions_taken = [*([projection_action] if projection_action else []), *empty_pr_result.actions]
             processed_pr.priority = "close"
             _record_pr_stage(pr_number, "pr.empty-pr-recovery", f"pr#{pr_number} empty-PR recovery", Outcome.COMPLETED, {"effect": "closed", "issue_numbers": list(empty_pr_result.issue_numbers)})
-            return processed_pr
-
-        # Close Jules PRs that could not get CI green within the configured timeout.
-        # This runs before the @auto-coder label check on purpose: a stale Jules PR
-        # usually still carries the label from an earlier run, and skipping on the
-        # label would leave the PR open forever.
-        stale_jules_result = _close_stale_jules_pr(github_client, repo_name, pr_data, config)
-        if stale_jules_result.closed:
-            processed_pr.actions_taken = [*([projection_action] if projection_action else []), *stale_jules_result.actions]
-            processed_pr.priority = "close"
-            _record_pr_stage(pr_number, "pr.stale-jules-recovery", f"pr#{pr_number} stale-Jules recovery", Outcome.COMPLETED, {"effect": "closed", "issue_numbers": list(stale_jules_result.issue_numbers)})
             return processed_pr
 
         # Skip immediately if PR already has @auto-coder label
@@ -3869,40 +3840,8 @@ def _process_pull_request_impl(
                 processed_pr.actions_taken = [*([projection_action] if projection_action else []), "Skipped - already being processed (@auto-coder label present)"]
                 return processed_pr
 
-        # Obtain a current, read-only CI observation once and share it with the
-        # legacy Jules CI-wait gate below as well as this PR's ordinary
-        # CI-eligibility evaluation further down, so that gate can never veto
-        # progress on CI evidence it never itself consulted (Issue #2275,
-        # REQ-001/REQ-002/REQ-007).
+        # Obtain one current, read-only CI observation for ordinary eligibility.
         github_checks = _check_github_actions_status(repo_name, pr_data, config, github_client)
-
-        # Check if we should skip this PR because it's waiting for Jules
-        if _should_skip_waiting_for_jules(github_client, repo_name, pr_data, config, github_checks=github_checks):
-            logger.info(f"Skipping PR #{pr_number} - waiting for Jules to fix CI failures")
-            get_trace_logger().log("PR Processing", f"Skipping PR #{pr_number} - waiting for Jules", item_type="pr", item_number=pr_number, details={"skip_reason": "waiting_for_jules"})
-            _record_pr_stage(pr_number, "pr.provider-ownership-wait", f"pr#{pr_number} provider-ownership wait", Outcome.DEFERRED, {"provider": "jules"})
-            processed_pr.actions_taken = [*([projection_action] if projection_action else []), "Skipped - waiting for Jules to fix CI failures"]
-            return processed_pr
-
-        # Process Jules PRs to detect session IDs and update PR body
-        try:
-            jules_success = _link_jules_pr_to_issue(repo_name, pr_data, github_client)
-            if jules_success:
-                logger.info(f"Successfully processed Jules PR #{pr_number} (or not a Jules PR)")
-                get_trace_logger().log("Jules Link", f"Linked Jules PR #{pr_number}", item_type="pr", item_number=pr_number, details={"success": True})
-            else:
-                logger.warning(f"Failed to process Jules PR #{pr_number}, but continuing with normal processing")
-                get_trace_logger().log("Jules Link", f"Failed to link Jules PR #{pr_number}", item_type="pr", item_number=pr_number, details={"success": False})
-        except Exception as e:
-            logger.error(f"Error in Jules PR processing for PR #{pr_number}: {e}")
-            # Continue with normal processing even if Jules processing fails
-
-        # Check if we should skip this PR because it's waiting for Jules
-        if _should_skip_waiting_for_jules(github_client, repo_name, pr_data, config, github_checks=github_checks):
-            logger.info(f"Skipping PR #{pr_number} - waiting for Jules to fix CI failures")
-            get_trace_logger().log("PR Processing", f"Skipping PR #{pr_number} - waiting for Jules", item_type="pr", item_number=pr_number, details={"skip_reason": "waiting_for_jules"})
-            processed_pr.actions_taken = [*([projection_action] if projection_action else []), "Skipped - waiting for Jules to fix CI failures"]
-            return processed_pr
 
         # Extract PR information
         branch_name = pr_data.get("head", {}).get("ref")
@@ -4026,6 +3965,15 @@ def _has_local_implementation_origin(pr_obj: Any) -> bool:
     return bool(re.search(r"\bThis PR addresses issue #\d+", body) or "Auto-Coder: Address issue #" in body)
 
 
+def _has_retired_provider_bot_origin(pr_obj: Any) -> bool:
+    """Return durable negative provenance for the retired provider bot.
+
+    This is deliberately author-only. Legacy URLs, titles, branch names and
+    Auto-Coder prose are not ownership evidence and cannot grant local repair.
+    """
+    return (get_pr_author_login(pr_obj) or "").casefold().startswith("google-labs-jules")
+
+
 def _is_dependabot_pr(pr_obj: Any, controller_identity: Optional[Any] = None) -> bool:
     """Return True if the PR is authored by a dependency bot.
 
@@ -4037,8 +3985,6 @@ def _is_dependabot_pr(pr_obj: Any, controller_identity: Optional[Any] = None) ->
         if not login:
             return False
         login_lower = login.lower()
-        if "google-labs-jules[bot]" in login_lower:
-            return False
         if "dependabot" in login_lower or "renovate" in login_lower:
             return True
         # Only the proven repository controller may combine its App identity
@@ -4287,147 +4233,6 @@ def evaluate_dependency_bot_admission(
     return DependencyBotAdmissionDecision(allowed=True)
 
 
-def _should_skip_waiting_for_jules(
-    github_client: Any,
-    repo_name: str,
-    pr_data: Dict[str, Any],
-    config: Optional[AutomationConfig] = None,
-    github_checks: Optional[GitHubActionsStatusResult] = None,
-) -> bool:
-    """Check if PR should be skipped because it's waiting for Jules to fix CI failures.
-
-    Returns True if:
-    1. The last comment on the PR is the specific "CI checks failed..." message from Auto-Coder.
-    2. There are no commits after that comment.
-    3. The wait has not exceeded ``config.JULES_WAIT_TIMEOUT_HOURS``.
-
-    ``github_checks``, when supplied, is a read-only CI observation for the
-    PR's *current* head that the caller already obtained. When it establishes
-    RECOVERED_CI (Issue #2275, REQ-001), this legacy wait releases immediately:
-    Jules session presence/state, PR-output association, comment history, and
-    the wait timeout are never consulted in that case (REQ-002). CI that is
-    still pending, failing, or not currently observable falls straight through
-    to the existing session/comment/timeout evaluation below (REQ-004).
-    """
-    if _is_codex_or_claude_pr(pr_data):
-        return False
-
-    if is_ci_observation_recovered(github_checks):
-        logger.info(f"PR #{pr_data.get('number')} has current recovered CI; releasing the legacy Jules CI-wait (Issue #2275).")
-        return False
-
-    wait_timeout_hours = (config or AutomationConfig()).JULES_WAIT_TIMEOUT_HOURS
-    try:
-        pr_number = pr_data["number"]
-
-        # Check Jules session status
-        try:
-            # Extract session ID from PR body
-            pr_body = pr_data.get("body", "")
-            session_id = _extract_session_id_from_pr_body(pr_body)
-
-            if session_id:
-                from auto_coder.jules_client import JulesClient
-
-                jules_client = JulesClient()
-                # Get specific session directly
-                try:
-                    target_session = jules_client.get_session(session_id)
-                except Exception:
-                    # If get_session fails (e.g. 404), treat as not found/no session
-                    target_session = None
-
-                if target_session:
-                    from auto_coder.jules_engine import get_session_pull_request
-
-                    state = target_session.get("state")
-                    pull_request = get_session_pull_request(target_session)
-
-                    if state == "COMPLETED" and pull_request:
-                        # Extract PR info
-                        pull_request_url = pull_request["url"]
-                        parts = pull_request_url.split("/")
-                        pull_idx = parts.index("pull")
-                        jules_repo_name = f"{parts[pull_idx-2]}/{parts[pull_idx-1]}"
-                        try:
-                            jules_pr_number = int(parts[pull_idx + 1])
-                        except ValueError:
-                            pass
-
-                        if jules_repo_name and jules_pr_number and jules_pr_number != pr_number:
-                            # Check PR status
-                            jules_pr = github_client.get_pull_request(jules_repo_name, jules_pr_number)
-                            if jules_pr.get("state") == "closed":
-                                logger.info(f"Jules session {session_id} PR #{jules_pr_number} is closed. Resuming processing.")
-                            else:
-                                logger.info(f"Jules session {session_id} PR #{jules_pr_number} is open. Waiting...")
-                                return True
-
-                    else:
-                        logger.info(f"Jules session {session_id} for PR #{pr_number} found (State: {state}). Waiting...")
-                        return True
-
-        except Exception as e:
-            logger.warning(f"Failed to check Jules session for PR #{pr_number}: {e}")
-
-        # Get comments
-        comments = github_client.get_pr_comments(repo_name, pr_number)
-        if not comments:
-            return False
-
-        # Sort comments by date (newest last) just to be safe, though API usually returns them sorted
-        comments.sort(key=lambda x: x["created_at"])
-
-        last_comment = comments[-1]
-        last_comment_body = last_comment.get("body", "")
-
-        # Check if last comment is the specific message
-        target_message = "🤖 Auto-Coder: CI checks failed. I've sent the error logs to the Jules session and requested a fix. Please wait for the updates."
-        if target_message not in last_comment_body:
-            return False
-
-        # Get last comment timestamp
-        last_comment_time = last_comment["created_at"]
-
-        # Get commits
-        commits = github_client.get_pr_commits(repo_name, pr_number)
-        if not commits:
-            # If no commits found (unlikely for a PR), assume we shouldn't skip
-            return False
-
-        # Sort commits by date (newest last)
-        commits.sort(key=lambda x: x["commit"]["committer"]["date"])
-
-        last_commit = commits[-1]
-        last_commit_time = last_commit["commit"]["committer"]["date"]
-
-        # Compare timestamps
-        # ISO format strings can be compared lexicographically if they are in the same timezone (usually UTC from GitHub)
-        if last_commit_time > last_comment_time:
-            logger.info(f"PR #{pr_number} has new commits after Jules wait message, processing...")
-            return False
-
-        # Check if it has been waiting longer than the configured timeout
-        try:
-            # Parse GitHub timestamp (ISO 8601)
-            # Example: 2023-10-27T10:00:00Z
-            last_comment_dt = datetime.fromisoformat(last_comment_time.replace("Z", "+00:00"))
-            current_time = datetime.now(timezone.utc)
-
-            if current_time - last_comment_dt > timedelta(hours=wait_timeout_hours):
-                logger.info(f"PR #{pr_number} has been waiting for Jules for > {wait_timeout_hours} hour(s). Re-processing.")
-                return False
-        except Exception as e:
-            logger.warning(f"Failed to parse timestamp or compare time for PR #{pr_number}: {e}")
-
-        logger.info(f"PR #{pr_number} is waiting for Jules (last comment is wait message, no new commits)")
-        return True
-
-    except Exception as e:
-        logger.error(f"Error checking if PR #{pr_data.get('number')} should be skipped: {e}")
-        return False
-
-
 def _is_empty_pr(
     pr_data: Dict[str, Any],
     repo_name: Optional[str] = None,
@@ -4493,13 +4298,6 @@ def _resolve_pr_issue_numbers(
         issue_numbers = extract_linked_issues_from_pr_body(body)
         if issue_numbers:
             return issue_numbers
-
-    # Historical provider bindings remain useful for diagnostics, but callers
-    # that may authorize fresh work must be able to exclude them explicitly.
-    if include_session_history:
-        resolved_issue = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
-        if resolved_issue:
-            return [resolved_issue]
 
     # Additional generic fallback: check branch name for patterns like "issue-123" or "fix-123"
     branch_name = ""
@@ -4731,20 +4529,7 @@ def _close_empty_pr(
 
         logger.info(f"PR #{pr_number} has zero effective diff against base branch. Closing it.")
 
-        # Resolve the issue(s) that this PR was created for
-        is_jules_pr = _is_jules_pr(pr_data)
-        issue_numbers = _resolve_pr_issue_numbers(
-            repo_name,
-            pr_data,
-            github_client,
-            # Before Jules retirement, the producer wrote a closing reference
-            # derived only from session history into the PR body. That text
-            # has no durable provenance marker, so an empty historical Jules
-            # PR cannot safely use a body link as fresh retry authority.
-            # Independent branch/title associations remain available.
-            include_body_links=not is_jules_pr,
-            include_session_history=not is_jules_pr,
-        )
+        issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_data, github_client)
 
         close_comment = f"Auto-Coder: Closing PR #{pr_number} because it has no effective diff against the base branch."
         if issue_numbers:
@@ -4830,136 +4615,6 @@ def _resolve_current_implementation_generation(
         except Exception as exc:
             logger.debug(f"Cannot read implementation generation for issue #{issue_number}: {exc}")
     return None
-
-
-def _close_stale_jules_pr(
-    github_client: Any,
-    repo_name: str,
-    pr_data: Dict[str, Any],
-    config: AutomationConfig,
-    github_checks: Optional[Any] = None,
-    *,
-    stage_routing: Optional[IssueStageRoutingStore] = None,
-    implementation_slots: Optional[ImplementationSlotRepository] = None,
-) -> StaleJulesPRResult:
-    """Close a Jules PR that failed to get CI green within the configured timeout.
-
-    Jules is the only actor allowed to push to its own PR branch, so a Jules PR that
-    still has failing CI after ``config.JULES_PR_CI_TIMEOUT_HOURS`` is considered
-    unfixable. The PR is closed, the attempt count of the linked issue(s) is
-    incremented, and the ``@auto-coder`` label that the dead Jules run left on those
-    issues is removed so they can be picked up again from scratch.
-
-    When *stage_routing* is supplied and a current Implementation generation
-    can be resolved for a linked issue, the attempt increment is a projection
-    of a durable automatic recovery identity (Issue #2286): closing this PR
-    and publishing the attempt comment reuse the same explicit-retry
-    machinery as an operator ``--only --force --retry``, so ordinary engine
-    admission can later cross the owned-start tombstone for exactly one
-    successor attempt once this PR's predecessor Jules work is retired.
-    Without *stage_routing* (or when G cannot be resolved), this falls back
-    to the historical unlinked attempt increment.
-
-    Args:
-        github_client: GitHub client instance
-        repo_name: Repository name (owner/repo)
-        pr_data: PR data dictionary
-        config: Automation configuration
-        github_checks: Optional already-fetched GitHub Actions status result
-        stage_routing: Optional durable routing store used to capture the
-            automatic recovery identity described above.
-        implementation_slots: Optional slot repository, used only as a
-            fallback source for the current Implementation generation.
-
-    Returns:
-        StaleJulesPRResult; ``closed`` is False when the PR was left open.
-    """
-    result = StaleJulesPRResult()
-    pr_number = int(pr_data["number"])
-
-    try:
-        from .llm_backend_config import is_jules_mode_enabled
-
-        if not is_jules_mode_enabled():
-            return result
-
-        if not _is_jules_pr(pr_data):
-            return result
-
-        if pr_data.get("state") == "closed":
-            _remove_reviewer_sessions_for_closed_pr(repo_name, pr_number)
-            logger.debug(f"PR #{pr_number} is already closed, skipping Jules staleness check")
-            return result
-
-        created_at = pr_data.get("created_at")
-        if not created_at:
-            logger.debug(f"PR #{pr_number} has no created_at timestamp, skipping Jules staleness check")
-            return result
-
-        try:
-            created_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
-        except ValueError as e:
-            logger.warning(f"Failed to parse created_at '{created_at}' for PR #{pr_number}: {e}")
-            return result
-
-        if created_dt.tzinfo is None:
-            created_dt = created_dt.replace(tzinfo=timezone.utc)
-
-        age = datetime.now(timezone.utc) - created_dt
-        timeout = timedelta(hours=config.JULES_PR_CI_TIMEOUT_HOURS)
-        if age <= timeout:
-            return result
-
-        # Only close when CI is actually not passing. Completed runs are required:
-        # a run still in progress may yet turn green.
-        if github_checks is None:
-            github_checks = _check_github_actions_status(repo_name, pr_data, config, github_client)
-
-        if github_checks.success:
-            logger.info(f"Jules PR #{pr_number} is older than {config.JULES_PR_CI_TIMEOUT_HOURS}h but CI passed, keeping it open")
-            return result
-
-        if getattr(github_checks, "in_progress", False):
-            logger.info(f"Jules PR #{pr_number} is older than {config.JULES_PR_CI_TIMEOUT_HOURS}h but CI is still running, keeping it open")
-            return result
-
-        exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number)
-        if exhaustion_info and exhaustion_info.is_exhausted:
-            result.actions.append(f"Skipping stale Jules recovery for PR #{pr_number}: repair allowance exhausted for open blocker(s): {', '.join(exhaustion_info.exhausted_blocker_ids)}")
-            publish_exhaustion_comment_deduped(github_client, repo_name, pr_number, exhaustion_info)
-            return result
-
-        logger.info(f"Jules PR #{pr_number} did not pass CI within {config.JULES_PR_CI_TIMEOUT_HOURS} hours. Closing it.")
-
-        # Resolve the issue(s) that this PR was created for
-        issue_numbers = extract_linked_issues_from_pr_body(pr_data.get("body", "") or "")
-        if not issue_numbers:
-            resolved_issue = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
-            if resolved_issue:
-                issue_numbers = [resolved_issue]
-
-        close_comment = f"Auto-Coder: Closing this PR because Jules did not get CI to pass within {config.JULES_PR_CI_TIMEOUT_HOURS} hours after the PR was created. Automatic Jules retry is retired; no replacement attempt will be started."
-        client = github_client or GitHubClient.get_instance()
-        client.close_pr(repo_name, pr_number, close_comment)
-        _remove_reviewer_sessions_for_closed_pr(repo_name, pr_number)
-        result.closed = True
-        result.actions.append(f"Closed stale Jules PR #{pr_number} (no passing CI within {config.JULES_PR_CI_TIMEOUT_HOURS}h)")
-        get_trace_logger().log(
-            "Jules Timeout",
-            f"Closed stale Jules PR #{pr_number}",
-            item_type="pr",
-            item_number=pr_number,
-            details={"timeout_hours": config.JULES_PR_CI_TIMEOUT_HOURS, "linked_issues": issue_numbers},
-        )
-
-        # Linked Issues are intentionally not returned for candidate requeue.
-        # Historical retry rows remain untouched and inspectable, but Jules
-        # staleness no longer creates or dispatches replacement work.
-
-    except Exception as e:
-        logger.error(f"Error handling stale Jules PR #{pr_number}: {e}")
-
-    return result
 
 
 def _get_mergeable_state(
@@ -5071,7 +4726,8 @@ def _start_mergeability_remediation(
             base = pr_details.get("base") or {}
             durable_snapshot = bool(head.get("sha") and head.get("ref") and (head.get("repo") or {}).get("full_name") and base.get("sha") and base.get("ref") and (base.get("repo") or {}).get("full_name"))
             controller_identity = client.get_authenticated_controller_identity(repo_name)
-            selected_local = not (_is_codex_or_claude_pr(pr_details) or _is_jules_pr(pr_details) or _is_dependabot_pr(pr_details, controller_identity))
+            retired_provider_origin = _has_retired_provider_bot_origin(pr_details)
+            selected_local = not (retired_provider_origin or _is_codex_or_claude_pr(pr_details) or _is_dependabot_pr(pr_details, controller_identity))
             if durable_snapshot and selected_local:
                 admission = _offer_selected_local_pr_repair(
                     repo_name,
@@ -5084,6 +4740,9 @@ def _start_mergeability_remediation(
                     actions.repair_result = admission
                     actions.append(admission.reason)
                     return actions
+            if retired_provider_origin:
+                actions.append(f"Skipped local mergeability remediation for retired-provider PR #{pr_number}")
+                return actions
 
         except Exception as e:
             error_msg = f"Failed to get PR #{pr_number} details via GhApi: {e}"
@@ -5613,88 +5272,6 @@ def _create_pr_analysis_prompt(repo_name: str, pr_data: Dict[str, Any], pr_diff:
         is_jules=is_jules,
     )
     return result
-
-
-def _process_pr_jules_mode(
-    repo_name: str,
-    pr_data: Dict[str, Any],
-    config: AutomationConfig,
-    github_client: Any,
-) -> List[str]:
-    """Process a PR using Jules API for session-based AI interaction.
-
-    This function:
-    1. Starts a Jules session for the PR
-    2. Comments on the PR with the session ID
-    3. Updates PR body with Session ID to mark it as Jules-managed
-    """
-    actions = []
-    pr_number = pr_data["number"]
-
-    try:
-        from .jules_client import JulesClient
-
-        # Check if already Jules PR (sanity check)
-        if _is_jules_pr(pr_data):
-            return ["PR is already a Jules PR"]
-
-        logger.info(f"Converting PR #{pr_number} to Jules mode")
-        actions.append(f"Converting PR #{pr_number} to Jules mode")
-
-        # 1. Start session
-        jules_client = JulesClient()
-
-        # Get prompt
-        pr_diff = _get_pr_diff(repo_name, pr_number, config)
-        action_prompt = _create_pr_analysis_prompt(repo_name, pr_data, pr_diff, config, github_client, is_jules=True)
-
-        pr_branch = pr_data.get("head", {}).get("ref")
-        session_title = f"PR #{pr_number}: {pr_data.get('title', 'Unknown')}"
-
-        session_id = jules_client.start_session(action_prompt, repo_name, pr_branch, title=session_title)
-
-        # 2. Save session
-        CloudManager(repo_name).add_session(pr_number, session_id, provider="jules")
-        actions.append(f"Started Jules session {session_id}")
-
-        get_trace_logger().log("Jules Mode", f"Started Jules session for PR #{pr_number}", item_type="pr", item_number=pr_number, details={"session_id": session_id})
-
-        # 3. Update PR body
-        if isinstance(github_client, GitHubClient):
-            api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
-        else:
-            api = get_ghapi_client(github_client.token)
-        owner, repo = repo_name.split("/")
-
-        pr_body = pr_data.get("body", "") or ""
-        # Append session info
-        new_body = f"{pr_body}\n\nSession ID: {session_id}\nhttps://jules.google.com/session/{session_id}"
-
-        new_body = f"{pr_body}\n\nSession ID: {session_id}\nhttps://jules.google.com/session/{session_id}"
-
-        # Validate issue references in new body
-        try:
-            validate_issue_references(new_body, github_client, repo_name)
-        except ValueError as e:
-            logger.error(f"Validation failed for Jules PR update: {e}")
-            actions.append(f"Error: Validation failed for PR update: {e}")
-            return actions
-
-        api.pulls.update(owner, repo, pr_number, body=new_body)
-        actions.append(f"Updated PR body with session ID: {session_id}")
-
-        # 4. Comment
-        comment = f"I started a Jules session to work on this PR. Session ID: {session_id}\n\nhttps://jules.google.com/session/{session_id}"
-        github_client.add_comment_to_pr(repo_name, pr_number, comment)
-        actions.append("Commented on PR with session details")
-
-        return actions
-
-    except Exception as e:
-        msg = f"Error in _process_pr_jules_mode: {e}"
-        logger.error(msg)
-        actions.append(msg)
-        return actions
 
 
 def _find_authoritative_adversarial_review(
@@ -8907,32 +8484,6 @@ def _coordinate_pr_review(
         )
         _remove_reviewer_sessions_for_closed_pr(repo_name, pr_number)
 
-        # Clean up old PRs if this is a Jules PR with a session ID
-        try:
-            is_jules = _is_jules_pr(pr_data)
-            session_id = _extract_session_id_from_pr_body(pr_data.get("body", ""))
-            if is_jules and session_id:
-                # Note: search_issues returns Issue objects which can be PRs
-                query = f'repo:{repo_name} is:pr is:open "Session ID: {session_id}"'
-                logger.info(f"Searching for other PRs with session ID {session_id} to clean up: {query}")
-
-                related_issues = github_client.search_issues(query)
-
-                for issue in related_issues:
-                    # Skip the current PR (which is closed now effectively, or about to be)
-                    if issue.number == pr_number:
-                        continue
-
-                    # Check if the issue object is actually a PR (search_issues returns issues/PRs)
-                    # is:pr in query helps, but PyGithub object might need check?
-                    # GitHubClient.search_issues returns list(self.github.search_issues(...))
-                    # which are Issue objects.
-
-                    # Historical processing labels are deliberately left untouched.
-
-        except Exception as e:
-            logger.error(f"Error cleaning up related PRs for PR #{pr_number}: {e}")
-            # Don't fail the whole process for cleanup error
         _record_pr_stage(pr_number, "pr.cleanup", f"pr#{pr_number} cleanup", Outcome.COMPLETED, {"note": "best-effort; internal failures are swallowed and logged separately"})
 
         return actions
@@ -9308,49 +8859,6 @@ def _handle_pr_merge(
         current_branch = current_branch_res.stdout.strip() if current_branch_res.success else ""
         already_on_pr_branch = (current_branch == pr_branch_name) and (current_branch != "")
 
-        # Check if this is a Jules PR.
-        #
-        # Jules PRs are never fixed automatically: Jules does not pick up commits pushed to
-        # its branch by anyone else, so auto-fix commits would silently diverge from the
-        # Jules session. Either Jules fixes the PR itself, or the PR is closed once it has
-        # not passed CI within JULES_PR_CI_TIMEOUT_HOURS. Only an explicit local run that
-        # already sits on the PR branch keeps fixing the checkout directly.
-        if _is_jules_pr(pr_data) and not already_on_pr_branch:
-            stale_jules_result = _close_stale_jules_pr(github_client, repo_name, pr_data, config, github_checks)
-            if stale_jules_result.closed:
-                actions.extend(stale_jules_result.actions)
-                return actions
-
-            reason = "Jules CI repair is retired; historical sessions cannot authorize provider work"
-            refusal_action = f"Jules CI repair was not sent for PR #{pr_number}; local fixes remain disabled"
-            actions.append(refusal_action)
-            jules_feedback = PRRepairResult(
-                RepairDisposition.REFUSED,
-                (refusal_action,),
-                reason=reason,
-                attempt_started=False,
-            )
-            actions.repair_result = jules_feedback
-            actions.repair_attempt_started = False
-            trace_outcome = Outcome.SKIPPED
-            if processing_status is not None:
-                processing_status.outcome = PRProcessingOutcome.DEFERRED
-                processing_status.error = None
-            _record_pr_stage(
-                pr_number,
-                "pr.repair-delegation",
-                f"pr#{pr_number} repair delegation",
-                trace_outcome,
-                {
-                    "effect": "ci-failure-repair",
-                    "backend": "jules",
-                    "disposition": jules_feedback.disposition.value,
-                    "reason": jules_feedback.reason,
-                    "attempt_started": jules_feedback.attempt_started,
-                },
-            )
-            return actions
-
         # Step 5: Skip to process PR if it is dependabot PR
         try:
             controller_identity = github_client.get_authenticated_controller_identity(repo_name)
@@ -9664,12 +9172,9 @@ def _extract_session_id_candidates(pr_body: str) -> List[Tuple[str, str]]:
     Looks for patterns like:
     - Pattern 1: Session ID: abc123 / Session: abc123
     - Pattern 2: URLs with session parameters (?session=abc123)
-    - Pattern 3: Jules session URLs (jules.google.com/session/...)
     - Pattern 3a: Claude Routine session URLs (claude.ai/code/...)
     - Pattern 3b: GitHub PR URLs (github.com/.../pull/...)
     - Pattern 3c: Codex Cloud task URLs (chatgpt.com/remote/... and historical routes)
-    - Pattern 4: Jules Task URLs (jules.google.com/task/...)
-    - Pattern 5: Jules Task ID (task 12345)
     - Pattern 6: Standalone session IDs starting with session_
     - Pattern 7: Standalone Codex task IDs (task_e_...)
 
@@ -9707,12 +9212,6 @@ def _extract_session_id_candidates(pr_body: str) -> List[Tuple[str, str]]:
     if match:
         _add("Pattern 2", match.group(1).strip())
 
-    # Pattern 3: Look for Jules session URLs (e.g., https://jules.google.com/session/901463134778726610)
-    jules_session_url_pattern = r"jules\.google\.com/session/([a-zA-Z0-9-_]+)"
-    match = re.search(jules_session_url_pattern, pr_body)
-    if match:
-        _add("Pattern 3 (Jules Session URL)", match.group(1).strip())
-
     # Pattern 3a: Look for Claude Routine session URLs (e.g., https://claude.ai/code/session_01HJKLMNOPQRSTUVWXYZ)
     claude_session_url_pattern = r"claude\.ai/code/([a-zA-Z0-9-_]+)"
     match = re.search(claude_session_url_pattern, pr_body)
@@ -9730,19 +9229,6 @@ def _extract_session_id_candidates(pr_body: str) -> List[Tuple[str, str]]:
     match = re.search(codex_session_url_pattern, pr_body, re.IGNORECASE)
     if match:
         _add("Pattern 3c (Codex Task URL)", match.group(1).strip())
-
-    # Pattern 4: Look for Jules Task IDs (e.g., jules.google.com/task/12345,
-    # jules.google.com/task/abcDEF-123_x, or "task 12345"). The ID may be any
-    # nonempty sequence of ASCII letters, digits, underscores, or hyphens.
-    task_url_pattern = r"jules\.google\.com/task/([a-zA-Z0-9_-]+)"
-    match = re.search(task_url_pattern, pr_body)
-    if match:
-        _add("Pattern 4 (Jules Task URL)", match.group(1).strip())
-
-    task_id_pattern = r"\btask\s+(\d+)\b"
-    match = re.search(task_id_pattern, pr_body, re.IGNORECASE)
-    if match:
-        _add("Pattern 5 (Jules Task ID)", match.group(1).strip())
 
     # Pattern 6: Look for standalone session IDs starting with "session_"
     session_prefix_pattern = r"\b(session_(?!id\b)[a-zA-Z0-9-_]+)\b"
@@ -9915,92 +9401,6 @@ def _find_issue_by_session_id_in_comments_detailed(repo_name: str, session_id: s
         return SessionAliasLookup(ambiguous=True)
 
     return SessionAliasLookup(issue_number=next(iter(qualifying)))
-
-
-def _update_jules_pr_body(
-    repo_name: str,
-    pr_number: int,
-    pr_body: str,
-    issue_number: int,
-    github_client: Any,
-) -> bool:
-    """Update Jules PR body to include close #<issue_number> and link to issue.
-
-    Args:
-        repo_name: Repository name (owner/repo)
-        pr_number: PR number
-        pr_body: Current PR body text
-        issue_number: Issue number to link to
-        github_client: GitHub client instance
-
-    Returns:
-        True if PR body was updated successfully, False otherwise
-    """
-    try:
-        # Check if PR body already has the close reference
-        if f"close #{issue_number}" in pr_body.lower() or f"closes #{issue_number}" in pr_body.lower():
-            logger.info(f"PR #{pr_number} body already references issue #{issue_number}, skipping update")
-            return True
-
-        # Create the issue link
-        issue_link = f"https://github.com/{repo_name}/issues/{issue_number}"
-        close_statement = f"close #{issue_number}"
-
-        # Build new PR body
-        separator = "\n\n" if pr_body and not pr_body.endswith("\n") else "\n"
-        new_body = f"{pr_body}{separator}{close_statement}\n\nRelated issue: {issue_link}"
-
-        # Update PR body via GitHub Client
-        try:
-            from auto_coder.util.gh_cache import GitHubClient, get_ghapi_client
-
-            # Use github_client for API call if it's a real client with valid token
-            # and has the necessary methods. Otherwise, use get_ghapi_client.
-            token = getattr(github_client, "token", None)
-
-            if vars(github_client).get("_auth_provider") is not None:
-                api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
-                owner, repo_name_split = repo_name.split("/")
-                validate_issue_references(new_body, github_client, repo_name)
-                api.pulls.update(owner, repo_name_split, pr_number, body=new_body)
-            elif isinstance(token, str):
-                api = get_ghapi_client(token)
-                owner, repo_name_split = repo_name.split("/")
-                # Validate issue references in new body
-                validate_issue_references(new_body, github_client, repo_name)
-                api.pulls.update(owner, repo_name_split, pr_number, body=new_body)
-            elif hasattr(github_client, "get_repository"):
-                # Fallback to direct client methods
-                repo = github_client.get_repository(repo_name)
-                pr = repo.get_pull(pr_number)
-                # Validate issue references in new body
-                validate_issue_references(new_body, github_client, repo_name)
-                pr.edit(body=new_body)
-            else:
-                # Last resort: try singleton token
-                token = GitHubClient.get_instance().token
-                api = get_ghapi_client(token)
-                owner, repo_name_split = repo_name.split("/")
-                # Validate issue references in new body
-                validate_issue_references(new_body, github_client, repo_name)
-                api.pulls.update(owner, repo_name_split, pr_number, body=new_body)
-
-            logger.info(f"Updated PR #{pr_number} body to include reference to issue #{issue_number}")
-            log_action(f"Updated PR #{pr_number} body with close #{issue_number} reference")
-            return True
-        except Exception as e:
-            try:
-                logger.error(f"Failed to update PR #{pr_number} body: {str(e)}")
-            except Exception:
-                pass  # Prevent logging failures from affecting the result
-            return False
-
-    except Exception as e:
-        try:
-            logger.error(f"Error updating Jules PR #{pr_number} body: {str(e)}")
-        except Exception:
-            pass  # Prevent logging failures from affecting the result
-        return False
 
 
 def _is_codex_pr(pr_data: Dict[str, Any]) -> bool:
@@ -10278,48 +9678,6 @@ def _link_codex_cloud_pr_to_issue(
         return CodexTaskProjectionResult("unavailable", f"Codex task projection unavailable: {type(e).__name__}: {e}")
 
 
-def _is_jules_pr(pr_data: Dict[str, Any]) -> bool:
-    """Check if a PR is created by Jules (google-labs-jules).
-
-    Args:
-        pr_data: PR data dictionary
-
-    Returns:
-        True if the PR is created by Jules, False otherwise
-    """
-    # Codex or Claude PRs should never be treated as Jules
-    if _is_codex_or_claude_pr(pr_data):
-        return False
-
-    # Check author first
-    pr_author = get_pr_author_login(pr_data) or ""
-    if pr_author.startswith("claude") or pr_author.startswith("codex"):
-        return False
-    if pr_author.startswith("google-labs-jules"):
-        return True
-
-    # Fallback: Check if PR body contains a valid Jules session reference
-    pr_body = pr_data.get("body", "") or ""
-    if not pr_body:
-        return False
-
-    # Jules URL indicators
-    if re.search(r"jules\.google\.com/(?:session|task)/", pr_body) or re.search(r"\bJules session\b", pr_body, re.IGNORECASE):
-        return True
-
-    # Check for Session ID format without Claude, Codex, or generic GitHub URL
-    session_id = _extract_session_id_from_pr_body(pr_body)
-    if session_id:
-        if "claude.ai" in session_id or "github.com" in session_id or "codex" in session_id:
-            return False
-        # Only treat as Jules session if "Session ID:" or "Session:" is explicitly in body
-        session_pattern = r"(?:session\s*id:|session:)\s*(.+?)(?:\n|$)"
-        if re.search(session_pattern, pr_body, re.IGNORECASE):
-            return True
-
-    return False
-
-
 def _is_local_llm_pr(pr_data: Dict[str, Any], controller_identity: Optional[Any] = None) -> bool:
     """Check if a PR was created by local LLM execution.
 
@@ -10335,9 +9693,7 @@ def _is_local_llm_pr(pr_data: Dict[str, Any], controller_identity: Optional[Any]
 
     # Exclude cloud LLM PRs and dependency bots. Explicit local origin markers
     # are evaluated by the dependency classifier without recursing here.
-    if _is_jules_pr(pr_data):
-        return False
-    if _is_codex_or_claude_pr(pr_data):
+    if _has_retired_provider_bot_origin(pr_data) or _is_codex_or_claude_pr(pr_data):
         return False
     if _is_dependabot_pr(pr_data, controller_identity):
         return False
@@ -10348,197 +9704,79 @@ def _is_local_llm_pr(pr_data: Dict[str, Any], controller_identity: Optional[Any]
 is_local_llm_pr = _is_local_llm_pr
 
 
-def _resolve_jules_pr_issue_number(
-    repo_name: str,
-    pr_data: Dict[str, Any],
-    github_client: Any,
-) -> Optional[int]:
-    """Find the issue a Jules PR was created for.
-
-    The lookup order is session ID (local DB, then issue comments), branch name,
-    and finally the PR title.
-
-    Args:
-        repo_name: Repository name (owner/repo)
-        pr_data: PR data dictionary
-        github_client: GitHub client instance
-
-    Returns:
-        Issue number if found, None otherwise
-    """
-    pr_number = pr_data.get("number")
-    pr_body = pr_data.get("body", "") or ""
-
-    primary_session_id = _extract_session_id_from_pr_body(pr_body)
-    from unittest.mock import Mock
-
-    if isinstance(_extract_session_id_from_pr_body, Mock):
-        candidates = [("Mock", primary_session_id)] if primary_session_id else []
-    else:
-        candidates = _extract_session_id_candidates(pr_body)
-
-    issue_number: Optional[int] = None
-    matched_session_id: Optional[str] = None
-    alias_search_ambiguous = False
-
-    if candidates:
-        cloud_manager = CloudManager(repo_name)
-        # Step 1: Check local DB (cloud.csv) for each candidate in pattern priority order.
-        # When an earlier candidate (such as Pattern 2 extracting "True") is not found in
-        # cloud.csv, proceed / return to subsequent patterns (such as Pattern 3a) in order.
-        for pattern_name, candidate_session_id in candidates:
-            logger.info(f"Extracted session ID '{candidate_session_id}' from Jules PR #{pr_number} ({pattern_name})")
-            found = cloud_manager.get_issue_by_session(candidate_session_id)
-            if found:
-                issue_number = found
-                matched_session_id = candidate_session_id
-                logger.info(f"Found issue #{issue_number} for session ID '{candidate_session_id}' in local DB ({pattern_name})")
-                break
-            else:
-                durable_issues = cloud_manager.get_issues_by_session(candidate_session_id)
-                if len(durable_issues) > 1:
-                    logger.warning(f"Session ID '{candidate_session_id}' ({pattern_name}) has ambiguous durable ownership; " f"checking next candidate pattern...")
-                else:
-                    logger.warning(f"No issue found for session ID '{candidate_session_id}' in local DB ({pattern_name}). " f"Checking next candidate pattern...")
-
-        # Step 2: If no candidate was found in local DB, search comments for viable candidates
-        if not issue_number:
-            for pattern_name, candidate_session_id in candidates:
-                # Avoid searching comments with common boolean or trivial tokens (e.g., "True", "False")
-                if candidate_session_id.lower() in ("true", "false", "none", "null") or len(candidate_session_id) < 4:
-                    logger.warning(f"Skipping comment search for invalid session ID token '{candidate_session_id}' ({pattern_name})")
-                    continue
-
-                durable_issues = cloud_manager.get_issues_by_session(candidate_session_id)
-                if len(durable_issues) > 1:
-                    logger.warning(f"Session ID '{candidate_session_id}' has ambiguous durable ownership; refusing comment-search inference")
-                    continue
-
-                logger.warning(f"No issue found for session ID '{candidate_session_id}' in local DB ({pattern_name}). Searching comments...")
-                lookup = _find_issue_by_session_id_in_comments_detailed(repo_name, candidate_session_id, github_client)
-                if lookup.ambiguous:
-                    alias_search_ambiguous = True
-                    logger.warning(f"Session ID '{candidate_session_id}' ({pattern_name}) alias search is ambiguous; refusing to fall back to a branch/title guess for PR #{pr_number}")
-                    continue
-                if lookup.issue_number:
-                    issue_number = lookup.issue_number
-                    matched_session_id = candidate_session_id
-                    logger.info(f"Found issue #{issue_number} via comment search for session ID '{candidate_session_id}' ({pattern_name})")
-                    break
-    else:
-        logger.warning(f"No session ID found in Jules PR #{pr_number} body")
-
-    if matched_session_id:
-        pr_data["_jules_session_id"] = matched_session_id
-    elif candidates:
-        pr_data["_jules_session_id"] = candidates[0][1]
-
-    # Fallback: Extract from branch name
-    # Skipped when the alias search found the session ambiguous (REQ-003 of
-    # Issue #2270): a weaker branch/title guess must not paper over a session
-    # ID that verified against multiple distinct Issues.
-    if not issue_number and not alias_search_ambiguous:
-        branch_name = pr_data.get("head", {}).get("ref", "")
-        if branch_name:
-            # Match patterns like issue-123
-            match = re.search(r"\bissue[-_](\d+)\b", branch_name, re.IGNORECASE)
-            if match:
-                issue_number = int(match.group(1))
-                logger.info(f"Extracted issue #{issue_number} from branch name '{branch_name}'")
-
-    # Fallback: Extract from PR title
-    if not issue_number and not alias_search_ambiguous:
-        pr_title = pr_data.get("title", "")
-        if pr_title:
-            # Match patterns like "Issue #123" or "Fix #123"
-            match = re.search(r"(?:issue|fix|close|resolve)s?\s*#(\d+)", pr_title, re.IGNORECASE)
-            if match:
-                issue_number = int(match.group(1))
-                logger.info(f"Extracted issue #{issue_number} from PR title '{pr_title}'")
-
-    return issue_number
+def _resolve_supported_provider_issue_number(repo_name: str, pr_data: Dict[str, Any], github_client: Any) -> Optional[int]:
+    """Resolve a supported provider's source Issue without retired URL inference."""
+    candidates = _extract_session_id_candidates(str(pr_data.get("body") or ""))
+    manager = CloudManager(repo_name)
+    ambiguous = False
+    foreign_provider_tasks: set[str] = set()
+    for _, task_id in candidates:
+        issues = manager.get_issues_by_session(task_id)
+        supported_issues = tuple(issue_number for issue_number in issues if (binding := manager.get_binding(issue_number)) is not None and binding.provider == "claude-routine")
+        if issues and not supported_issues:
+            # A durable binding owned by a retired or different provider is
+            # negative provenance.  Do not let a later prose search reinterpret
+            # that same token as Claude ownership.
+            foreign_provider_tasks.add(task_id)
+            continue
+        if len(supported_issues) > 1:
+            ambiguous = True
+            continue
+        if supported_issues:
+            issue_number = supported_issues[0]
+            pr_data["_provider_task_id"] = task_id
+            return issue_number
+    if ambiguous:
+        return None
+    for _, task_id in candidates:
+        if task_id in foreign_provider_tasks:
+            continue
+        if task_id.casefold() in {"true", "false", "none", "null"} or len(task_id) < 4:
+            continue
+        lookup = _find_issue_by_session_id_in_comments_detailed(repo_name, task_id, github_client)
+        if lookup.ambiguous:
+            return None
+        if lookup.issue_number:
+            pr_data["_provider_task_id"] = task_id
+            return lookup.issue_number
+    return None
 
 
-def _link_jules_pr_to_issue(
-    repo_name: str,
-    pr_data: Dict[str, Any],
-    github_client: Any,
-) -> bool:
-    """Process a Jules, Claude Code, or session PR to detect session ID and update PR body.
-
-    Args:
-        repo_name: Repository name (owner/repo)
-        pr_data: PR data dictionary
-        github_client: GitHub client instance
-
-    Returns:
-        True if PR body was updated successfully, False otherwise
-    """
+def _update_supported_provider_pr_body(repo_name: str, pr_data: Dict[str, Any], issue_number: int, github_client: Any) -> bool:
+    """Add a source-Issue closing reference for a verified supported binding."""
+    pr_number = int(pr_data["number"])
+    body = str(pr_data.get("body") or "")
+    if issue_number in extract_linked_issues_from_pr_body(body):
+        return True
+    separator = "\n\n" if body and not body.endswith("\n") else "\n"
+    new_body = f"{body}{separator}close #{issue_number}\n\nRelated issue: https://github.com/{repo_name}/issues/{issue_number}"
     try:
-        pr_number = pr_data["number"]
-        pr_body = pr_data.get("body", "") or ""
-        pr_author = get_pr_author_login(pr_data) or ""
-
-        is_jules = _is_jules_pr(pr_data)
-        is_claude = "claude" in pr_author.lower() or "claude.ai/code/" in pr_body or bool(re.search(r"\bClaude session\b", pr_body, re.IGNORECASE))
-        has_session = bool(re.search(r"claude\.ai/code/|jules\.google\.com/(?:session|task)/|\bsession_[a-zA-Z0-9-_]+\b", pr_body, re.IGNORECASE))
-
-        # If not a Jules PR, has no session indicator, and is not a Claude PR, skip
-        if not is_jules and not is_claude and not has_session:
-            logger.debug(f"PR #{pr_number} has no session ID or cloud author, skipping session issue linking")
-            return True  # Not an error, just not a session PR
-
-        logger.info(f"Processing session PR #{pr_number} by {pr_author}")
-
-        # Check for special Jules PRs that don't need issue linking
-        pr_title = pr_data.get("title", "")
-        special_prefixes = ["🛡️ Sentinel: ", "🎨 Palette: ", "⚡ Bolt: "]
-        if any(pr_title.startswith(prefix) for prefix in special_prefixes):
-            logger.info(f"Skipping issue lookup for Jules special PR #{pr_number} ('{pr_title}')")
-            return True
-
-        if is_jules:
-            # A persisted Jules session binding is historical ownership, not
-            # authorization to create an ordinary Issue link.  Otherwise that
-            # generated link can outlive this cycle and be mistaken for an
-            # explicit user-authored association by empty-PR recovery.
-            resolved_issues = _resolve_pr_issue_numbers(
-                repo_name,
-                pr_data,
-                github_client,
-                include_session_history=False,
-            )
-            issue_number = resolved_issues[0] if resolved_issues else None
+        validate_issue_references(new_body, github_client, repo_name)
+        if getattr(github_client, "_auth_provider", None) is not None:
+            api = github_client.api_for(repo_name, required_permissions={"pull_requests": "write"})
+            owner, repository = repo_name.split("/")
+            api.pulls.update(owner, repository, pr_number, body=new_body)
+        elif hasattr(github_client, "get_repository"):
+            github_client.get_repository(repo_name).get_pull(pr_number).edit(body=new_body)
         else:
-            issue_number = _resolve_jules_pr_issue_number(repo_name, pr_data, github_client)
-
-        if not issue_number:
-            logger.warning(f"No issue found for session PR #{pr_number} (checked session, branch, and title)")
-            return False
-
-        logger.info(f"Found issue #{issue_number} for session PR #{pr_number}")
-
-        # Step 4: Update PR body to include close #<issue_number> and link to issue
-        success = _update_jules_pr_body(repo_name, pr_number, pr_body, issue_number, github_client)
-
-        if success:
-            logger.info(f"Successfully processed PR #{pr_number}, updated body to reference issue #{issue_number}")
-            # Update local pr_data body so downstream logic in the same run has the updated body
-            if f"close #{issue_number}" not in pr_body.lower() and f"closes #{issue_number}" not in pr_body.lower():
-                separator = "\n\n" if pr_body and not pr_body.endswith("\n") else "\n"
-                pr_data["body"] = f"{pr_body}{separator}close #{issue_number}\n\nRelated issue: https://github.com/{repo_name}/issues/{issue_number}"
-        else:
-            logger.error(f"Failed to update PR #{pr_number} body")
-
-        return success
-
-    except Exception as e:
-        logger.error(f"Error processing session PR {pr_data.get('number', 'unknown')}: {e}")
+            token = getattr(github_client, "token", None) or GitHubClient.get_instance().token
+            owner, repository = repo_name.split("/")
+            get_ghapi_client(token).pulls.update(owner, repository, pr_number, body=new_body)
+    except Exception as exc:
+        logger.error(f"Failed to update supported-provider PR #{pr_number} body: {exc}")
         return False
+    pr_data["body"] = new_body
+    return True
 
 
-# Alias for backwards compatibility with tests
-_process_jules_pr = _link_jules_pr_to_issue
+def _link_supported_provider_pr_to_issue(repo_name: str, pr_data: Dict[str, Any], github_client: Any) -> bool:
+    """Recover Claude Routine Issue attribution without accepting Jules prose."""
+    if not _is_claude_pr(pr_data):
+        return True
+    issue_number = _resolve_supported_provider_issue_number(repo_name, pr_data, github_client)
+    if issue_number is None:
+        return False
+    return _update_supported_provider_pr_body(repo_name, pr_data, issue_number, github_client)
 
 
 def _close_linked_issues(repo_name: str, pr_number: int, github_client: Optional[Any] = None) -> None:
@@ -10567,13 +9805,6 @@ def _close_linked_issues(repo_name: str, pr_number: int, github_client: Optional
         linked_issues = extract_linked_issues_from_pr_body(pr_body)
 
         if not linked_issues:
-            # Fallback: resolve from session ID (Jules, Claude Code, etc.), branch name, or title
-            resolved_issue = _resolve_jules_pr_issue_number(repo_name, pr_info, client)
-            if resolved_issue:
-                logger.info(f"Resolved issue #{resolved_issue} from session/branch/title for merged PR #{pr_number}")
-                linked_issues = [resolved_issue]
-
-        if not linked_issues:
             logger.debug(f"No linked issues found in PR #{pr_number} body")
             return
 
@@ -10596,245 +9827,6 @@ def _close_linked_issues(repo_name: str, pr_number: int, github_client: Optional
 
     except Exception as e:
         logger.warning(f"Error processing linked issues for PR #{pr_number}: {e}")
-
-
-def _archive_jules_session(repo_name: str, pr_number: int) -> None:
-    """Archive Jules session for Jules-created PRs after successful merge.
-
-    Args:
-        repo_name: Repository name (owner/repo)
-        pr_number: PR number that was merged
-    """
-    try:
-        from auto_coder.util.gh_cache import get_ghapi_client
-
-        token = GitHubClient.get_instance().token
-        api = get_ghapi_client(token)
-        owner, repo = repo_name.split("/")
-
-        # Get PR data to check if it's a Jules PR and extract session ID
-        try:
-            pr_data = api.pulls.get(owner, repo, pr_number)
-        except Exception as e:
-            logger.debug(f"Could not retrieve PR #{pr_number} data for Jules session archiving: {e}")
-            return
-
-        pr_author = pr_data.get("user", {}).get("login", "")
-        pr_body = pr_data.get("body", "")
-
-        # Check if this is a Jules-created PR
-        if pr_author != "google-labs-jules":
-            logger.debug(f"PR #{pr_number} is not created by Jules ({pr_author}), skipping session archiving")
-            return
-
-        # Extract session ID from PR body
-        session_id = _extract_session_id_from_pr_body(pr_body)
-        if not session_id:
-            logger.warning(f"No session ID found in Jules PR #{pr_number} body")
-            return
-
-        # Archive the Jules session
-        try:
-            from .jules_client import JulesClient
-
-            jules_client = JulesClient()
-            success = jules_client.archive_session(session_id)
-
-            if success:
-                logger.info(f"Archived Jules session '{session_id}' for PR #{pr_number}")
-                log_action(f"Archived Jules session for PR #{pr_number}")
-                # Check and restart recurrent tasks
-                from .jules_engine import check_and_restart_recurrent_jules_task_for_pr
-
-                check_and_restart_recurrent_jules_task_for_pr(repo_name, pr_number, session_id)
-            else:
-                logger.warning(f"Failed to archive Jules session '{session_id}' for PR #{pr_number}")
-        except Exception as e:
-            logger.warning(f"Error archiving Jules session for PR #{pr_number}: {e}")
-
-    except Exception as e:
-        logger.warning(f"Error processing Jules session archiving for PR #{pr_number}: {e}")
-
-
-def _guard_outbound_jules_send(repo_name: str, config: AutomationConfig, session_id: str) -> bool:
-    """Resolve the owning Issue and durably admit/guard one outbound Jules send.
-
-    Shared boundary wrapper (REQ-007/REQ-009, Issue #2147) around
-    :func:`admit_or_block_outbound_jules_send` for every production caller in
-    this module that mutates an existing Jules session (error feedback,
-    merge-conflict-resolution requests, branch-update conflict delegation,
-    etc). Resolves the owning Issue and constructs the repo-scoped
-    :class:`ImplementationSlotRepository` (the same file-backed store the
-    maintenance loop uses, so it observes the same live retirement/admission
-    state regardless of which caller constructs it), then delegates to the
-    shared guard/admission helper. Never send the outbound mutation when this
-    returns False.
-    """
-    from .cloud_manager import CloudManager
-    from .implementation_retirement_observer import admit_or_block_outbound_jules_send
-    from .implementation_slots import ImplementationSlotRepository
-
-    owning_issue: Optional[int] = None
-    try:
-        owning_issue = CloudManager(repo_name).get_issue_by_session(session_id)
-    except Exception as exc:
-        logger.warning(f"Could not resolve owning Issue for Jules session {session_id}: {exc}")
-
-    try:
-        implementation_slots = ImplementationSlotRepository(repo_name, config.MAX_CONCURRENT_IMPLEMENTATIONS)
-    except Exception as exc:
-        logger.error(f"Could not construct ImplementationSlotRepository for {repo_name}: {exc}; " "blocking outbound Jules send (REQ-007)")
-        return False
-
-    return admit_or_block_outbound_jules_send(session_id, owning_issue, implementation_slots)
-
-
-def _send_jules_error_feedback(
-    repo_name: str,
-    pr_data: Dict[str, Any],
-    failed_checks: List[Dict[str, Any]],
-    config: AutomationConfig,
-    github_client: Optional[Any] = None,
-) -> PRRepairResult:
-    """Send CI error logs to Jules session for Jules-created PRs.
-
-    Args:
-        repo_name: Repository name (owner/repo)
-        pr_data: PR data dictionary
-        failed_checks: List of failed GitHub Actions checks
-        config: AutomationConfig instance
-        github_client: Optional GitHub client instance
-
-    Returns:
-        Typed same-invocation delivery outcome and diagnostic actions
-    """
-    actions: List[str] = []
-    pr_number = pr_data["number"]
-    attempt_started = False
-
-    def unsent(disposition: RepairDisposition, reason: str) -> PRRepairResult:
-        return PRRepairResult(disposition, tuple(actions), reason=reason, attempt_started=False)
-
-    exhaustion_info = check_pr_repair_exhaustion(repo_name, pr_number)
-    if exhaustion_info and exhaustion_info.is_exhausted:
-        publish_exhaustion_comment_deduped(github_client, repo_name, pr_number, exhaustion_info)
-        actions.append(f"Skipped Jules error feedback for PR #{pr_number}: automatic repair allowance is exhausted for open blocker(s): {', '.join(exhaustion_info.exhausted_blocker_ids)}")
-        return unsent(RepairDisposition.REFUSED, "automatic repair allowance exhausted")
-
-    # Never send error feedback to Jules for PRs created by Codex or Claude
-    if _is_codex_or_claude_pr(pr_data):
-        logger.info(f"PR #{pr_number} is created by Codex/Claude, skipping Jules error feedback")
-        actions.append(f"Skipped Jules error feedback for PR #{pr_number} (created by Codex/Claude)")
-        return unsent(RepairDisposition.REFUSED, "PR is owned by Codex or Claude")
-
-    try:
-        # Get the session ID from pr_data
-        session_id = pr_data.get("_jules_session_id")
-        if not session_id:
-            session_id = _extract_session_id_from_pr_body(pr_data.get("body", ""))
-
-        if not session_id:
-            actions.append(f"Cannot send error feedback to Jules for PR #{pr_number}: no session ID found")
-            try:
-                logger.error(f"No session ID found in PR #{pr_number} data for Jules error feedback")
-            except Exception:
-                pass  # Prevent logging failures from affecting the result
-            return unsent(RepairDisposition.REFUSED, "Jules session ID is unavailable")
-
-        # Get GitHub Actions error logs
-        github_logs = _get_github_actions_logs(repo_name, config, failed_checks, pr_data)
-
-        # Format the message to send to Jules
-        message = f"""CI checks failed for PR #{pr_number} in {repo_name}.
-
-Please review and fix the following errors:
-
-{github_logs}
-
-PR Title: {pr_data.get('title', 'Unknown')}
-PR Author: {pr_data.get('user', {}).get('login', 'Unknown')}
-"""
-
-        if not new_work_allowed():
-            actions.append(f"Deferred Jules CI feedback for PR #{pr_number}: graceful shutdown is draining")
-            return unsent(RepairDisposition.DEFERRED, "graceful shutdown is draining")
-
-        expected_head = str(pr_data.get("head", {}).get("sha") or "")
-        with current_ci_failure_authority(github_client, repo_name, pr_number, expected_head, recovery_policies=getattr(config, "CI_CANCELLATION_RECOVERY", ())) as authority:
-            if not authority.allowed:
-                actions.append(f"Deferred Jules CI feedback for PR #{pr_number}: {authority.reason}")
-                return unsent(RepairDisposition.DEFERRED, authority.reason)
-            # The retirement admission and provider mutation are inside the
-            # same invalidation barrier as the final exact-head observation.
-            if not _guard_outbound_jules_send(repo_name, config, session_id):
-                actions.append(f"Blocked Jules CI feedback for PR #{pr_number}: outbound admission refused")
-                return unsent(RepairDisposition.DEFERRED, "outbound Jules admission refused")
-
-            from .jules_client import JulesClient
-
-            logger.info(f"Sending CI failure logs to Jules session '{session_id}' for PR #{pr_number}; " f"head={expected_head} failures={authority.failure_identities}")
-            jules_client = JulesClient()
-            guard = _pr_automation_decision(github_client, repo_name, pr_number)
-            if not guard.allowed:
-                return unsent(RepairDisposition.REFUSED if guard.stopped else RepairDisposition.DEFERRED, guard.reason)
-            with _new_pr_correction_request(repo_name, pr_number, github_client):
-                attempt_started = True
-                response = jules_client.send_message(session_id, message)
-
-        try:
-            get_trace_logger().log("Jules Feedback", f"Sent CI failure logs to Jules for PR #{pr_number}", item_type="pr", item_number=pr_number, details={"session_id": session_id})
-        except Exception as exc:
-            logger.warning(f"Jules feedback trace is unavailable after provider call for PR #{pr_number}: {exc}")
-
-        actions.append(f"Sent CI failure logs to Jules session '{session_id}' for PR #{pr_number}")
-        try:
-            logger.info(f"Jules response for PR #{pr_number}: {response[:200]}...")
-        except Exception:
-            pass  # Prevent logging failures from affecting the result
-
-        # Post a comment on the PR stating that a fix has been requested
-        if github_client:
-            comment_body = f"🤖 Auto-Coder: CI checks failed. I've sent the error logs to the Jules session and requested a fix. Please wait for the updates."
-            try:
-                if _add_unique_pr_comment(github_client, repo_name, pr_number, comment_body):
-                    actions.append(f"Posted comment on PR #{pr_number} stating that a fix has been requested from Jules")
-                else:
-                    actions.append(f"Skipped duplicate Jules fix-request comment on PR #{pr_number}")
-            except Exception as e:
-                error_msg = f"Failed to post comment on PR #{pr_number}: {e}"
-                try:
-                    logger.error(error_msg)
-                except Exception:
-                    pass  # Prevent logging failures from affecting the result
-                actions.append(error_msg)
-        else:
-            actions.append(f"Skipped posting comment on PR #{pr_number}: no GitHub client available")
-
-    except PRAutomationRefused as exc:
-        actions.append(exc.decision.reason)
-        return unsent(RepairDisposition.REFUSED if exc.decision.stopped else RepairDisposition.DEFERRED, exc.decision.reason)
-    except Exception as e:
-        error_msg = f"Error sending Jules error feedback for PR #{pr_number}: {e}"
-        try:
-            logger.error(error_msg)
-        except Exception:
-            pass  # Prevent logging failures from affecting the result
-        actions.append(error_msg)
-        if attempt_started:
-            return PRRepairResult(
-                RepairDisposition.ACCEPTED_OR_UNCERTAIN,
-                tuple(actions),
-                reason="Jules provider response is unavailable after call",
-                attempt_started=True,
-            )
-        return unsent(RepairDisposition.FAILED, "Jules CI feedback preparation failed")
-
-    return PRRepairResult(
-        RepairDisposition.ACCEPTED_OR_UNCERTAIN,
-        tuple(actions),
-        reason="Jules producer does not expose delivery certainty",
-        attempt_started=True,
-    )
 
 
 def _resolve_codex_cloud_task_id(
@@ -13523,7 +12515,7 @@ def _merge_pr(
         # PRs remain governed by the ordinary merge gates.
         speculative = get_speculative_jules_lifecycle(
             client,
-            possible_retired_ownership=_is_jules_pr(pr_info),
+            possible_retired_ownership=_has_retired_provider_bot_origin(pr_info),
         )
         if speculative is not None:
             issue_numbers = _resolve_pr_issue_numbers(repo_name, pr_info, client)
@@ -13730,17 +12722,6 @@ def _handle_definitive_merge_rejection(
 
     logger.info(f"PR #{pr_number} has merge conflicts, attempting to resolve...")
     log_action(f"PR #{pr_number} has merge conflicts, attempting resolution")
-
-    if _is_jules_pr(pr_info):
-        logger.info(f"PR #{pr_number} is a historical Jules PR with merge conflicts; provider repair is retired")
-        _record_pr_stage(
-            pr_number,
-            "pr.repair-delegation",
-            f"pr#{pr_number} repair delegation",
-            Outcome.SKIPPED,
-            {"effect": "merge-conflict", "backend": "jules", "reason": "historical Jules repair is retired"},
-        )
-        return False
 
     # Dependency-bot PRs (Dependabot/Renovate) are never conflict-resolved:
     # the bot recreates the PR against the updated base branch by itself.

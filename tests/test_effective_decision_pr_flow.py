@@ -415,10 +415,7 @@ class Flow:
                         return_value=SimpleNamespace(metadata_error=None, actions=[], authoritative_pr_data=self.pr_data(), closed=False),
                     ),
                     patch("auto_coder.pr_processor._link_codex_cloud_pr_to_issue", return_value=None),
-                    patch("auto_coder.pr_processor._link_jules_pr_to_issue", return_value=True),
                     patch("auto_coder.pr_processor._close_empty_pr", return_value=SimpleNamespace(closed=False)),
-                    patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=SimpleNamespace(closed=False)),
-                    patch("auto_coder.pr_processor._should_skip_waiting_for_jules", return_value=False),
                     patch("auto_coder.pr_processor.LabelManager", return_value=label),
                 ]
             )

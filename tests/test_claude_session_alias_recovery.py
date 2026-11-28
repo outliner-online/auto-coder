@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 from src.auto_coder.automation_config import AutomationConfig
 from src.auto_coder.cloud_manager import CloudManager, claude_session_alias
 from src.auto_coder.issue_processor import _process_issue_claude_routine_mode
-from src.auto_coder.pr_processor import _find_issue_by_session_id_in_comments, _link_jules_pr_to_issue
+from src.auto_coder.pr_processor import _find_issue_by_session_id_in_comments, _link_supported_provider_pr_to_issue
 
 
 class _FakePull:
@@ -148,7 +148,7 @@ class TestOppositePrefixRecovery:
 
         manager_b = CloudManager(repo_name, cloud_file_path=tmp_path / "install-b" / "cloud.csv")
         with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager_b):
-            linked = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
+            linked = _link_supported_provider_pr_to_issue(repo_name, pr_data, fake_client)
 
         assert linked is True
         assert f"close #{issue_number}" in pr_data["body"]
@@ -163,7 +163,7 @@ class TestOppositePrefixRecovery:
         # Reprocessing the successfully linked body performs no extra link update.
         fake_client.pr_update_calls.clear()
         with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager_b):
-            linked_again = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
+            linked_again = _link_supported_provider_pr_to_issue(repo_name, pr_data, fake_client)
         assert linked_again is True
         assert fake_client.pr_update_calls == []
         assert pr_data["body"].count(f"close #{issue_number}") == 1
@@ -195,7 +195,7 @@ class TestReverseDirectionAndDuplicates:
 
         manager = CloudManager(repo_name, cloud_file_path=tmp_path / "cloud.csv")
         with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-            linked = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
+            linked = _link_supported_provider_pr_to_issue(repo_name, pr_data, fake_client)
 
         assert linked is True
         assert f"close #{issue_number}" in pr_data["body"]
@@ -253,29 +253,6 @@ class TestMisleadingHitsAreRejected:
 
         assert result is None
 
-    def test_special_title_exemption_still_applies(self, tmp_path) -> None:
-        repo_name = "owner/repo"
-        suffix = "ExemptCase1"
-        pr_data = {
-            "number": 8800,
-            "title": "🛡️ Sentinel: routine sweep",
-            "body": f"https://claude.ai/code/cse_{suffix}",
-            "user": {"login": "claude[bot]"},
-            "head": {"ref": "claude/exempt"},
-        }
-        original_body = pr_data["body"]
-        fake_client = FakeGitHubClient()
-        fake_client.search_results[f"session_{suffix}"] = [{"number": 42}]
-        fake_client.issues[42] = {"number": 42, "body": f"session_{suffix}"}
-
-        manager = CloudManager(repo_name, cloud_file_path=tmp_path / "cloud.csv")
-        with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-            linked = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
-
-        assert linked is True  # exempt: treated as "nothing to do", not an error
-        assert pr_data["body"] == original_body
-        assert fake_client.search_calls == []
-
 
 class TestAmbiguityAndLocalPrecedence:
     """AS-005: duplicate evidence versus conflicting owners."""
@@ -307,46 +284,6 @@ class TestAmbiguityAndLocalPrecedence:
 
         assert _find_issue_by_session_id_in_comments(repo_name, own_spelling, fake_client) == 501
 
-    def test_ambiguous_alias_search_does_not_fall_back_to_title_or_branch_guess(self, tmp_path) -> None:
-        """REQ-003: an ambiguous alias search must not let a guessable PR title or
-        branch publish a link for that evaluation.
-
-        Production entry point: _link_jules_pr_to_issue -> _resolve_jules_pr_issue_number.
-        Without this, an ambiguous _find_issue_by_session_id_in_comments result was
-        indistinguishable from "not found", so the resolver fell through to the
-        branch/title fallback and could still publish a guessed link.
-        """
-        repo_name = "owner/repo"
-        suffix = "AmbigGuess1"
-        own_spelling = f"session_{suffix}"
-        alt_spelling = f"cse_{suffix}"
-
-        fake_client = FakeGitHubClient()
-        fake_client.search_results[own_spelling] = [{"number": 501}]
-        fake_client.search_results[alt_spelling] = [{"number": 502}]
-        fake_client.issues[501] = {"number": 501, "body": own_spelling}
-        fake_client.issues[502] = {"number": 502, "body": alt_spelling}
-
-        # Both the PR title and the branch name contain a guessable Issue number
-        # (#501), matching the Issue this alias search happens to have discovered
-        # first -- exactly the guess the fallback must not make.
-        pr_data = {
-            "number": 9100,
-            "title": "Fix #501",
-            "body": f"https://claude.ai/code/{own_spelling}",
-            "user": {"login": "kitamura-tetsuo"},
-            "head": {"ref": "claude/issue-501"},
-        }
-        original_body = pr_data["body"]
-
-        manager = CloudManager(repo_name, cloud_file_path=tmp_path / "cloud.csv")
-        with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-            linked = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
-
-        assert linked is False
-        assert pr_data["body"] == original_body
-        assert 9100 not in fake_client.pr_bodies
-
     def test_unique_local_association_is_not_displaced_by_search(self, tmp_path) -> None:
         repo_name = "owner/repo"
         suffix = "LocalWins1"
@@ -368,7 +305,7 @@ class TestAmbiguityAndLocalPrecedence:
         fake_client.search_results[session_id] = []
 
         with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-            linked = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
+            linked = _link_supported_provider_pr_to_issue(repo_name, pr_data, fake_client)
 
         assert linked is True
         assert "close #777" in pr_data["body"]
@@ -398,7 +335,7 @@ class TestAmbiguityAndLocalPrecedence:
         fake_client.issues[999] = {"number": 999, "body": session_id}
 
         with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-            linked = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
+            linked = _link_supported_provider_pr_to_issue(repo_name, pr_data, fake_client)
 
         assert linked is False
         assert pr_data["body"] == original_body
@@ -467,14 +404,14 @@ class TestPartialObservationsAndUpdateFailure:
 
         manager = CloudManager(repo_name, cloud_file_path=tmp_path / "cloud.csv")
         with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-            linked = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
+            linked = _link_supported_provider_pr_to_issue(repo_name, pr_data, fake_client)
 
         assert linked is False
         assert pr_data["body"] == original_body
         assert 7700 not in fake_client.pr_bodies
 
         with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-            linked_again = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
+            linked_again = _link_supported_provider_pr_to_issue(repo_name, pr_data, fake_client)
 
         assert linked_again is True
         assert f"close #{issue_number}" in pr_data["body"]
@@ -483,7 +420,22 @@ class TestPartialObservationsAndUpdateFailure:
         # Idempotent repetition: no duplicate reference or extra update.
         fake_client.pr_update_calls.clear()
         with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-            linked_third = _link_jules_pr_to_issue(repo_name, pr_data, fake_client)
+            linked_third = _link_supported_provider_pr_to_issue(repo_name, pr_data, fake_client)
         assert linked_third is True
         assert fake_client.pr_update_calls == []
         assert pr_data["body"].count(f"close #{issue_number}") == 1
+
+
+def test_claude_linker_does_not_adopt_retired_provider_binding(tmp_path):
+    repo_name = "owner/repo"
+    manager = CloudManager(repo_name, cloud_file_path=tmp_path / "cloud.csv")
+    manager.add_session(101, "legacy-jules-id", provider="jules")
+    manager.add_session(202, "session_claude_owner", provider="claude-routine")
+    github = FakeGitHubClient()
+    pr_data = {"number": 9303, "body": "Session ID: legacy-jules-id\nhttps://claude.ai/code/session_claude_owner", "user": {"login": "claude[bot]"}}
+    with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
+        linked = _link_supported_provider_pr_to_issue(repo_name, pr_data, github)
+    assert linked is True
+    assert "close #101" not in pr_data["body"]
+    assert "close #202" in pr_data["body"]
+    assert pr_data["_provider_task_id"] == "session_claude_owner"

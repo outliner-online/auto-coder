@@ -1614,7 +1614,6 @@ class TestAdversarialValidationPRFlow:
             patch("auto_coder.llm_backend_config.get_llm_config", return_value=llm_config),
             patch("auto_coder.pr_processor.get_detailed_checks_from_history") as detailed_checks,
             patch("auto_coder.pr_processor._send_codex_cloud_error_feedback") as cloud_feedback,
-            patch("auto_coder.pr_processor._send_jules_error_feedback") as jules_feedback,
             patch("auto_coder.pr_processor.isolated_pr_head_worktree", return_value=nullcontext(str(tmp_path))),
             patch(
                 "auto_coder.pr_processor.CommandExecutor.run_command",
@@ -1662,7 +1661,6 @@ class TestAdversarialValidationPRFlow:
         assert all("GitHub Actions checks failed" not in action for action in actions)
         detailed_checks.assert_not_called()
         cloud_feedback.assert_not_called()
-        jules_feedback.assert_not_called()
         checkout_or_local_repair.assert_not_called()
         with patch("auto_coder.llm_backend_config.get_llm_config", return_value=llm_config):
             inputs = _two_tier_gate_inputs(client, "owner/repo", pr_data)
@@ -3579,10 +3577,8 @@ class TestAtomicMergeSHAPrecondition:
     @patch("auto_coder.merge_operation_adapter.get_ghapi_client")
     @patch("auto_coder.util.gh_cache.get_ghapi_client")
     @patch("auto_coder.pr_processor._close_linked_issues")
-    @patch("auto_coder.pr_processor._archive_jules_session")
     def test_merge_pr_supplies_sha_precondition_to_github_api(
         self,
-        mock_archive,
         mock_close_issues,
         mock_get_ghapi,
         mock_get_ghapi_adapter,
@@ -3632,10 +3628,8 @@ class TestAtomicMergeSHAPrecondition:
     @patch("auto_coder.util.gh_cache.get_ghapi_client")
     @patch("auto_coder.pr_processor._get_allowed_merge_methods", return_value=["--squash", "--merge"])
     @patch("auto_coder.pr_processor._close_linked_issues")
-    @patch("auto_coder.pr_processor._archive_jules_session")
     def test_merge_pr_fails_when_github_api_rejects_sha_precondition(
         self,
-        mock_archive,
         mock_close_issues,
         mock_get_allowed,
         mock_get_ghapi,
@@ -3683,7 +3677,6 @@ class TestAtomicMergeSHAPrecondition:
         assert result is False
         mock_api.pulls.merge.assert_called_once()
         mock_close_issues.assert_not_called()
-        mock_archive.assert_not_called()
 
 
 class TestMaxAdversarialValidationsGating:

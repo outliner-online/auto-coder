@@ -216,12 +216,10 @@ class TestAS001LocalTestFailureWithRepairDisabled:
     @patch("auto_coder.pr_processor.git_push")
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
     def test_production_pr_processing_local_test_failure_suppresses_repair(
         self,
         mock_exit_in_progress,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_git_push,
@@ -293,12 +291,10 @@ class TestAS002GitHubActionsFailureWithRepairDisabled:
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor.get_detailed_checks_from_history")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
     def test_production_pr_processing_gha_failure_suppresses_repair(
         self,
         mock_exit_in_progress,
-        mock_jules_close,
         mock_empty_close,
         mock_detailed_checks,
         mock_checks,
@@ -356,12 +352,10 @@ class TestAS003RepeatedDisabledProcessingBudget:
     @patch("auto_coder.pr_processor.run_local_tests")
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
     def test_repeated_processing_does_not_spend_budget(
         self,
         mock_exit_in_progress,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_run_local_tests,
@@ -417,12 +411,10 @@ class TestAS004TestsMayStillRun:
     @patch("auto_coder.pr_processor.run_local_tests")
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
     def test_local_tests_run_and_failure_is_preserved(
         self,
         mock_exit_in_progress,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_run_local_tests,
@@ -476,12 +468,10 @@ class TestAS005WorkspaceNotDestructivelyCleaned:
     @patch("auto_coder.pr_processor._checkout_pr_branch")
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
     def test_disabled_repair_does_not_checkout_or_clean_workspace_when_not_on_branch(
         self,
         mock_exit_in_progress,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_checkout,
@@ -517,12 +507,10 @@ class TestAS005WorkspaceNotDestructivelyCleaned:
     @patch("auto_coder.pr_processor.run_local_tests")
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
     def test_disabled_repair_preserves_local_changes_when_on_branch(
         self,
         mock_exit_in_progress,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_run_local_tests,
@@ -573,12 +561,10 @@ class TestAS006OtherPRAutomationRemainsIndependent:
     @patch("auto_coder.pr_processor._start_mergeability_remediation", return_value=["Remediation initiated"])
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": False, "merge_state_status": "dirty"})
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
     def test_mergeability_remediation_remains_active_when_test_fix_disabled(
         self,
         mock_exit_in_progress,
-        mock_jules_close,
         mock_empty_close,
         mock_mergeable_state,
         mock_start_remediation,
@@ -599,12 +585,10 @@ class TestAS006OtherPRAutomationRemainsIndependent:
     @patch("auto_coder.pr_processor._get_mergeable_state", return_value={"mergeable": True, "merge_state_status": "clean"})
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor._merge_pr", return_value=True)
     def test_passing_checks_merge_normally_when_test_fix_disabled(
         self,
         mock_merge_pr,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_mergeable,
@@ -670,12 +654,10 @@ class TestAS007ReEnableAfterDisabledFailures:
     @patch("auto_coder.pr_processor.git_push")
     @patch("auto_coder.pr_processor._check_github_actions_status")
     @patch("auto_coder.pr_processor._close_empty_pr", return_value=EmptyPRResult(closed=False))
-    @patch("auto_coder.pr_processor._close_stale_jules_pr", return_value=StaleJulesPRResult(closed=False))
     @patch("auto_coder.pr_processor.check_github_actions_and_exit_if_in_progress", return_value=True)
     def test_re_enable_starts_repair_with_full_budget(
         self,
         mock_exit_in_progress,
-        mock_jules_close,
         mock_empty_close,
         mock_checks,
         mock_git_push,

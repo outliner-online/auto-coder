@@ -28,7 +28,7 @@ from src.auto_coder.pr_processor import (
     _delegate_cloud_review_thread_repair,
     _dispatch_cloud_conflict_repair,
     _handle_definitive_merge_rejection,
-    _link_jules_pr_to_issue,
+    _link_supported_provider_pr_to_issue,
     _merge_pr,
     _record_cloud_conflict_deliveries,
     _resolve_cloud_conflict_origin,
@@ -102,32 +102,6 @@ def test_definitive_rejection_preserves_actual_cloud_quota_producer_wait(tmp_pat
     assert len(service_entries) == 1
     assert service_entries[0].expected_head == "H1"
     assert service_entries[0].base_ref == "release/2.x"
-
-
-def test_definitive_jules_conflict_does_not_reactivate_historical_session() -> None:
-    api = MagicMock()
-    pull = {**pr_data(), "mergeable": False, "body": "Session ID: session-existing"}
-    api.pulls.get.return_value = pull
-    jules = MagicMock()
-    service_entries = []
-    original = BaseUpdateConflictExecutionService.execute_conflict_repair
-
-    def observe(service, request, operation=None, *, config=None):
-        service_entries.append(request)
-        return original(service, request, operation, config=config)
-
-    with (
-        patch("src.auto_coder.pr_processor._is_jules_pr", return_value=True),
-        patch("src.auto_coder.pr_processor._guard_outbound_jules_send", return_value=True),
-        patch("auto_coder.jules_client.JulesClient", return_value=jules),
-        patch.object(BaseUpdateConflictExecutionService, "execute_conflict_repair", new=observe),
-        patch("src.auto_coder.pr_processor._resolve_pr_merge_conflicts") as local,
-    ):
-        assert not _handle_definitive_merge_rejection("owner/repo", 1589, AutomationConfig(), _conflict_github(), api, "owner", "repo", MagicMock(), MagicMock(), MagicMock(), "H1")
-
-    assert service_entries == []
-    jules.assert_not_called()
-    local.assert_not_called()
 
 
 def pr_data(head_sha: str = "H1", base_sha: str = "B1") -> dict:
@@ -231,7 +205,7 @@ def test_duplicate_named_backend_session_url_fails_closed_after_dispatch(tmp_pat
         github.search_issues.return_value = [{"number": 1, "body": ""}, {"number": 2, "body": ""}]
         github.get_issue_comments.side_effect = lambda _repo, issue_number: session_comments[issue_number]
 
-        linked = _link_jules_pr_to_issue("owner/repo", pull_request, github)
+        linked = _link_supported_provider_pr_to_issue("owner/repo", pull_request, github)
         conflict_result = _delegate_cloud_merge_conflict_repair_result("owner/repo", pull_request, github)
         review_result = _delegate_cloud_review_thread_repair(
             "owner/repo",
@@ -868,40 +842,3 @@ def test_local_conflict_repair_emits_confirmed_remediation_outcome(tmp_path, res
     assert len(events) == 1
     assert events[0].outcome == ("completed" if resolved else "failed")
     assert events[0].facts["result"] == ("success" if resolved else "failed")
-
-
-def test_jules_conflict_refuses_historical_provider_repair() -> None:
-    """The production base-update route does not reactivate Jules ownership."""
-    pull_request = pr_data()
-    pull_request["body"] = "Session ID: session_jules_conflict"
-    pull_request["user"] = {"login": "google-labs-jules[bot]"}
-    requests = []
-
-    def capture_dispatch(request, operation):
-        requests.append(request)
-        return operation(request)
-
-    commands = [
-        CommandResult(True, "", "", 0),
-        CommandResult(True, "2\n", "", 0),
-        CommandResult(False, "", "conflict", 1),
-        CommandResult(True, "", "", 0),
-    ]
-    with (
-        patch("src.auto_coder.pr_processor.cmd") as command_executor,
-        patch("src.auto_coder.pr_processor._is_jules_pr", return_value=True),
-        patch("src.auto_coder.pr_processor._guard_outbound_jules_send", return_value=True) as guard,
-        patch("src.auto_coder.pr_processor.dispatch_pr_repair", side_effect=capture_dispatch),
-        patch("auto_coder.jules_client.JulesClient") as jules_type,
-    ):
-        command_executor.run_command.side_effect = commands
-        actions = _update_with_base_branch("owner/repo", pull_request, AutomationConfig(), _conflict_github(pull_request["head"]["sha"]))
-
-    assert requests == []
-    guard.assert_not_called()
-    jules_type.assert_not_called()
-    jules_type.return_value.send_message.assert_not_called()
-    assert actions.repair_result is not None
-    assert actions.repair_result.disposition is RepairDisposition.REFUSED
-    assert actions.repair_result.attempt_started is not True
-    assert "Historical Jules repair is retired" in actions.repair_result.reason
