@@ -13,7 +13,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field, replace
-from typing import Any, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Set, Tuple
 
 from .adversarial_validator import ReviewThreadDisposition
 from .canonical_pr_blocker_ledger import (
@@ -508,6 +508,7 @@ def execute_durable_thread_closures(
     stale_registry: Optional[StaleReviewThreadRegistry] = None,
     expected_ledger_revision: Optional[int] = None,
     claimed_threads: Sequence[ClaimedReviewThread] = (),
+    new_effect_authorizer: Optional[Callable[[], str]] = None,
 ) -> ClosureExecutionResult:
     """Serialize receipt observation and effects across all local PR callers."""
     try:
@@ -524,6 +525,7 @@ def execute_durable_thread_closures(
                 expected_ledger_revision=expected_ledger_revision,
                 claimed_threads=claimed_threads,
                 author_set=author_set,
+                new_effect_authorizer=new_effect_authorizer,
             )
     except (LockAcquisitionTimeout, OSError, ControllerIdentityHistoryError) as exc:
         selected_ids = tuple(dict.fromkeys(e.thread_id for e in evaluations if e.thread_id))
@@ -575,6 +577,7 @@ def _execute_durable_thread_closures(
     stale_registry: Optional[StaleReviewThreadRegistry] = None,
     expected_ledger_revision: Optional[int] = None,
     claimed_threads: Sequence[ClaimedReviewThread] = (),
+    new_effect_authorizer: Optional[Callable[[], str]] = None,
     author_set: ControllerAuthorSet,
 ) -> ClosureExecutionResult:
     """Persist accepted closures to the ledger and resolve eligible review threads.
@@ -591,6 +594,14 @@ def _execute_durable_thread_closures(
     """
     norm_origin = normalize_api_origin(api_origin)
     rollback_registry = stale_registry or StaleReviewThreadRegistry()
+
+    def new_effect_refusal() -> str:
+        if new_effect_authorizer is None:
+            return ""
+        try:
+            return new_effect_authorizer()
+        except Exception as exc:
+            return f"PR automation authority is unavailable: {exc}"
 
     def _discussion_digest(observation: Any, authenticated_controller_login: str | ControllerAuthorSet) -> str:
         from .review_thread_validation import substantive_discussion_digest
@@ -733,6 +744,16 @@ def _execute_durable_thread_closures(
                 # can complete without rewriting that authority as a verified correction.
                 persisted_blockers.append(blocker_id)
                 persisted_evaluations.append(eval_res)
+                continue
+
+            refusal = new_effect_refusal()
+            if refusal:
+                if existing is not None and existing.disposition is BlockerDisposition.VERIFIED_CORRECTION:
+                    # An already-accepted closure may still reconcile a sent receipt.
+                    persisted_blockers.append(blocker_id)
+                    persisted_evaluations.append(eval_res)
+                else:
+                    errors.append(f"{eval_res.thread_id}|automation-stop|{refusal}")
                 continue
 
             try:
@@ -912,6 +933,11 @@ def _execute_durable_thread_closures(
             resolved_thread_ids.append(thread_id)
             continue
 
+        refusal = new_effect_refusal()
+        if refusal:
+            errors.append(f"{thread_id}|automation-stop|{refusal}")
+            continue
+
         # Every actual resolve gets a currently observable pending guard. A
         # completed receipt from an earlier cycle is deliberately re-armed.
         try:
@@ -979,6 +1005,11 @@ def _execute_durable_thread_closures(
                 persisted_blocker_transitions=tuple(persisted_blockers),
                 errors=tuple(errors),
             )
+
+        refusal = new_effect_refusal()
+        if refusal:
+            errors.append(f"{thread_id}|automation-stop|{refusal}")
+            continue
 
         # Resolve mutation
         try:

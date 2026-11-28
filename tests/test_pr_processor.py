@@ -11,6 +11,7 @@ import pytest
 from src.auto_coder.automation_config import AutomationConfig
 from src.auto_coder.pr_processor import _fix_pr_issues_with_testing
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 # A focused runner result for the single reported failed file.
 _RUN = {"command": "bash scripts/test.sh tests/test_foo.py", "test_file": "tests/test_foo.py", "return_code": 1}
@@ -549,6 +550,7 @@ class TestPRProcessorMerge:
 
         client = MagicMock(token="token")
         client.get_issue.return_value = {"state": "open", "body": "requirements-v2"}
+        install_pr_history(client, "head-b")
         api = MagicMock()
         api.pulls.get.return_value = {
             "number": 123,
@@ -599,6 +601,7 @@ class TestPRProcessorMerge:
         mock_get_ghapi_client_adapter.return_value = mock_api
 
         head_sha = "a" * 40
+        install_pr_history(mock_instance, head_sha)
 
         # Mock Dependabot PR info
         mock_pr_info = {"number": 123, "user": {"login": "dependabot[bot]"}, "head": {"ref": "dependabot/npm_and_yarn/some-package-1.0.0", "sha": head_sha}}
@@ -652,6 +655,7 @@ class TestPRProcessorMerge:
         mock_get_ghapi_client_adapter.return_value = mock_api
 
         head_sha = "b" * 40
+        install_pr_history(mock_instance, head_sha)
 
         # Mock regular user PR info
         mock_pr_info = {"number": 124, "user": {"login": "some-developer"}, "head": {"ref": "feature/some-feature", "sha": head_sha}}
@@ -695,6 +699,7 @@ class TestPRProcessorMerge:
         mock_get_ghapi_client_adapter.return_value = mock_api
 
         head_sha = "c" * 40
+        install_pr_history(mock_instance, head_sha)
 
         # Mock PR info: squash is disallowed by current repo settings, so
         # 405 is a definitive, cause-specified rejection that may fall back
@@ -758,6 +763,7 @@ class TestPRProcessorMerge:
         mock_get_ghapi_client_adapter.return_value = mock_api
 
         head_sha = "d" * 40
+        install_pr_history(mock_instance, head_sha)
 
         # Dependabot PR that cannot be merged because of conflicts (409, a
         # definitive rejection that supersedes the operation and is then
@@ -820,6 +826,7 @@ class TestPRProcessorMerge:
         get_ghapi_client.return_value = api
         get_ghapi_client_adapter.return_value = api
         head_sha = "e" * 40
+        install_pr_history(github_client_class.get_instance.return_value, head_sha)
         api.pulls.get.return_value = {
             "number": 127,
             "user": {"login": "google-labs-jules"},
@@ -883,8 +890,10 @@ class TestUpdateWithBaseBranchDependabot:
             "author": {"login": "dependabot[bot]"},
         }
 
+        client = Mock()
+        install_pr_history(client, "controlled-dependabot-head")
         with patch("src.auto_coder.conflict_resolver._perform_base_branch_merge_and_conflict_resolution") as mock_perform:
-            actions = _update_with_base_branch("owner/repo", pr_data, AutomationConfig())
+            actions = _update_with_base_branch("owner/repo", pr_data, AutomationConfig(), github_client=client)
 
         mock_perform.assert_not_called()
         assert any("Skipping conflict resolution" in action for action in actions)
@@ -977,6 +986,7 @@ def test_controller_branch_origin_reaches_local_conflict_repair():
     from src.auto_coder.utils import CommandResult
 
     client = Mock()
+    install_pr_history(client, "a" * 40)
     client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder[bot]", account_id=101, app_id=7)
     pr_data = {
         "number": 4243,

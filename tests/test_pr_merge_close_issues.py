@@ -7,6 +7,7 @@ import pytest
 from src.auto_coder.automation_config import AutomationConfig
 from src.auto_coder.issue_context import extract_linked_issues_from_pr_body
 from src.auto_coder.pr_processor import _close_linked_issues, _merge_pr
+from tests.pr_automation_fakes import install_pr_history
 
 
 class TestExtractLinkedIssues:
@@ -254,6 +255,7 @@ class TestMergePRWithIssueClosing:
         mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         head_sha = "e" * 40
+        install_pr_history(mock_github_client.get_instance.return_value, head_sha)
         mock_api.pulls.get.return_value = {
             "number": 123,
             "user": {"login": "google-labs-jules"},
@@ -303,6 +305,7 @@ class TestMergePRWithIssueClosing:
 
         # Not a conflict; a real head SHA is present.
         head_sha = "1" * 40
+        install_pr_history(mock_github_client.get_instance.return_value, head_sha)
         mock_api.pulls.get.return_value = {"number": 123, "user": {"login": "some-developer"}, "head": {"sha": head_sha}, "mergeable": True}
 
         store = MergeOperationStore(db_path=tmp_path / "merge_ops.db")
@@ -333,6 +336,7 @@ class TestMergePRWithIssueClosing:
         mock_github_client.get_instance.return_value.api_for.return_value = mock_api
 
         head_sha = "f" * 40
+        install_pr_history(mock_github_client.get_instance.return_value, head_sha)
         mock_api.pulls.get.return_value = {"number": 123, "user": {"login": "some-developer"}, "head": {"sha": head_sha}}
         # Mock successful merge (API handles it same as direct now)
         mock_api.pulls.merge.return_value = {"merged": True, "sha": "mergedsha"}

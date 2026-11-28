@@ -54,7 +54,7 @@ def test_renewed_pass_at_repair_head_closes_retained_findings_without_another_re
     reviewer = reviewer_for(flow_env.tmp, monkeypatch, flow.router)
     config = ReviewerAppConfig("4765828", "client", flow_env.tmp / "reviewer.pem")
     with patch("auto_coder.pr_processor.load_reviewer_app_config", return_value=config), patch("auto_coder.pr_processor.GitHubAppReviewer", return_value=reviewer):
-        published, reason = _consume_pending_two_tier_publication(REPO, flow.pr, replace(flow.gate_inputs, head_sha=flow.h2))
+        published, reason = _consume_pending_two_tier_publication(REPO, flow.pr, replace(flow.gate_inputs, head_sha=flow.h2), github_client=flow.client)
     assert published, reason
     handoffs_before = flow.handoffs
     script = ClosureScript(status="FIXED")

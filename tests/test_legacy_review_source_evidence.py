@@ -22,6 +22,7 @@ from auto_coder.pr_review_cycle import DELIVERY_NONE, PrReviewCycleRepository
 from auto_coder.prompt_loader import get_prompt_template
 from auto_coder.util.gh_cache import PullRequestRepairMetadata
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_scoped_review_followup import HEAD, PR, REPO, TASK, _registered_findings
 
 
@@ -40,6 +41,7 @@ def ordinary(tmp_path, monkeypatch):
     new = next(thread for thread in threads if thread.comments[0].database_id == 110)
     data = {"number": PR, "body": "Fixes #9", "head": {"ref": "work-branch", "sha": HEAD, "repo": {"full_name": REPO}}, "base": {"ref": "main", "sha": "b" * 40, "repo": {"id": 3}}, "labels": [], "user": {"login": "maintainer"}}
     github = MagicMock()
+    install_pr_history(github, lambda _repo, _pr: data["head"]["sha"])
     github.get_authenticated_controller_identity.return_value = ControllerIdentity("maintainer", account_id=101)
     github.get_authenticated_user_login.return_value = "maintainer"
     github.get_pr_comments.return_value = github.get_pr_comments_strict.return_value = []

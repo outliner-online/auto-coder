@@ -14,6 +14,7 @@ from auto_coder.speculative_jules_lifecycle import (
     configure_speculative_jules_lifecycle,
     consume_due_speculative_work,
 )
+from tests.pr_automation_fakes import install_pr_history
 
 
 class Classifier:
@@ -140,6 +141,7 @@ def test_top_level_processor_fences_retired_empty_pr_before_lifecycle_effects(tm
         "body": "Closes #7",
         "head": {"sha": "abc", "ref": "issue-7"},
     }
+    install_pr_history(github, lambda _repo, _pr: pr["head"]["sha"])
     configure_speculative_jules_lifecycle(service)
     try:
         result = process_pull_request(github, AutomationConfig(), "owner/repo", pr, force_adversarial_validation=True)
@@ -157,6 +159,7 @@ def test_top_level_processor_fences_unlinked_retired_pr(tmp_path: Path) -> None:
     service, _ = lifecycle(tmp_path, retired)
     github = Mock()
     pr = {"number": 42, "state": "open", "changed_files": 0, "body": "", "head": {"sha": "abc", "ref": "jules-output"}}
+    install_pr_history(github, lambda _repo, _pr: pr["head"]["sha"])
     configure_speculative_jules_lifecycle(service)
     try:
         result = process_pull_request(github, AutomationConfig(), "owner/repo", pr)

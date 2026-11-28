@@ -14,6 +14,7 @@ from auto_coder.review_adjudication import AdjudicationLedger, Decision, ScopedF
 from auto_coder.review_adjudication_github import AdjudicationContextStore, IssueEvidence, PullRequestBinding, build_issue_contracts, new_context
 from auto_coder.scoped_review_followup import snapshot_digest
 from auto_coder.util.gh_cache import PullRequestRepairMetadata, ReviewThread, ReviewThreadComment
+from tests.pr_automation_fakes import install_pr_history
 
 REPO = "owner/repo"
 PR = 4001
@@ -143,6 +144,7 @@ def test_native_scoped_source_is_claimed_once_without_replaying_unknown_old(tmp_
     threads = _registered_findings(tmp_path, monkeypatch, control)
     github.get_pr_review_threads_strict.side_effect = lambda *_args: threads
     github.get_pull_request_metadata_strict.return_value = {**data, "state": "open"}
+    install_pr_history(github, lambda *_args: data["head"]["sha"])
     github.get_pull_request_repair_metadata_strict.return_value = PullRequestRepairMetadata("work-branch", HEAD, "main")
     wham = MagicMock()
     wham.resolve_latest_assistant_turn.return_value = TASK + "~assttrn_1"

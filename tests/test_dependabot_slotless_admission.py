@@ -46,6 +46,7 @@ def flow(tmp_path, monkeypatch):
         "head": {"ref": "dependabot/npm_and_yarn/dependency-2", "sha": HEAD},
         "base": {"ref": "main", "sha": "base"},
         "labels": [],
+        "commits": 1,
         "changed_files": 2,
         "additions": 2,
         "deletions": 2,
@@ -77,6 +78,8 @@ def flow(tmp_path, monkeypatch):
         if path.endswith(f"/pulls/{NUMBER}"):
             assert request.method == "GET"
             return httpx.Response(200, json=state.pr)
+        if path.endswith("/commits"):
+            return httpx.Response(200, json=[{"sha": state.pr["head"]["sha"], "commit": {"message": "Update dependency"}}])
         if path.endswith("/files"):
             return httpx.Response(200, json=[{"filename": "package.json", "status": "modified", "additions": 2, "deletions": 2}])
         raise AssertionError(f"Unexpected GitHub request: {request.method} {path}")
@@ -92,6 +95,7 @@ def flow(tmp_path, monkeypatch):
     monkeypatch.setattr(client, "get_authenticated_user_login", lambda: "controller")
     monkeypatch.setattr(GitHubClient, "get_instance", lambda *_, **__: client)
     monkeypatch.setattr("auto_coder.util.gh_cache.get_caching_client", lambda **_: httpx.Client(transport=httpx.MockTransport(response)))
+    monkeypatch.setattr("auto_coder.util.gh_cache.github_http_client", lambda **_: httpx.Client(transport=httpx.MockTransport(response)))
     monkeypatch.setattr("auto_coder.pr_processor.resolve_reviewer_app_identity", lambda *_: SimpleNamespace(login="independent-reviewer[bot]"))
     config = AutomationConfig()
     config.AUTO_MERGE = True

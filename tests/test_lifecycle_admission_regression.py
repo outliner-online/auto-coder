@@ -10,6 +10,7 @@ from auto_coder.github_controller_auth import ControllerIdentity
 from auto_coder.implementation_slots import ImplementationOwner, ImplementationSlotRepository
 from auto_coder.issue_context import extract_lifecycle_directive_issue_references
 from auto_coder.pr_processor import CloudTaskOriginResolution
+from tests.pr_automation_fakes import install_mock_pr_history
 
 NARRATIVE = "Grid: existing closed #5459/REQ-007–008 ... No Issue Requirements or ownership were rewritten"
 
@@ -115,6 +116,7 @@ def test_unowned_draft_without_backend_defers_before_reservation(tmp_path, monke
     monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(tmp_path))
     config = AutomationConfig()
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     pr = {"number": 5940, "title": "Grid cleanup", "body": NARRATIVE, "draft": True, "state": "open", "user": {"login": "human"}, "head": {"ref": "grid-cleanup", "sha": "a" * 40}, "labels": []}
     github.get_pull_request_metadata_strict.return_value = pr
     github.get_issue.return_value = {"number": 5459, "state": "closed"}
@@ -177,6 +179,7 @@ def test_draft_preflight_preserves_executable_routes(route):
     from auto_coder.pr_processor import CloudTaskOrigin, draft_pr_implementation_blocker
 
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     pr = {"number": 5940, "state": "open", "draft": route != "ready"}
     github.get_pull_request_metadata_strict.return_value = pr
     origin = CloudTaskOriginResolution(origin=CloudTaskOrigin("jules", "existing-task", MagicMock()))
@@ -189,6 +192,7 @@ def test_draft_preflight_fails_closed_for_unavailable_evidence(evidence):
     from auto_coder.pr_processor import draft_pr_implementation_blocker
 
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     if isinstance(evidence, Exception):
         github.get_pull_request_metadata_strict.side_effect = evidence
     else:
@@ -202,6 +206,7 @@ def test_draft_preflight_fails_closed_for_unavailable_evidence(evidence):
 def test_retained_and_manual_drafts_reach_ordinary_processing(tmp_path, retained, manual):
     config = AutomationConfig()
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     pr = {"number": 5940, "title": "Grid", "body": NARRATIVE, "draft": True, "head": {"ref": "grid-cleanup"}, "labels": []}
     slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
     owner = ImplementationOwner("pr", 5940)
@@ -231,6 +236,7 @@ def test_draft_provider_preflight_does_not_promote_narrative_to_provider_ownersh
 
     assert CloudManager("owner/repo").add_session(5459, "historical-task", provider="jules")
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     github.get_pull_request_metadata_strict.return_value = {
         "number": 5940,
         "body": NARRATIVE,
@@ -263,6 +269,7 @@ def test_recorded_provider_session_requires_independent_draft_association(provid
     manager.get_binding.side_effect = lambda number: binding if number == (5940 if provenance == "direct-pr" else 5459) else None
     manager.read_bindings_strict.return_value = {"5459": binding}
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": True, "body": NARRATIVE + "\n" + marker, "head": {"ref": "grid-cleanup", "sha": "h1"}}
     owner = 5459 if provenance == "lifecycle-issue" else None
     evidence = DraftPRAdmissionEvidence()
@@ -299,6 +306,7 @@ def test_unassociated_recorded_provider_sessions_do_not_admit_draft(shared_sessi
     assert manager.add_session(5459, "first-task", provider="jules")
     assert manager.add_session(5460, "first-task" if shared_session else "second-task", provider="jules")
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": True, "body": "https://jules.google.com/session/first-task\nhttps://jules.google.com/task/second-task"}
     with patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""), patch("auto_coder.cloud_task_engine.CloudTaskEngine") as factory:
         blocker = draft_pr_implementation_blocker("owner/repo", 5940, github)
@@ -386,6 +394,7 @@ def test_reconciliation_after_active_sample_cannot_recreate_unsupported_draft(tm
     assert slots.reserve(old, implementation_pr=5488)
     state = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}, 5940: {"state": "open", "draft": True}})
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     for name in ("get_issue", "get_issue_details", "get_pull_request", "get_pr_details", "get_connected_prs"):
         getattr(github, name).side_effect = getattr(state, name)
     pr = {"number": 5940, "title": "New draft", "body": "", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "labels": []}
@@ -439,6 +448,7 @@ def test_fresh_draft_preflight_requires_exact_observed_head(head):
     from auto_coder.pr_processor import draft_pr_implementation_blocker
 
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     github.get_pull_request_metadata_strict.return_value = {"number": 5940, "state": "open", "draft": False, "head": head}
     with patch("auto_coder.pr_processor._selected_local_backend_name", return_value=""):
         blocker = draft_pr_implementation_blocker("owner/repo", 5940, github, expected_head=("grid-cleanup", "a" * 40))
@@ -453,6 +463,7 @@ def test_capacity_retry_rechecks_fresh_draft_admission(tmp_path):
     assert slots.reserve(ImplementationOwner("issue", 5459), implementation_pr=5488)
     state = GitHubState(issues={5459: {"number": 5459, "state": "closed"}, 6000: {"number": 6000, "state": "open"}}, prs={5488: {"state": "closed", "merged": True}})
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     for name in ("get_issue", "get_pull_request", "get_pr_details", "get_connected_prs"):
         getattr(github, name).side_effect = getattr(state, name)
     reconciled = False
@@ -496,6 +507,7 @@ def test_retained_active_execution_survives_draft_admission_guard(tmp_path):
     execution = slots.start_execution(owner, implementation_pr=5488)
     state = GitHubState(issues={5459: {"number": 5459, "state": "closed"}}, prs={5488: {"state": "closed", "merged": True}})
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     for name in ("get_issue", "get_issue_details", "get_pull_request", "get_pr_details", "get_connected_prs"):
         getattr(github, name).side_effect = getattr(state, name)
     config = AutomationConfig()
@@ -583,6 +595,7 @@ def _joined_draft_review_repair(tmp_path, *, other_binding, retained=False, chan
 
     pr = {"number": 5940, "title": "Grid", "body": "Related to #5460", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "base": {"ref": "main", "sha": "base"}, "labels": [], "user": {"login": "maintainer"}}
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     github.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
     github.get_pr_comments_strict.return_value = []
     github.get_issue.return_value = {"number": 5459, "state": "open"}
@@ -635,6 +648,7 @@ def test_strict_draft_preflight_does_not_hold_slot_store_lock(tmp_path):
 
     slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     pr = {"number": 5940, "title": "Grid", "body": "", "draft": True, "state": "open", "head": {"ref": "grid-cleanup", "sha": "a" * 40}, "labels": []}
     entered = threading.Event()
     continue_read = threading.Event()
@@ -696,6 +710,7 @@ def test_bound_draft_conflict_repair_rechecks_authority_before_send(tmp_path, ch
 
     pr = {"number": 5940, "body": "Related to #5460", "draft": True, "state": "open", "head": {"ref": "issue-5459-grid", "sha": "a" * 40}, "base": {"ref": "main", "sha": "base"}}
     github = MagicMock()
+    install_mock_pr_history(github, "a" * 40)
     github.get_pull_request_metadata_strict.return_value = pr
     evidence = pr_processor.DraftPRAdmissionEvidence()
     recorder = pr_processor._record_cloud_conflict_deliveries

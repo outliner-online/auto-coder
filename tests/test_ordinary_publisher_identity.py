@@ -11,6 +11,7 @@ from auto_coder.automation_config import PRProcessingOutcome
 from auto_coder.deferred_pr_validation import DeferredPRValidationStore
 from auto_coder.effective_decision_application import PUBLICATION_PENDING, DecisionRetentionError, EffectiveDecisionStore, build_retained_record, derive_application, retain_ordinary_correction
 from auto_coder.github_app_reviewer import ReviewerAppIdentity, ReviewPublicationResult
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_accepted_finding_bridge import REPO, Env, env  # noqa: F401
 from tests.test_effective_decision_pr_flow import SimulatedCrash, _historical_root_with_current_violation, _reconstruct_flow_stores, flow_env  # noqa: F401
 from tests.test_ordinary_correction_retention import ordinary_violation
@@ -89,6 +90,8 @@ def test_fresh_or_same_publisher_is_persisted_before_send(env: Env, monkeypatch,
     store, raw = retained_ordinary(env, app_id=app_id if already_bound else 0)
     identity = ReviewerAppIdentity(login="reviewer[bot]", app_id=app_id)
     authority = MagicMock() if with_authority else None
+    github = MagicMock()
+    install_pr_history(github, env.head)
     monkeypatch.setattr(pr_processor, "resolve_reviewer_app_identity", lambda _repo: identity)
 
     def send(*args, **kwargs):
@@ -96,13 +99,14 @@ def test_fresh_or_same_publisher_is_persisted_before_send(env: Env, monkeypatch,
         assert current.publication_publisher_app_id == identity.app_id
         assert current.publication == PUBLICATION_PENDING
         assert kwargs["expected_publisher"] == identity
+        assert kwargs["new_effect_authorizer"]() == ""
         if authority is not None:
             assert kwargs["approval_authority"] is authority
         return ReviewPublicationResult(True, "REQUEST_CHANGES")
 
     publish = MagicMock(side_effect=send)
     monkeypatch.setattr(pr_processor, "publish_adversarial_review", publish)
-    assert pr_processor._publish_effective_review(REPO, 8101, env.head, raw, authority).success
+    assert pr_processor._publish_effective_review(REPO, 8101, env.head, raw, authority, github_client=github).success
     publish.assert_called_once()
     assert store.load(8101).publication == PUBLICATION_PENDING
 

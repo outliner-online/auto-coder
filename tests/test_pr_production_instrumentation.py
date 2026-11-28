@@ -35,6 +35,7 @@ from auto_coder.ci_observation import (
 from auto_coder.execution_trace import EventKind, Outcome, TraceCollector, get_trace_collector
 from auto_coder.github_pending_work import PendingObligation, PendingReason, WorkIdentity
 from auto_coder.merge_operation_state import EffectName, MergeOperation, MergeOperationIdentity, OperationStatus
+from tests.pr_automation_fakes import install_pr_history
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +60,7 @@ class TestPrAdmissionGateVisible:
         engine = AutomationEngine(MagicMock(), config)
         candidate = Candidate(type="pr", data={"number": 5001, "title": "T", "body": "B", "labels": [], "head": {"sha": "a" * 40}}, priority=0)
 
+        install_pr_history(engine.github, candidate.data["head"]["sha"])
         result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
         assert result.target_outcome is ExplicitTargetOutcome.SKIPPED
@@ -95,6 +97,7 @@ class TestPrAdmissionGateVisible:
             priority=0,
         )
 
+        install_pr_history(engine.github, candidate.data["head"]["sha"])
         result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
         assert result.target_outcome is ExplicitTargetOutcome.SKIPPED
@@ -155,6 +158,7 @@ class TestMergeOperationResumeSupersededHead:
         github = MagicMock()
         github.get_pull_request_metadata_strict.return_value = {"raw": True}
         github.get_pr_details.return_value = {"number": 5201, "head": {"sha": "newer-head"}}
+        install_pr_history(github, "newer-head")
 
         config = AutomationConfig()
         engine = AutomationEngine(github, config)
@@ -286,6 +290,7 @@ class TestRecorderFailureIsNonInterfering:
         engine = AutomationEngine(MagicMock(), config)
         candidate = Candidate(type="pr", data={"number": 5401, "title": "T", "body": "B", "labels": [], "head": {"sha": "a" * 40}}, priority=0)
 
+        install_pr_history(engine.github, candidate.data["head"]["sha"])
         result = engine._process_single_candidate_unified("owner/repo", candidate, config)
 
         assert result.target_outcome is ExplicitTargetOutcome.SKIPPED

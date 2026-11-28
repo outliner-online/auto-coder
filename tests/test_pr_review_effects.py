@@ -2,6 +2,7 @@ import json
 import threading
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,7 @@ from auto_coder.pr_review_effects import (
 from auto_coder.review_thread_validation import substantive_discussion_digest
 from auto_coder.two_tier_pr_gate import TwoTierPrGate
 from auto_coder.util.gh_cache import ReviewThread, ReviewThreadComment
+from tests.pr_automation_fakes import install_pr_history
 
 
 def _payload() -> AcceptedReviewPayload:
@@ -372,6 +374,8 @@ def test_production_consumer_publishes_exact_accepted_record_and_persists_receip
             AcceptedReviewPayload.strong("owner/repo", 42, accepted, ())
     inputs = pr_processor.TwoTierGateInputs(TwoTierPrGate("owner/repo", cycle), contract, policy, "head-a", "base-a")
     sent_bodies = []
+    github = SimpleNamespace()
+    install_pr_history(github, "head-a")
 
     class FakeReviewer:
         def __init__(self, config):
@@ -393,7 +397,7 @@ def test_production_consumer_publishes_exact_accepted_record_and_persists_receip
     monkeypatch.setattr(pr_processor, "load_reviewer_app_config", lambda repo_name: object())
     monkeypatch.setattr(pr_processor, "GitHubAppReviewer", FakeReviewer)
 
-    published, reason = pr_processor._consume_pending_two_tier_publication("owner/repo", 42, inputs)
+    published, reason = pr_processor._consume_pending_two_tier_publication("owner/repo", 42, inputs, github_client=github)
 
     assert published is True
     assert reason == "confirmed authenticated STRONG_AUDIT publication receipt 987"
@@ -427,6 +431,8 @@ def test_production_consumer_recovers_with_a_new_executor(tmp_path, monkeypatch,
     cycle.record_strong_result(42, claim.claim_id, "FINDINGS", "reviewer/model", [replace(payload.findings[0], origin_round_id=claim.claim_id)])
     inputs = pr_processor.TwoTierGateInputs(TwoTierPrGate("owner/repo", cycle), contract, policy, "head-a", "base-a")
     calls = []
+    github = SimpleNamespace()
+    install_pr_history(github, "head-a")
 
     class Reviewer:
         def __init__(self, config):
@@ -445,8 +451,8 @@ def test_production_consumer_recovers_with_a_new_executor(tmp_path, monkeypatch,
 
     monkeypatch.setattr(pr_processor, "load_reviewer_app_config", lambda repo_name: object())
     monkeypatch.setattr(pr_processor, "GitHubAppReviewer", Reviewer)
-    assert pr_processor._consume_pending_two_tier_publication("owner/repo", 42, inputs)[0] is False
-    published, reason = pr_processor._consume_pending_two_tier_publication("owner/repo", 42, inputs)
+    assert pr_processor._consume_pending_two_tier_publication("owner/repo", 42, inputs, github_client=github)[0] is False
+    published, reason = pr_processor._consume_pending_two_tier_publication("owner/repo", 42, inputs, github_client=github)
     assert published is (remote_state != "unavailable")
     assert calls == (["send", "reconcile", "send"] if remote_state == "absent" else ["send", "reconcile"])
     assert cycle.snapshot(42).accepted_strong_round.publication_status == ("PENDING" if remote_state == "unavailable" else PUBLICATION_ACKNOWLEDGED)
@@ -538,6 +544,7 @@ def test_accepted_closure_resolves_only_its_authenticated_finding_and_resumes(tm
             self.resolved = False
 
     client = Client()
+    install_pr_history(client, lambda *_: client.head)
     original_closure_payload = AcceptedReviewPayload.closure
 
     def closure_payload(*args, **kwargs):

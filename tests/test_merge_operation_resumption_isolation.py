@@ -11,6 +11,7 @@ from src.auto_coder.automation_engine import _MergeOperationResumeHandler
 from src.auto_coder.execution_trace import EventKind, Outcome, TraceCollector
 from src.auto_coder.merge_operation_scheduler import RESUME_RETRY_INTERVAL_SECONDS, MergeOperationScheduler, get_merge_operation_scheduler
 from src.auto_coder.merge_operation_state import BlockReason, ConfirmationSource, EffectName, EffectReceipt, EffectSenderBinding, EffectState, MergeOperationIdentity, MergeOperationPersistenceError, MergeOperationStore, OperationStatus, ReservationRefusal
+from src.auto_coder.pr_automation_guard import PRCommit, PRCommitHistory
 from src.auto_coder.util.github_request_outcome import GitHubApiOutcome, GitHubRequestError
 
 
@@ -47,6 +48,7 @@ def create_with_prior_effects(store):
 
 
 def bind(store, repository, clock, engine):
+    engine.github.get_pr_automation_history_strict.return_value = PRCommitHistory("head", 1, (PRCommit("head", "Existing merge candidate"),))
     scheduler = MergeOperationScheduler(store, clock=clock)
     scheduler.register_resume_handler(_MergeOperationResumeHandler(engine, repository), repository=repository)
     return scheduler

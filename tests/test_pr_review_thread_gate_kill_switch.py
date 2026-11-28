@@ -40,6 +40,7 @@ from auto_coder.pr_processor import (
 from auto_coder.util.gh_cache import GitHubClient, ReviewThread, ReviewThreadComment
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 REVIEWER_LOGIN = "auto-coder-reviewer[bot]"
 
@@ -213,6 +214,7 @@ class TestAS001UnresolvedHumanThreadBypassed:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         human_thread = _make_human_thread()
         client.get_pr_review_threads_strict.return_value = [human_thread]
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -285,6 +287,7 @@ class TestAS002DisabledModeIsNonDestructive:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         human_thread = _make_human_thread(thread_id="thread-human-1")
         client.get_pr_review_threads_strict.return_value = [human_thread]
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -340,6 +343,7 @@ class TestAS003ThreadLookupFailureDoesNotStopPR:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         # GraphQL lookup fails with network error
         client.get_pr_review_threads_strict.side_effect = Exception("GraphQL Network Error: 502 Bad Gateway")
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -390,6 +394,7 @@ class TestAS003ThreadLookupFailureDoesNotStopPR:
                 return [_adversarial_review(head_sha, "PASS")]
 
         client = BasicClient()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         config = AutomationConfig(pr_review_thread_gate=False)
         result = process_pull_request(client, config, "owner/repo", pr_data)
 
@@ -426,6 +431,7 @@ class TestAS004NoGateOnlyLookup:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
 
         config = AutomationConfig(
@@ -462,6 +468,7 @@ class TestAS004NoGateOnlyLookup:
         pr_data = _pr_data(100, head_sha, linked_issue=0)
 
         client = MagicMock(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
 
         config = AutomationConfig(
@@ -529,6 +536,7 @@ class TestAS005AdversarialValidationRemainsIndependent:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_pr_review_threads_strict.return_value = []
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
         client.get_issue.return_value = {"number": 42, "title": "Issue", "body": "Spec"}
@@ -574,6 +582,7 @@ class TestAS006GitHubRequiredReviewCannotBeBypassed:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         human_thread = _make_human_thread()
         client.get_pr_review_threads_strict.return_value = [human_thread]
         client.get_pull_request.return_value = {"head": {"sha": head_sha}}
@@ -622,6 +631,7 @@ class TestAS007AS008ReenableSemantics:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MockGitHubClient(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
         client.get_pr_comments_strict.return_value = []
         human_thread = _make_human_thread()
@@ -662,6 +672,7 @@ class TestAS007AS008ReenableSemantics:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MockGitHubClient(spec=GitHubClient)
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("auto-coder-bot", account_id=20)
         client.get_pr_comments_strict.return_value = []
         # Genuinely resolved on GitHub

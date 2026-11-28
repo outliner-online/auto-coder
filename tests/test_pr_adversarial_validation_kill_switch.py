@@ -40,6 +40,7 @@ from auto_coder.pr_processor import (
 from auto_coder.util.gh_cache import GitHubClient, ReviewThread, ReviewThreadComment
 from auto_coder.util.github_action import GitHubActionsStatusResult
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 REVIEWER_LOGIN = "auto-coder-reviewer[bot]"
 
@@ -260,6 +261,7 @@ class TestAS001DisabledOnGreenPRSkipsValidatorAndMerges:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
         client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
@@ -345,6 +347,7 @@ class TestAS002ExistingVerdictDoesNotBlockOrDeprioritize:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
         client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
@@ -390,6 +393,7 @@ class TestAS003ValidatorThreadsNonBlockingAndUntouched:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = GitHubClient(token="fake_token")
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity = MagicMock(return_value=ControllerIdentity("controller", account_id=501))
         client.get_authenticated_user_login = MagicMock(return_value="controller")
         validator_thread = _make_adversarial_thread(thread_id="thread-adv-1")
@@ -460,6 +464,7 @@ class TestAS004HumanReviewThreadRemainsBlocking:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = GitHubClient(token="fake_token")
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity = MagicMock(return_value=ControllerIdentity("controller", account_id=501))
         client.get_authenticated_user_login = MagicMock(return_value="controller")
         human_thread = _make_human_thread(thread_id="thread-human-1")
@@ -507,6 +512,7 @@ class TestAS005NonAdversarialMergeGatesStillApply:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
         client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
@@ -534,6 +540,7 @@ class TestAS005NonAdversarialMergeGatesStillApply:
         pr_data = _pr_data(100, head_sha, mergeable=False, linked_issue=42)
 
         client = MagicMock()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
         client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []
@@ -561,6 +568,7 @@ class TestAS005NonAdversarialMergeGatesStillApply:
         pr_data = _pr_data(100, head_sha, linked_issue=42)
 
         client = MagicMock()
+        install_pr_history(client, lambda _repo, _pr: pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=501)
         client.get_authenticated_user_login.return_value = "controller"
         client.get_pr_review_threads_strict.return_value = []

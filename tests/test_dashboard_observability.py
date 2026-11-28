@@ -28,6 +28,7 @@ from auto_coder.util.github_action import DetailedChecksResult, GitHubActionsSta
 from auto_coder.util.github_request_outcome import GitHubRequestContext, github_http_client
 from auto_coder.webhook_server import process_github_payload
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 from tests.test_pr_lifecycle_contract import _simulated_pr_review_worktree
 
 
@@ -555,7 +556,10 @@ def _run_admission_to_view(mock_ui, item_type: str, item_number: int) -> None:
         priority=0,
     )
 
-    result = AutomationEngine(MagicMock(), config)._process_single_candidate_unified("owner/repo", candidate, config)
+    github = MagicMock()
+    if item_type == "pr":
+        install_pr_history(github, candidate.data["head"]["sha"])
+    result = AutomationEngine(github, config)._process_single_candidate_unified("owner/repo", candidate, config)
 
     assert result.target_outcome is ExplicitTargetOutcome.SKIPPED
     snapshot = get_trace_collector().get_snapshot(repository="owner/repo", item_type=item_type, item_number=item_number)
@@ -647,6 +651,7 @@ class TestJoinedProductionToView:
         from auto_coder.merge_operation_state import MergeOperation, MergeOperationIdentity, OperationStatus
 
         github = MagicMock()
+        install_pr_history(github, "newer-head")
         github.get_pull_request_metadata_strict.return_value = {"raw": True}
         github.get_pr_details.return_value = {"number": 2201, "head": {"sha": "newer-head"}}
         engine = AutomationEngine(github, AutomationConfig())
@@ -835,6 +840,7 @@ class TestNewOriginCoverage:
         config.ENABLE_ADVERSARIAL_VALIDATION = True
         pr_data = {"number": 2701, "body": "Fixes #99", "labels": [], "head": {"ref": "feature-branch", "sha": "abc123456789"}}
         client = MagicMock()
+        install_pr_history(client, pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
         client.get_pr_review_threads_strict.return_value = []
         scheduler = AdversarialValidationScheduler(concurrency=2)
@@ -1014,6 +1020,7 @@ class TestOutcomeMatrixCoverage:
         config = AutomationConfig()
         pr_data = {"number": 3001, "body": "Fixes #99", "labels": [], "head": {"ref": "feature", "sha": "a" * 40}}
         client = MagicMock()
+        install_pr_history(client, pr_data["head"]["sha"])
         client.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)
         client.get_pr_review_threads_strict.return_value = []
 
@@ -1048,6 +1055,7 @@ class TestOutcomeMatrixCoverage:
             "user": {"login": "google-labs-jules[bot]"},
         }
         github = MagicMock()
+        install_pr_history(github, pr_data["head"]["sha"])
 
         with (
             patch("auto_coder.pr_processor._reject_unsafe_codex_cloud_pr") as unsafe,
@@ -1427,6 +1435,7 @@ def test_claude_pr_slot_admission_reaches_detail_view(mock_ui, tmp_path, known_s
     github.get_issue_details.side_effect = lambda issue: issue
     github.get_pull_request.return_value = {"number": 2027, "state": "open"}
     github.get_pr_details.side_effect = lambda pr: pr
+    install_pr_history(github, "a" * 40)
     engine = AutomationEngine(github, config)
     slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
     engine.implementation_slots = slots
@@ -1548,6 +1557,7 @@ def test_pr_no_commit_checkpoint_reaches_mounted_detail(mock_ui, tmp_path, monke
         "user": {"login": "maintainer"},
     }
     github = MagicMock()
+    install_pr_history(github, data["head"]["sha"])
     github.get_pr_comments.return_value = []
     github.get_pr_comments_strict.return_value = []
     github.get_authenticated_controller_identity.return_value = ControllerIdentity("controller", account_id=20)

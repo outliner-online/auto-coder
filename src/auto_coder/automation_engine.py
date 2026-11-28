@@ -587,6 +587,16 @@ class _MergeOperationResumeHandler:
             get_merge_operation_store().supersede(operation.identity)
             _record_pr_stage_result(pr_number, "pr.merge-operation-resume-refresh", f"pr#{pr_number} merge-operation resume refresh", Outcome.SUPERSEDED, {"reason": "PR is terminal", "state": pr_data.get("state"), "merged": pr_data.get("merged") is True})
             return Outcome.SUPERSEDED
+        from .pr_processor import _pr_automation_decision, _reconcile_guarded_merge
+
+        guard = _pr_automation_decision(engine.github, operation.identity.repository, pr_number)
+        if not guard.allowed:
+            if guard.stopped:
+                try:
+                    _reconcile_guarded_merge(engine.github, operation.identity.repository, pr_number)
+                except Exception as exc:
+                    logger.warning("Stopped PR merge receipt remains unresolved: {}", exc)
+            return Outcome.BLOCKED if guard.stopped else Outcome.DEFERRED
         current_head = str((pr_data.get("head") or {}).get("sha") or "")
         if current_head and current_head != operation.expected_head_sha:
             # A newer head invalidates this operation's own execution
@@ -2928,7 +2938,7 @@ class AutomationEngine:
                 rediscover_pr_repair_finalizations(repo_name, local_job_store, get_pending_work_store(repo_name))
                 self._wake_pending_work()
                 return
-            phase = resume_pr_correction_publication(job, local_job_store)
+            phase = resume_pr_correction_publication(job, local_job_store, github_client=self.github)
             wake = asyncio.run_coroutine_threadsafe(self.invalidate_entity(job.repository, "pr", job.target_number), self._loop)
             wake.result()
             claim = LocalJobClaim(job, True)
@@ -5106,6 +5116,10 @@ class AutomationEngine:
                     elif result.error:
                         logger.error(f"Worker {worker_id} failed to process {candidate.type} #{item_number}: {result.error}")
                         get_trace_logger().log("Worker", f"Worker {worker_id} failed to process {candidate.type} #{item_number}", item_type=candidate.type, item_number=item_number, details={"worker_id": worker_id, "error": result.error})
+                    elif candidate.type == "pr" and result.outcome is PRProcessingOutcome.BLOCKED:
+                        diagnostic = result.target_reason or "; ".join(result.actions)
+                        logger.warning("Worker {} blocked pr #{}: {}", worker_id, item_number, diagnostic)
+                        get_trace_logger().log("Worker", f"Worker {worker_id} blocked pr #{item_number}", item_type="pr", item_number=item_number, details={"worker_id": worker_id, "outcome": "blocked", "reason": diagnostic, "actions": result.actions, "requires_external_intervention": True})
                     elif candidate.type == "pr" and result.outcome is PRProcessingOutcome.DEFERRED:
                         diagnostic = "; ".join(result.actions)
                         logger.info(f"Worker {worker_id} deferred pr #{item_number}: {diagnostic}")
@@ -6094,10 +6108,17 @@ class AutomationEngine:
             pr_data_list.sort(key=lambda x: x.get("created_at", ""))
 
             safe_pr_data_list = []
+            guarded_open_pr_numbers: set[int] = set()
             for pr_data in pr_data_list:
                 pr_number = pr_data.get("number")
                 if not isinstance(pr_number, int):
                     logger.warning(f"Skipping PR missing/invalid number in data: {pr_data}")
+                    continue
+
+                from .pr_processor import _pr_automation_decision
+
+                if not _pr_automation_decision(self.github, repo_name, pr_number).allowed:
+                    guarded_open_pr_numbers.add(pr_number)
                     continue
 
                 # Branch identity is a safety invariant, not a normal PR
@@ -6424,7 +6445,7 @@ class AutomationEngine:
 
             # Numbers of the PRs that are currently open, used to tell a live PR apart
             # from a closed one still listed in an issue timeline
-            open_pr_numbers = {pr.get("number") for pr in pr_data_list if isinstance(pr.get("number"), int)}
+            open_pr_numbers = {pr.get("number") for pr in pr_data_list if isinstance(pr.get("number"), int)} | guarded_open_pr_numbers
 
             for issue_data in all_issues:
                 number = issue_data.get("number")
@@ -6878,6 +6899,17 @@ class AutomationEngine:
             result.error = f"Item number is missing for {candidate.type} #{candidate.data.get('number', 'N/A')}"
             return result
         if candidate.type == "pr":
+            from .pr_processor import _pr_automation_decision
+
+            guard = _pr_automation_decision(self.github, repo_name, item_number)
+            if not guard.allowed:
+                result.target_outcome = ExplicitTargetOutcome.BLOCKED if guard.stopped else ExplicitTargetOutcome.DEFERRED
+                result.outcome = PRProcessingOutcome.BLOCKED if guard.stopped else PRProcessingOutcome.DEFERRED
+                result.target_reason = guard.reason
+                result.actions = [guard.reason]
+                if not guard.stopped:
+                    result.retry_not_before = time.time() + 60
+                return result
             try:
                 self.refresh_review_adjudications(repo_name, candidate.data)
             except Exception as exc:
@@ -8428,7 +8460,17 @@ class AutomationEngine:
                 previous_binding = CloudManager(repo_name).read_bindings_strict().get(str(item_number))
 
             if item_type == "pr":
-                from .pr_processor import _reject_unsafe_codex_cloud_pr
+                from .pr_processor import _pr_automation_decision, _reject_unsafe_codex_cloud_pr
+
+                guard = _pr_automation_decision(self.github, repo_name, item_number)
+                if not guard.allowed:
+                    result.target_outcome = ExplicitTargetOutcome.BLOCKED if guard.stopped else ExplicitTargetOutcome.DEFERRED
+                    result.outcome = PRProcessingOutcome.BLOCKED if guard.stopped else PRProcessingOutcome.DEFERRED
+                    result.target_reason = guard.reason
+                    result.actions = [guard.reason]
+                    if not guard.stopped:
+                        result.retry_not_before = time.time() + 60
+                    return result
 
                 unsafe_branch_result = _reject_unsafe_codex_cloud_pr(self.github, repo_name, candidate.data, config)
                 if unsafe_branch_result.closed:
@@ -8640,6 +8682,7 @@ class AutomationEngine:
                     result.final_gate = pr_result.final_gate
                     result.success = pr_result.outcome != PRProcessingOutcome.FAILED
                     result.target_outcome = {
+                        PRProcessingOutcome.BLOCKED: ExplicitTargetOutcome.BLOCKED,
                         PRProcessingOutcome.SUCCESS: ExplicitTargetOutcome.SUCCESS,
                         PRProcessingOutcome.DEFERRED: ExplicitTargetOutcome.DEFERRED,
                         PRProcessingOutcome.FAILED: ExplicitTargetOutcome.FAILED,

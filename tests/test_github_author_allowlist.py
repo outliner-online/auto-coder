@@ -13,6 +13,7 @@ from auto_coder.automation_engine import AutomationEngine
 from auto_coder.llm_backend_config import get_issue_allowlist_from_config, get_pr_allowlist_from_config
 from auto_coder.util.gh_cache import GitHubClient
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_mock_pr_history
 
 
 class TestGetAuthorId:
@@ -179,6 +180,7 @@ class TestAutomationEngineAllowlistFiltering:
     @pytest.fixture
     def mock_github(self):
         gh = MagicMock()
+        install_mock_pr_history(gh, "a" * 40)
         gh.clear_sub_issue_cache = MagicMock()
         return gh
 

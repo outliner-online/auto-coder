@@ -11,6 +11,7 @@ from src.auto_coder.pr_processor import _close_stale_jules_pr, _handle_pr_merge,
 from src.auto_coder.pr_repair_dispatch import PRRepairResult, RepairDisposition
 from src.auto_coder.stale_jules_recovery import recovery_request_id
 from tests.ci_observation_fakes import authoritative_ci_status
+from tests.pr_automation_fakes import install_pr_history
 
 JULES_PR_BODY = "Fixes the reported bug.\n\nSession ID: 901463134778726610\nhttps://jules.google.com/session/901463134778726610\n\nclose #4636"
 
@@ -235,6 +236,7 @@ class TestHandlePrMergeJulesPR:
         config = AutomationConfig()
         config.JULES_PR_CI_TIMEOUT_HOURS = 12
         pr_data = _jules_pr_data(hours_old=13)
+        install_pr_history(github_client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         mock_check_in_progress.return_value = True
         mock_mergeable.return_value = {"mergeable": True}
@@ -281,6 +283,7 @@ class TestHandlePrMergeJulesPR:
         config = AutomationConfig()
         config.JULES_PR_CI_TIMEOUT_HOURS = 12
         pr_data = _jules_pr_data(hours_old=1)
+        install_pr_history(github_client, lambda _repo, _pr: pr_data["head"]["sha"])
 
         mock_check_in_progress.return_value = True
         mock_mergeable.return_value = {"mergeable": True}
@@ -320,6 +323,7 @@ class TestStaleJulesPRWithAutoCoderLabel:
         config = AutomationConfig()
         config.JULES_PR_CI_TIMEOUT_HOURS = 12
         pr_data = _jules_pr_data(hours_old=30)
+        install_pr_history(github_client, lambda _repo, _pr: pr_data["head"]["sha"])
         pr_data["labels"] = [{"name": "@auto-coder"}]
         mock_check_status.return_value = MagicMock(spec=GitHubActionsStatusResult, success=False, in_progress=False)
         mock_increment.return_value = 4
@@ -341,6 +345,7 @@ class TestStaleJulesPRWithAutoCoderLabel:
         config = AutomationConfig()
         config.JULES_PR_CI_TIMEOUT_HOURS = 12
         pr_data = _jules_pr_data(hours_old=30)
+        install_pr_history(github_client, lambda _repo, _pr: pr_data["head"]["sha"])
         pr_data["labels"] = [{"name": "@auto-coder"}]
         pr_data["draft"] = False
         github_client.get_open_prs_json.return_value = [pr_data]
@@ -368,6 +373,7 @@ class TestStaleJulesPRWithAutoCoderLabel:
         config = AutomationConfig()
         config.JULES_PR_CI_TIMEOUT_HOURS = 12
         pr_data = _jules_pr_data(hours_old=30)
+        install_pr_history(github_client, lambda _repo, _pr: pr_data["head"]["sha"])
         pr_data["labels"] = [{"name": "@auto-coder"}]
         mock_check_status.return_value = MagicMock(spec=GitHubActionsStatusResult, success=False, in_progress=False)
         mock_increment.return_value = 4
@@ -437,6 +443,7 @@ class TestUnlockAndRetryLinkedIssue:
             config = AutomationConfig()
             config.JULES_PR_CI_TIMEOUT_HOURS = 12
             pr_data = _jules_pr_data(hours_old=30)
+            install_pr_history(github_client, lambda _repo, _pr: pr_data["head"]["sha"])
             pr_data["labels"] = [{"name": "@auto-coder"}]
             issue_data = {
                 "number": 4636,
@@ -507,6 +514,7 @@ class TestUnlockAndRetryLinkedIssue:
         engine.issue_stage_routing = IssueStageRoutingStore(path)
         engine.implementation_slots = ImplementationSlotRepository("owner/repo", 1, tmp_path / "slots.json")
         candidate = Candidate(type="pr", data=_jules_pr_data(hours_old=30), priority=1)
+        install_pr_history(github, candidate.data["head"]["sha"])
 
         with (
             patch("src.auto_coder.pr_processor._check_github_actions_status", return_value=MagicMock(spec=GitHubActionsStatusResult, success=False, in_progress=False)),
@@ -532,6 +540,7 @@ class TestUnlockAndRetryLinkedIssue:
         config = AutomationConfig()
         config.JULES_PR_CI_TIMEOUT_HOURS = 12
         pr_data = _jules_pr_data(hours_old=30)
+        install_pr_history(github_client, lambda _repo, _pr: pr_data["head"]["sha"])
         pr_data["labels"] = [{"name": "@auto-coder"}]
         pr_data["draft"] = False
         issue_data = {"number": 4636, "title": "Reduce warm /demo load time", "labels": []}
@@ -752,6 +761,7 @@ class TestProcessPullRequestResumesOnRecoveredCI:
         config = AutomationConfig()
         pr_data = _jules_pr_data(hours_old=1)
 
+        install_pr_history(github_client, pr_data["head"]["sha"])
         result = process(github_client, config, "owner/repo", pr_data)
 
         assert not any("waiting for Jules" in action for action in result.actions_taken)
@@ -774,6 +784,7 @@ class TestProcessPullRequestResumesOnRecoveredCI:
         config = AutomationConfig()
         pr_data = _jules_pr_data(hours_old=1)
 
+        install_pr_history(github_client, pr_data["head"]["sha"])
         result = process(github_client, config, "owner/repo", pr_data)
 
         assert any("waiting for Jules" in action for action in result.actions_taken)
@@ -802,6 +813,7 @@ class TestGetCandidatesResumesOnRecoveredCI:
         github_client.get_pr_comments_strict.return_value = []
         config = AutomationConfig()
         pr_data = _jules_pr_data(hours_old=1)
+        install_pr_history(github_client, lambda _repo, _pr: pr_data["head"]["sha"])
         pr_data["draft"] = False
         pr_data["mergeable"] = True
         github_client.get_open_prs_json.return_value = [pr_data]

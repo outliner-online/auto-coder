@@ -4,6 +4,7 @@ import pytest
 
 from auto_coder.automation_config import AutomationConfig, StaleJulesPRResult
 from auto_coder.automation_engine import AutomationEngine
+from auto_coder.pr_automation_guard import PRCommit, PRCommitHistory
 from tests.ci_observation_fakes import authoritative_ci_status
 
 
@@ -23,6 +24,7 @@ class TestAutomationEngineCandidates:
 
         # Mock get_open_prs_json to return the PR data
         mock_github_client.get_open_prs_json.return_value = [pr_data]
+        mock_github_client.get_pr_automation_history_strict.return_value = PRCommitHistory(pr_data["head"]["sha"], 1, (PRCommit(pr_data["head"]["sha"], "Existing candidate"),))
 
         # Mock _is_jules_pr to return True
         mock_is_jules_pr.return_value = True
@@ -74,6 +76,7 @@ class TestAutomationEngineCandidates:
 
         # Mock get_open_prs_json to return the PR data
         mock_github_client.get_open_prs_json.return_value = [pr_data]
+        mock_github_client.get_pr_automation_history_strict.return_value = PRCommitHistory(pr_data["head"]["sha"], 1, (PRCommit(pr_data["head"]["sha"], "Existing candidate"),))
 
         # Mock _is_jules_pr to return True
         mock_is_jules_pr.return_value = True
@@ -116,6 +119,7 @@ class TestAutomationEngineCandidates:
 
         # Mock get_open_prs_json to return the PR data
         mock_github_client.get_open_prs_json.return_value = [pr_data]
+        mock_github_client.get_pr_automation_history_strict.return_value = PRCommitHistory(pr_data["head"]["sha"], 1, (PRCommit(pr_data["head"]["sha"], "Existing candidate"),))
 
         # Mock _is_jules_pr to return False
         mock_is_jules_pr.return_value = False

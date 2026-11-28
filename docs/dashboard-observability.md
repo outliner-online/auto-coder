@@ -4402,3 +4402,15 @@ restart observe the durable marker and do not resend. Later exact-candidate
 readback emits corrective handoff, still requiring independent CI and review.
 `test_unresolved_push_restart_waits_without_resend_until_candidate_readback`
 exercises this production PR-processing and trace path with one send throughout.
+
+## PR automation intervention stop
+
+The production history guard emits `pr.automation-stop` with `blocked` when a
+Revert/commit budget stop is latched, and `deferred` when authoritative history
+or durable state is unavailable. Facts include `reason`, `head_sha`,
+`observed_commits`, `commit_limit` and `revert_sha`. The durable worker logs
+`outcome=blocked` and `requires_external_intervention=true`; it acknowledges that
+evaluation without a repair or failure-backoff timer. The existing generic detail
+renderer displays these facts. `tests/test_pr_automation_guard.py::test_worker_acknowledges_stop_without_retry_and_dashboard_shows_intervention`
+drives the actual worker/history guard through the log projection. Related
+behavior is documented in [PR automation intervention stops](client-features/pr-automation-intervention-stop.md).

@@ -27,7 +27,7 @@ from .review_feedback_marker import is_adjudication_feedback
 ExecutorFactory = Callable[[str, LocalReviewRepairRequest], Callable[[LocalReviewRepairRequest, str], str]]
 
 
-def resume_pr_correction_publication(job: LocalJobRecord, job_store: LocalJobStore) -> str:
+def resume_pr_correction_publication(job: LocalJobRecord, job_store: LocalJobStore, *, github_client: object | None = None) -> str:
     """Resume a retained commit before downstream validation is awakened."""
     artifact = job_store.get_result_artifact(job.result_reference)
     if artifact is None:
@@ -37,6 +37,13 @@ def resume_pr_correction_publication(job: LocalJobRecord, job_store: LocalJobSto
     if phase != "publication_pending":
         return phase
     request = PRCorrectionJobAdapter._request(job)
+    if github_client is None:
+        from .util.gh_cache import GitHubClient
+
+        github_client = GitHubClient.get_instance()
+    from .pr_automation_guard import assess_pr_automation
+
+    publication_authorizer = lambda: assess_pr_automation(github_client, request.repository, request.pr_number).allowed
     ledger = RepairAllowanceLedger()
     snapshot = ledger.get_snapshot("https://api.github.com", request.repository, request.pr_number)
     generation = snapshot.get_outstanding_generation()
@@ -47,6 +54,7 @@ def resume_pr_correction_publication(job: LocalJobRecord, job_store: LocalJobSto
         request,
         store=LocalReviewRepairStore(local_review_repair_db_path(request.repository)),
         allowance_authority=authority,
+        publication_authorizer=publication_authorizer,
     )
     if outcome.phase == "publication_pending":
         raise RuntimeError(outcome.reason)
@@ -160,6 +168,10 @@ class PRCorrectionJobAdapter:
         request = self._request(job)
         if job.kind is not LocalJobKind.PR_REVIEW_CORRECTION or request.attempt_id != job.upstream_attempt:
             return False
+        from .pr_automation_guard import assess_pr_automation
+
+        if not assess_pr_automation(self.github_client, request.repository, request.pr_number).allowed:
+            return False
         metadata = self.github_client.get_pull_request_routing_metadata_strict(request.repository, request.pr_number)  # type: ignore[attr-defined]
         if metadata.state != "open" or (metadata.head_sha, metadata.head_ref, metadata.head_repository) != (request.head_sha, request.head_ref, request.head_repository):
             return False
@@ -230,11 +242,17 @@ class PRCorrectionJobAdapter:
             continuation.final_output,
             store=LocalReviewRepairStore(local_review_repair_db_path(request.repository)),
             allowance_authority=authority,
+            publication_authorizer=lambda: self._publication_allowed(request),
         )
         if outcome.phase in {"indeterminate", "publication_pending"}:
             return None
         result = InvocationOutcome.CANNOT_FIX if outcome.phase == "terminal_failure" else InvocationOutcome.COMPLETED
         return LocalJobExecutionResult(result, json.dumps(asdict(outcome), sort_keys=True), outcome.reason)
+
+    def _publication_allowed(self, request: LocalReviewRepairRequest) -> bool:
+        from .pr_automation_guard import assess_pr_automation
+
+        return assess_pr_automation(self.github_client, request.repository, request.pr_number).allowed
 
     def invoke(self, job: LocalJobRecord) -> LocalJobExecutionResult:
         """Invoke directly while preserving the durable entry checkpoint."""
@@ -284,6 +302,7 @@ class PRCorrectionJobAdapter:
             local_job_id=job.job_id,
             provider_entry_authorizer=lambda: self._authority_is_current(job),
             provider_entry_checkpoint=checkpoint,
+            publication_authorizer=lambda: self._publication_allowed(request),
         )
         result = InvocationOutcome.COMPLETED
         if outcome.phase == "terminal_failure":
@@ -319,7 +338,7 @@ class PRCorrectionJobAdapter:
                 published=True,
             )
         else:
-            outcome = execute_local_review_repair(request, store=store, allowance_authority=authority)
+            outcome = execute_local_review_repair(request, store=store, allowance_authority=authority, publication_authorizer=lambda: self._publication_allowed(request))
         if outcome.phase == "publication_pending":
             return None
         result = InvocationOutcome.FAILED if outcome.phase == "indeterminate" else InvocationOutcome.COMPLETED
