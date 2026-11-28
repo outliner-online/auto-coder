@@ -96,23 +96,19 @@ def _clear_sensitive_env(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _identify_test_runtime_as_confirmed_fresh(monkeypatch, _clear_sensitive_env):
-    """Record explicit post-Jules provenance for the isolated test runtime."""
-    installation_id = "pytest-confirmed-fresh-installation"
-    monkeypatch.setenv("AUTO_CODER_INSTALLATION_ID", installation_id)
-    runtime_root = Path(os.environ["HOME"]) / ".auto-coder"
-    monkeypatch.setenv("AUTO_CODER_RUNTIME_ROOT", str(runtime_root))
-    receipt = runtime_root / "state" / "retired_jules_installation_provenance.json"
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(
-        json.dumps(
-            {
-                "schema": "retired-jules-installation-provenance-v1",
-                "state": "confirmed-fresh",
-                "installation_id": installation_id,
-            }
-        ),
-        encoding="utf-8",
+def _identify_test_runtime_as_confirmed_fresh(monkeypatch, request):
+    """Keep unrelated tests on an explicitly fresh installation boundary.
+
+    Tests for the retired lifecycle exercise the real deployment receipt. Other
+    tests often replace ``HOME`` after fixture setup, so patch the already
+    verified deployment predicate rather than coupling their unrelated runtime
+    roots to a synthetic state directory.
+    """
+    if request.node.path.name == "test_speculative_jules_lifecycle.py":
+        return
+    monkeypatch.setattr(
+        "auto_coder.speculative_jules_lifecycle._has_confirmed_fresh_installation_provenance",
+        lambda: True,
     )
 
 
