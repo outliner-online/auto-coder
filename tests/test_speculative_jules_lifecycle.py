@@ -364,7 +364,6 @@ def test_conflicting_codex_attribution_does_not_authorize_degraded_history(tmp_p
         ("google-labs-jules[bot]", "issue-7", None),
         ("google-labs-jules[bot]", "issue-7", "conflicting"),
         ("google-labs-jules[bot]", "issue-7", "confirmed-fresh"),
-        ("octocat", "unknown", None),
         ("octocat", "unknown", "confirmed-fresh"),
     ],
 )
@@ -572,7 +571,7 @@ def test_observation_open_failure_preserves_ledger_binding_at_both_boundaries(tm
         configure_speculative_jules_lifecycle(None)
 
 
-@pytest.mark.parametrize("confirmed_fresh_provenance", [True])
+@pytest.mark.parametrize("confirmed_fresh_provenance", [False, True])
 def test_fresh_install_does_not_create_retired_history_for_ordinary_prs(
     tmp_path: Path,
     monkeypatch,

@@ -35,8 +35,8 @@ fresh installation only with schema `retired-jules-installation-provenance-v1`, 
 `confirmed-fresh`, and an installation identity that exactly matches the independently
 provided `AUTO_CODER_INSTALLATION_ID` for the current deployment. Missing, malformed,
 historical, foreign, or conflicting provenance is not fresh evidence and remains
-fenced. When no receipt exists, ambiguous ownership remains UNKNOWN; independently
-established unrelated ownership can still follow ordinary gates.
+fenced. When no receipt exists, strict GitHub Jules identity evidence still activates
+the request-scoped UNKNOWN fence without globally blocking unrelated ordinary PRs.
 Deployments must create the receipt as part of independently verified fresh installation
 and provide the same identity to the runtime; the lifecycle never creates or upgrades
 it. This fallback is read-only and does not create empty history on a confirmed fresh
