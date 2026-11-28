@@ -1,14 +1,22 @@
 """Production-boundary coverage for renewable CI observation credentials."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from auto_coder.automation_config import AutomationConfig
 from auto_coder.ci_observation import CIConclusion, ObservationAvailability, WorkflowObservation
 from auto_coder.ci_repair_authority import evaluate_ci_repair_snapshot
-from auto_coder.github_controller_auth import ControllerCredential, ControllerIdentity
+from auto_coder.github_controller_auth import (
+    ControllerAppConfig,
+    ControllerCredential,
+    ControllerIdentity,
+    GitHubAppControllerAuth,
+)
 from auto_coder.util.gh_cache import GitHubClient
 from auto_coder.util.github_action import _check_github_actions_status
 
@@ -58,9 +66,16 @@ def _workflow(run_id: int, head_sha: str) -> dict[str, object]:
     }
 
 
-def _observe(repository: str, role: str, *, fail_renewal: bool = False):
+def _observe(
+    repository: str,
+    role: str,
+    *,
+    provider=None,
+    fail_renewal: bool = False,
+    after_first_page=None,
+):
     head_sha = f"{role}-exact-head"
-    provider = _ObservationProvider(role, fail_after_first_send=fail_renewal)
+    provider = provider or _ObservationProvider(role, fail_after_first_send=fail_renewal)
     client = GitHubClient(auth_provider=provider, repository=repository)
     sent: list[tuple[str, int, str]] = []
     first_page = [_workflow(run_id, head_sha) for run_id in range(1, 101)]
@@ -71,6 +86,8 @@ def _observe(repository: str, role: str, *, fail_renewal: bool = False):
         sent.append((request.url.path, page, kwargs["headers"]["Authorization"]))
         if request.url.path.endswith("/actions/runs"):
             payload = first_page if page == 1 else [_workflow(101, head_sha)]
+            if page == 1 and after_first_page is not None:
+                after_first_page()
             return httpx.Response(200, json={"workflow_runs": payload}, request=request)
         if request.url.path.endswith(f"/commits/{head_sha}/check-runs"):
             return httpx.Response(200, json={"check_runs": []}, request=request)
@@ -91,9 +108,78 @@ def _observe(repository: str, role: str, *, fail_renewal: bool = False):
     return result, provider, sent, head_sha
 
 
-def test_ci_observation_renews_wire_auth_per_page_and_separates_repositories():
-    first, first_provider, first_sends, first_head = _observe("owner/primary", "ci-reader")
-    second, second_provider, second_sends, second_head = _observe("owner/secondary", "audit-reader")
+def _app_provider(
+    tmp_path: Path,
+    repository: str,
+    role: str,
+    app_id: int,
+    clock: list[float],
+):
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_path = tmp_path / f"{role}.pem"
+    key_path.write_bytes(
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    minted: list[str] = []
+    installation_id = app_id + 1000
+
+    def auth_endpoint(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app":
+            payload = {"id": app_id, "slug": role}
+        elif request.url.path == f"/repos/{repository}/installation":
+            payload = {"id": installation_id}
+        elif request.url.path == f"/app/installations/{installation_id}/access_tokens":
+            token = f"{role}-installation-{len(minted) + 1}"
+            minted.append(token)
+            payload = {
+                "token": token,
+                "expires_at": datetime.fromtimestamp(clock[0] + 120, timezone.utc).isoformat(),
+                "permissions": {"actions": "read", "checks": "read"},
+                "repository_selection": "selected",
+                "repositories": [{"full_name": repository}],
+            }
+        else:
+            raise AssertionError(f"unexpected controller auth request: {request.url}")
+        return httpx.Response(200, json=payload, request=request)
+
+    provider = GitHubAppControllerAuth(
+        repository,
+        ControllerAppConfig(app_id, key_path),
+        httpx.Client(transport=httpx.MockTransport(auth_endpoint)),
+        "https://api.github.com",
+        lambda: clock[0],
+    )
+    return provider, minted
+
+
+def test_ci_observation_renews_wire_auth_per_page_and_separates_repositories(
+    tmp_path,
+):
+    first_clock = [1_800_000_000.0]
+    second_clock = [1_900_000_000.0]
+    first_provider, first_minted = _app_provider(tmp_path, "owner/primary", "ci-reader", 17, first_clock)
+    second_provider, second_minted = _app_provider(tmp_path, "owner/secondary", "audit-reader", 29, second_clock)
+    permissions = {"actions": "read", "checks": "read"}
+    first_initial = first_provider.credential_for("owner/primary", permissions)
+    second_initial = second_provider.credential_for("owner/secondary", permissions)
+    first, _, first_sends, first_head = _observe(
+        "owner/primary",
+        "ci-reader",
+        provider=first_provider,
+        after_first_page=lambda: first_clock.__setitem__(0, first_clock[0] + 121),
+    )
+    second, _, second_sends, second_head = _observe(
+        "owner/secondary",
+        "audit-reader",
+        provider=second_provider,
+        after_first_page=lambda: second_clock.__setitem__(0, second_clock[0] + 121),
+    )
+    first_renewed = first_provider.credential_for("owner/primary", permissions)
+    second_renewed = second_provider.credential_for("owner/secondary", permissions)
 
     for result, repository, head_sha in (
         (first, "owner/primary", first_head),
@@ -110,33 +196,45 @@ def test_ci_observation_renews_wire_auth_per_page_and_separates_repositories():
         assert {fact.conclusion for fact in result.observation.facts} == {CIConclusion.SUCCESS}
 
     assert first_sends == [
-        ("/repos/owner/primary/actions/runs", 1, "Bearer ci-reader-credential-1"),
-        ("/repos/owner/primary/actions/runs", 2, "Bearer ci-reader-credential-2"),
+        ("/repos/owner/primary/actions/runs", 1, "Bearer ci-reader-installation-1"),
+        ("/repos/owner/primary/actions/runs", 2, "Bearer ci-reader-installation-2"),
         (
             f"/repos/owner/primary/commits/{first_head}/check-runs",
             1,
-            "Bearer ci-reader-credential-3",
+            "Bearer ci-reader-installation-2",
         ),
     ]
     assert second_sends == [
         (
             "/repos/owner/secondary/actions/runs",
             1,
-            "Bearer audit-reader-credential-1",
+            "Bearer audit-reader-installation-1",
         ),
         (
             "/repos/owner/secondary/actions/runs",
             2,
-            "Bearer audit-reader-credential-2",
+            "Bearer audit-reader-installation-2",
         ),
         (
             f"/repos/owner/secondary/commits/{second_head}/check-runs",
             1,
-            "Bearer audit-reader-credential-3",
+            "Bearer audit-reader-installation-2",
         ),
     ]
-    assert {repository for repository, _ in first_provider.requests} == {"owner/primary"}
-    assert {repository for repository, _ in second_provider.requests} == {"owner/secondary"}
+    assert first_minted == [
+        "ci-reader-installation-1",
+        "ci-reader-installation-2",
+    ]
+    assert second_minted == [
+        "audit-reader-installation-1",
+        "audit-reader-installation-2",
+    ]
+    assert first_initial.authority_key == first_renewed.authority_key
+    assert second_initial.authority_key == second_renewed.authority_key
+    assert first_initial.permissions == first_renewed.permissions
+    assert second_initial.permissions == second_renewed.permissions
+    assert first_initial.installation_id == first_renewed.installation_id
+    assert second_initial.installation_id == second_renewed.installation_id
     assert {authorization for _, _, authorization in first_sends}.isdisjoint({authorization for _, _, authorization in second_sends})
 
 
