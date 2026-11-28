@@ -434,5 +434,8 @@ def test_claude_linker_does_not_adopt_retired_provider_binding(tmp_path):
     github = FakeGitHubClient()
     pr_data = {"number": 9303, "body": "Session ID: legacy-jules-id\nhttps://claude.ai/code/session_claude_owner", "user": {"login": "claude[bot]"}}
     with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
-        _link_supported_provider_pr_to_issue(repo_name, pr_data, github)
+        linked = _link_supported_provider_pr_to_issue(repo_name, pr_data, github)
+    assert linked is True
     assert "close #101" not in pr_data["body"]
+    assert "close #202" in pr_data["body"]
+    assert pr_data["_provider_task_id"] == "session_claude_owner"

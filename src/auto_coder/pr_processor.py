@@ -9709,18 +9709,28 @@ def _resolve_supported_provider_issue_number(repo_name: str, pr_data: Dict[str, 
     candidates = _extract_session_id_candidates(str(pr_data.get("body") or ""))
     manager = CloudManager(repo_name)
     ambiguous = False
+    foreign_provider_tasks: set[str] = set()
     for _, task_id in candidates:
         issues = manager.get_issues_by_session(task_id)
-        if len(issues) > 1:
+        supported_issues = tuple(issue_number for issue_number in issues if (binding := manager.get_binding(issue_number)) is not None and binding.provider == "claude-routine")
+        if issues and not supported_issues:
+            # A durable binding owned by a retired or different provider is
+            # negative provenance.  Do not let a later prose search reinterpret
+            # that same token as Claude ownership.
+            foreign_provider_tasks.add(task_id)
+            continue
+        if len(supported_issues) > 1:
             ambiguous = True
             continue
-        issue_number = manager.get_issue_by_session(task_id)
-        if issue_number:
+        if supported_issues:
+            issue_number = supported_issues[0]
             pr_data["_provider_task_id"] = task_id
             return issue_number
     if ambiguous:
         return None
     for _, task_id in candidates:
+        if task_id in foreign_provider_tasks:
+            continue
         if task_id.casefold() in {"true", "false", "none", "null"} or len(task_id) < 4:
             continue
         lookup = _find_issue_by_session_id_in_comments_detailed(repo_name, task_id, github_client)
