@@ -424,3 +424,15 @@ class TestPartialObservationsAndUpdateFailure:
         assert linked_third is True
         assert fake_client.pr_update_calls == []
         assert pr_data["body"].count(f"close #{issue_number}") == 1
+
+
+def test_claude_linker_does_not_adopt_retired_provider_binding(tmp_path):
+    repo_name = "owner/repo"
+    manager = CloudManager(repo_name, cloud_file_path=tmp_path / "cloud.csv")
+    manager.add_session(101, "legacy-jules-id", provider="jules")
+    manager.add_session(202, "session_claude_owner", provider="claude-routine")
+    github = FakeGitHubClient()
+    pr_data = {"number": 9303, "body": "Session ID: legacy-jules-id\nhttps://claude.ai/code/session_claude_owner", "user": {"login": "claude[bot]"}}
+    with patch("src.auto_coder.pr_processor.CloudManager", return_value=manager):
+        _link_supported_provider_pr_to_issue(repo_name, pr_data, github)
+    assert "close #101" not in pr_data["body"]

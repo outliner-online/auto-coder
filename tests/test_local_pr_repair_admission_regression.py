@@ -195,3 +195,17 @@ def test_disabled_repair_candidate_does_not_select_unlisted_default() -> None:
 def test_invalid_local_repair_policy_is_rejected(section) -> None:
     with pytest.raises(ValueError, match="backend_for_failed_pr"):
         LLMBackendConfiguration.load_from_dict({"backend_for_failed_pr": section, "backends": {"cloud-alias": {"backend_type": "codex-cloud"}}})
+
+
+@pytest.mark.parametrize("kind", [RepairKind.CI_FAILURE, RepairKind.MERGE_CONFLICT])
+def test_historical_jules_author_cannot_admit_local_repair(tmp_path: Path, repair_policy: Path, kind: RepairKind) -> None:
+    from auto_coder.ci_repair_authority import CIRepairAuthority
+
+    github = client()
+    metadata = github.get_pull_request_metadata_strict.return_value
+    metadata.update(number=17, user={"login": "google-labs-jules"})
+    jobs = LocalJobStore(tmp_path / "historical-jobs.sqlite3")
+    authority = CIRepairAuthority(True, "complete terminal failure", "H1", snapshot())
+    with pr_processor.local_pr_repair_context(pr_processor.LocalPRRepairContext(jobs, "execution-17")):
+        pr_processor._offer_selected_local_pr_repair("owner/repo", metadata, kind, github, ci_authority=authority, conflict_eligible=True)
+    assert jobs.discover_unsettled() == []

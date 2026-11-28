@@ -2476,7 +2476,7 @@ def _offer_selected_local_pr_repair(
         if kind is RepairKind.CI_FAILURE:
             local_route = explicit_local_checkout or _is_local_llm_pr(final_metadata, controller_identity)
         else:
-            local_route = explicit_local_checkout or not (_is_codex_or_claude_pr(final_metadata) or _is_dependabot_pr(final_metadata, controller_identity))
+            local_route = explicit_local_checkout or not (_has_retired_provider_bot_origin(final_metadata) or _is_codex_or_claude_pr(final_metadata) or _is_dependabot_pr(final_metadata, controller_identity))
         if not local_route:
             return False
         exhaustion = check_pr_repair_exhaustion(
@@ -4726,7 +4726,7 @@ def _start_mergeability_remediation(
             base = pr_details.get("base") or {}
             durable_snapshot = bool(head.get("sha") and head.get("ref") and (head.get("repo") or {}).get("full_name") and base.get("sha") and base.get("ref") and (base.get("repo") or {}).get("full_name"))
             controller_identity = client.get_authenticated_controller_identity(repo_name)
-            selected_local = not (_is_codex_or_claude_pr(pr_details) or _is_dependabot_pr(pr_details, controller_identity))
+            selected_local = not (_has_retired_provider_bot_origin(pr_details) or _is_codex_or_claude_pr(pr_details) or _is_dependabot_pr(pr_details, controller_identity))
             if durable_snapshot and selected_local:
                 admission = _offer_selected_local_pr_repair(
                     repo_name,
@@ -9689,7 +9689,7 @@ def _is_local_llm_pr(pr_data: Dict[str, Any], controller_identity: Optional[Any]
 
     # Exclude cloud LLM PRs and dependency bots. Explicit local origin markers
     # are evaluated by the dependency classifier without recursing here.
-    if _is_codex_or_claude_pr(pr_data):
+    if _has_retired_provider_bot_origin(pr_data) or _is_codex_or_claude_pr(pr_data):
         return False
     if _is_dependabot_pr(pr_data, controller_identity):
         return False
